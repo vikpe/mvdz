@@ -216,7 +216,7 @@ impl DemoCheck {
 pub fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
     let budget = Budget::new(limits);
     budget.input(b.len() as u64);
-    let threads = threads.max(1);
+    let threads = crate::util::threads(threads);
     let lay = scan_layout(&mut SliceSrc(b), threads, &budget)?;
     let size = lay.header.size;
     let _c = budget.alloc(size)?;

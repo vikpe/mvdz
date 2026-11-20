@@ -31,7 +31,8 @@
  *    (mvdz_read, mvdz_raw_size, ...) fails with MVDZ_E_INVALID and
  *    mvdz_close does nothing; return an error from the callback and close
  *    the handle after the outer call has returned.
- *  - `threads` arguments are worker threads (1 = none).
+ *  - `threads` arguments are worker threads (1 = none; 0 or less = one per
+ *    logical core).
  *  - `max_memory` arguments cap the memory one call or reader may hold, in
  *    bytes (0 = the default, 1 GiB on 64-bit targets). Exceeding it gives
  *    MVDZ_E_LIMIT.

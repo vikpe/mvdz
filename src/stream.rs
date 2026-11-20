@@ -108,7 +108,7 @@ impl<R: Read> Reader<Seq<R>> {
             at: 0,
             done: false,
             failed: None,
-            threads: threads.max(1),
+            threads: crate::util::threads(threads),
             budget,
             check,
         })
@@ -124,7 +124,8 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
         let mut src = SeekSrc(r);
         let len = crate::decode::Src::len(&mut src)?;
         budget.input(len);
-        let lay = scan_layout(&mut src, threads.max(1), &budget)?;
+        let threads = crate::util::threads(threads);
+        let lay = scan_layout(&mut src, threads, &budget)?;
         let check = Some(DemoCheck::default());
         Ok(Reader {
             r: Seekable(src.0),
@@ -136,7 +137,7 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
             at: 0,
             done: false,
             failed: None,
-            threads: threads.max(1),
+            threads: crate::util::threads(threads),
             budget,
             check,
         })

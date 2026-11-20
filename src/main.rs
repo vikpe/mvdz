@@ -99,7 +99,9 @@ fn parse(args: &[String]) -> Args {
             args.get(i).cloned().unwrap_or_else(|| usage())
         };
         match s.as_str() {
-            "-j" | "--threads" => a.threads = val().parse().unwrap_or_else(|_| usage()),
+            "-j" | "--threads" => {
+                a.threads = mvdz::util::threads(val().parse().unwrap_or_else(|_| usage()))
+            }
             "-r" | "--reps" => a.reps = val().parse().unwrap_or_else(|_| usage()),
             "--max-memory" => a.max_memory = Some(size(&val())),
             "--streams" => a.streams = Some(val()),

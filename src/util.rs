@@ -108,6 +108,18 @@ impl Crc {
 
 // ---------------------------------------------------------------- parallel helper
 
+/// The thread count a caller asked for: 0 means one per logical core (1
+/// where that is unknown or threads cannot be spawned).
+pub fn threads(n: usize) -> usize {
+    if n > 0 {
+        return n;
+    }
+    if !HAS_THREADS {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 /// True where the standard library can spawn threads.
 pub const HAS_THREADS: bool = !cfg!(target_family = "wasm");
 
@@ -168,6 +180,12 @@ mod tests {
         // 11 bytes
         let long = [0x80; 11];
         assert_eq!(super::Rd::new(&long).uv(), None);
+    }
+
+    #[test]
+    fn threads_zero_is_automatic() {
+        assert_eq!(super::threads(3), 3);
+        assert!(super::threads(0) >= 1);
     }
 
     #[test]

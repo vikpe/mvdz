@@ -173,7 +173,7 @@ pub unsafe extern "C" fn mvdz_decompress(
         let Some(b) = (unsafe { slice(buf, n) }) else {
             return MVDZ_E_INVALID;
         };
-        match api::decompress_with(b, threads.max(1) as usize, &limits(max_memory)) {
+        match api::decompress_with(b, crate::util::threads(threads.max(0) as usize), &limits(max_memory)) {
             Ok(v) => unsafe { give(v, out, out_n) },
             Err(e) => code(&e),
         }
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn mvdz_compress(
             return MVDZ_E_INVALID;
         };
         let cfg = Config {
-            threads: threads.max(1) as usize,
+            threads: crate::util::threads(threads.max(0) as usize),
             ..Default::default()
         };
         match api::compress(b, &cfg) {
@@ -388,7 +388,7 @@ pub unsafe extern "C" fn mvdz_open_memory(
         };
         let r = Reader::open(
             std::io::Cursor::new(b.to_vec()),
-            threads.max(1) as usize,
+            crate::util::threads(threads.max(0) as usize),
             &limits(max_memory),
         )
         .map(|r| RHandle {
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn mvdz_open_callbacks(
             sk: seek,
             user,
         };
-        let th = threads.max(1) as usize;
+        let th = crate::util::threads(threads.max(0) as usize);
         let r = if seek.is_some() {
             Reader::open(cb, th, &l).map(|r| RHandle {
                 raw_size: r.header().size as i64,

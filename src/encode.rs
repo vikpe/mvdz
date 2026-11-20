@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 /// How the encoder runs. Nothing here changes the file it writes.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Worker threads.
+    /// Worker threads (0: one per logical core).
     pub threads: usize,
     /// Decode the result and compare (falling back per segment on a
     /// mismatch). On by default; off only for experiments.
@@ -173,7 +173,7 @@ fn compress_inner(
     cfg: &Config,
     force_raw: bool,
 ) -> Result<(Vec<u8>, Info)> {
-    let threads = cfg.threads.max(1);
+    let threads = crate::util::threads(cfg.threads);
     // an empty demo has no segment
     let cuts = if src.is_empty() {
         vec![0]

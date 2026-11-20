@@ -15,15 +15,15 @@ container fields, five speed changes. See Decisions and Results per change.
 Also done: one fallback (ad53e50; see "One fallback" under Results per change), and
 measured at 1, 4 and 12 threads and in WebAssembly (see "Threads and WebAssembly").
 
-Tests: 44 pass, 9 fail, all nine on the list under "Known failing tests".
+Tests: 45 pass, 9 fail, all nine on the list under "Known failing tests".
 
 Whole session against `master`: see "Whole session" under Results per change.
 
 Next, in this order (nothing below is started):
 
-1. Decisions that change the file format, so it can freeze: the whole-demo CRC pass
-   (open question 2), which checksum (3).
-2. The other open questions (4 to 14).
+1. The open questions that can still change the file format: 4, 9, 12, 13 (and 14, to
+   specify).
+2. The other open questions (5 to 7, 10, 11).
 3. Finishing work, once the format no longer changes: regenerate the test vectors
    (clears 8 of the 9 failing tests), update the Go decoder (`interop/specdec`), rewrite
    FORMAT.md and README, update BENCHMARKS.md.
@@ -74,6 +74,7 @@ All implemented unless marked.
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
 | Fallback | One: a chunk the transform cannot code is one raw DEFLATE stream. A modelled stream is always rANS with the file's model; the per-stream back-end id, the store and DEFLATE back ends and the `stored` chunk coding are gone | Two chunk codings, one coder per stream kind; -0.056 % size |
 | Model over the decision limit (rule M2) | The encoder makes it smaller (own contexts with the fewest symbols join the fallback table) instead of dropping it | Without this a stream with no model sends every chunk of its file to DEFLATE: one demo in 500 grew 3.6 times, the output 1.9 % |
+| Thread count | The tool defaults to all logical cores, no cap, `-j` overrides; the library's default stays 1 and 0 means all logical cores (also in the C interface and `-j 0`) | The usual convention; a library should not take every core unasked; inside one file 12 threads give nothing over 4, so a cap would buy nothing |
 | Levels | One | No options |
 | Model step size | One value, 2 | Trying 4 as well was worth 77 bytes in 1.68 GB |
 | Model stored in a chunk | Removed; models only in the models block, also for one-chunk files | Costs 0.004 %; one model path |
@@ -81,7 +82,8 @@ All implemented unless marked.
 | Container fields | Fixed width: 17-byte chunk header, 4-byte models length | Costs 0.005 %; no variable-length integers to decode there |
 | Encoder self-check | On by default; the switch that turns it off stays | Every file written is proven to decode; it is a third of compression time, so experiments and benchmarks can skip it |
 | Per-chunk checksum | Keep | Subsets of a demo are decoded for analytics |
-| Checksum algorithm | CRC-32C for now; the choice is open (question 3) | Measured candidates under "Checksum candidates" |
+| Checksum algorithm | The CRC-32 of zlib (73bd49b) | In every standard library that has DEFLATE; `crc32fast` was already in the build; 80 lines of hand-written CRC-32C gone, one `unsafe` function with them |
+| Checks on decode | Both stay: each chunk's CRC-32 and the whole demo's (decided 2026-11-20) | The whole-demo check is the only one that catches chunks in the wrong order; the chunk check serves subset decodes and reports an error at the chunk |
 | SHA-256 on decode | Never recomputed; the trusted mode, `ReadOptions` and the C `flags` argument are gone | 9.1 % of a 4-thread decode with SHA instructions, 19.7 % of a batch decode without; a decoder needs no SHA-256 |
 | Size, duration, hashes | Fixed 64-byte header at the head | One read; completeness without an end record |
 | Checksum and SHA-256 in the header | Both stay (decided 2026-11-20) | Cheap to write: for a 10 MB demo the checksum is 0.8 ms and SHA-256 4.5 ms (28 ms without SHA instructions), once, at compress time |
@@ -111,7 +113,7 @@ Every integer is little-endian and of fixed width. The code calls a chunk a segm
 | 4 | 4 | version | 2; a reader refuses any value it does not know |
 | 8 | 8 | size | length of the original `.mvd` |
 | 16 | 8 | duration_ms | total demo time: the sum of all frame time bytes |
-| 24 | 8 | crc | CRC-32C of the original `.mvd` in the low 4 bytes; the high 4 are 0 |
+| 24 | 8 | crc | CRC-32 (as in zlib) of the original `.mvd` in the low 4 bytes; the high 4 are 0 |
 | 32 | 32 | sha256 | SHA-256 of the original `.mvd` |
 
 Rules:
@@ -121,8 +123,8 @@ Rules:
   The sums over all chunks equal the header's `size` and `duration_ms`.
 - The file is complete when `raw_len` sums to `size`. Bytes after that are an error. An
   empty demo has no chunk.
-- A full decode verifies each chunk's CRC-32C and frame time, and the whole demo's
-  CRC-32C, size and duration. A subset decode verifies the chunks it reads.
+- A full decode verifies each chunk's CRC-32 and frame time, and the whole demo's
+  CRC-32, size and duration. A subset decode verifies the chunks it reads.
 - SHA-256 is the demo's identity, computed at compress time. Decoding does not check
   it; a consumer that must authenticate it hashes the output.
 - `models` holds one rANS model per modelled stream that some chunk codes with it
@@ -155,20 +157,17 @@ What consumers do without META:
 
 ## Open questions
 
-All Viktor's to decide. 2 and 3 change the file format.
+All Viktor's to decide. Of those left, 4, 9, 12 and 13 can change the file format.
 
 1. Fallback paths: decided and implemented, see "One fallback".
-2. The whole-demo CRC pass: every chunk already has its own. 1.7 % of a 4-thread decode
-   before the speed changes.
-3. Checksum algorithm: keep CRC-32C, or the CRC-32 of zlib (in every standard library
-   that has DEFLATE; `crc32fast` is already in the build), XXH64 or XXH3-64. Measured
-   under "Checksum candidates". Recommended if anything changes: the CRC-32 of zlib.
+2. The whole-demo CRC pass: decided, it stays (see Decisions).
+3. Checksum algorithm: decided, the CRC-32 of zlib (see "Checksum: CRC-32").
 4. The stream table inside a chunk: fixed width too? Not measured.
 5. The C interface: keep it here, move it to its own crate, or remove it. 659 lines and
    60 of the 85 `unsafe` occurrences; whether any engine links it is not known.
 6. Encoder self-check default: on (as now) or off like `flac -V`. Recommended: on.
 7. Gzip input (`.mvd.gz`) accepted by compress?
-8. Thread count: automatic?
+8. Thread count: decided and implemented (see Decisions).
 9. Bits that can be flipped without changing the decoded demo: 784 of 30,696 in the
    probe's small file (256 are the header's SHA-256, 80 in the models block, 448 in the
    chunks); never with a different demo. Accept, or require every flip to be refused.
@@ -454,6 +453,30 @@ encode; release, fat LTO, `panic = "abort"`, stripped.
 - The first decode rounds without SIMD started with the load average at 10; their
   spread is 1 %.
 
+### Checksum: CRC-32 (2026-11-20, 73bd49b)
+
+The 500 demos, `mvdz bench -r 3 -j 4`, MB/s median [min-max]; WebAssembly as under
+"Threads and WebAssembly". Results in `~/dev/mvdz-bench/results/crc32.txt`.
+
+| Measure | CRC-32C (ad53e50) | CRC-32 of zlib (73bd49b) |
+|---|---|---|
+| Output, bytes | 341,169,945 | 341,169,945 |
+| Round trip | 500 of 500 | 500 of 500 |
+| Compress 1t | 36.2 [35.9-36.7] | 36.3 [36.1-37.1] |
+| Compress 4t | 91.3 [90.0-94.8] | 93.1 [92.3-97.0] |
+| Compress batch | 137.4 [133.4-139.2] | 140.2 [138.6-140.6] |
+| Decompress 1t | 84.9 [83.7-88.0] | 87.7 [86.5-88.0] |
+| Decompress 4t | 289.2 [286.7-305.8] | 312.2 [296.4-313.1] |
+| Decompress batch | 338.0 [322.1-342.8] | 343.0 [318.0-347.1] |
+| WebAssembly decode, no SIMD | 54.3 [53.8-54.5] | 56.0 [55.1-56.0] |
+| WebAssembly decode, SIMD | 73.5 [72.9-73.5] | 74.5 [74.4-74.9] |
+| WebAssembly module, no SIMD, bytes | 435,890 | 434,258 |
+
+- The differences are inside the spread between runs except Decompress 4t (+8 %), whose
+  earlier run started on a loaded machine. No measure is slower.
+- `mvdz info` writes the key `crc32` (was `crc32c`). Tests: 44 pass, 9 fail, the same
+  nine. README still says CRC-32C in two places (with the README rewrite).
+
 ### Checksum candidates (2026-11-20)
 
 One thread, whole demos, best of 5 passes, MB/s. Native: the first 500 demos, Rust
@@ -651,7 +674,7 @@ Not measured yet:
 
 ## Remaining implementation
 
-After the format decisions (open questions 2 and 3):
+After the format decisions (open questions 4, 9, 12, 13):
 
 1. Regenerate the vectors in `tests/vectors/`; hostile vectors for the header, checksums
    and chunk sums are already generated by `tests/vectors.rs`.

@@ -80,8 +80,8 @@ pub fn gunzip(b: &[u8], max: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decompresses a whole file with up to `threads` threads and the default
-/// limits.
+/// Decompresses a whole file with up to `threads` threads (0: one per
+/// logical core) and the default limits.
 pub fn decompress(b: &[u8], threads: usize) -> Result<Vec<u8>> {
     crate::decode::decompress(b, threads, &Limits::default())
 }
