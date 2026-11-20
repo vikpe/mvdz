@@ -10,7 +10,7 @@ use crate::proto::{Proto, frame_len};
 use crate::segment::{
     self, DEFLATE_LEVEL, Nums, SEGMENT, StreamStat, Walked, cut_points, frame_scan,
 };
-use crate::util::{crc32, par_map};
+use crate::util::{HAS_THREADS, crc32, par_map};
 use sha2::{Digest, Sha256};
 
 /// How the encoder runs. Nothing here changes the file it writes.
@@ -188,15 +188,26 @@ fn compress_inner(
         return Err(Error::Invalid("segment over 4 GiB"));
     }
     let mut proto = Proto::default();
-    let mut plans = plan(src, &cuts, &mut proto);
+    // the walk runs on one thread: with more, the demo's checksum and
+    // SHA-256 are computed beside it
+    let hashes = || (crc32(src), <[u8; 32]>::from(Sha256::digest(src)));
+    let (mut plans, (crc, sha256)) = if threads > 1 && HAS_THREADS {
+        std::thread::scope(|sc| {
+            let h = sc.spawn(hashes);
+            let plans = plan(src, &cuts, &mut proto);
+            (plans, h.join().expect("hashing"))
+        })
+    } else {
+        (plan(src, &cuts, &mut proto), hashes())
+    };
     if plans.iter().any(|p| p.dur_ms > u32::MAX as u64) {
         return Err(Error::Invalid("segment over 2^32 ms"));
     }
     let header = Header {
         size: src.len() as u64,
         duration_ms: plans.iter().map(|p| p.dur_ms).sum(),
-        crc: crc32(src),
-        sha256: Sha256::digest(src).into(),
+        crc,
+        sha256,
     };
     let (outer, inner) = if nseg >= threads {
         (threads, 1)

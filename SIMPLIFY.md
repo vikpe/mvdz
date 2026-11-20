@@ -513,6 +513,56 @@ only), with no population count. Same output.
   one-thread decode, a fixed cost per file; the decode profile is otherwise flat (no
   source line above 4.4 %).
 
+### Where the time goes at 4 threads (2026-11-21, table-search change included)
+
+The command-line tool with `-j 4`, one file at a time, the first 120 demos (399 MB):
+compress 5.41 s with 2.3 of 4 cores busy, decompress 1.93 s with 2.4. Wall-clock share
+from `perf` samples in 2 ms slots (`~/dev/mvdz-bench/scripts/stages.py`; compress
+recorded with `--call-graph dwarf`). File reading and writing and process start are in
+these figures; `mvdz bench` works in memory and leaves them out.
+
+| Compress | Wall | CPU | Threads |
+|---|---|---|---|
+| Walk | 20.8 % | 5.6 % | one |
+| Self-check (numeric 10.1, walk 8.5, build models 4.6, rest 1.1) | 24.3 % | 34.0 % | all |
+| Memory (page faults, allocator), process start and exit | 14.6 % | 10.1 % | mixed |
+| Encode (rANS 6.2, DEFLATE 3.7, making symbols 2.2) | 12.1 % | 18.4 % | all |
+| Train (build models 4.6, count 2.4, making symbols 2.1) | 9.1 % | 15.3 % | all |
+| Numeric predictors | 7.1 % | 11.9 % | all |
+| File reading and writing | 5.1 % | 1.8 % | one |
+| SHA-256 | 2.6 % | 0.9 % | one |
+| CRC-32, other, idle | 4.3 % | 2.0 % | |
+
+| Decompress | Wall | CPU | Threads |
+|---|---|---|---|
+| Numeric streams | 26.4 % | 29.7 % | all |
+| Walk (structural streams, writing the bytes) | 21.2 % | 31.1 % | all |
+| File reading and writing | 20.5 % | 5.2 % | one |
+| Memory, process start and exit | 12.7 % | 9.0 % | mixed |
+| Build models | 10.8 % | 18.7 % | all |
+| Inflate of the blobs | 1.8 % | 3.1 % | all |
+| CRC-32 (whole demo 1.0, chunks 0.1) | 1.1 % | 0.6 % | |
+| Other, idle | 5.6 % | 2.5 % | |
+
+### Cheap wins tried (2026-11-21, not committed)
+
+On the 120 demos with `-j 4` (wall, median) and the 500 with `bench -r 3 -j 4`.
+
+- Done: the demo's CRC-32 and SHA-256 are computed on a second thread while the walk
+  runs (only with more than one thread). Compress on the 120 demos 5.50 s to 5.25 s;
+  on the 500 demos Compress 4t 97.5 [95.0-98.2] to 101.5 [100.0-103.7] MB/s. Same
+  files. One thread and batch are untouched.
+- No gain: the `mimalloc` allocator on glibc. Compress 5.50 s to 5.71 s, decompress
+  1.92 s to 2.45 s.
+- Found, a behaviour question: the tool calls `fsync` twice for each output file (the
+  file, its directory): 2.9 ms a file on this NVMe disk, 0.34 s of the 1.92 s of
+  decompression (18 %) and 0.32 s of the 5.5 s of compression (6 %). gzip and zstd do
+  not sync by default; xz does since 5.8, with `--no-sync` to turn it off.
+- Not done, larger: run the numeric predictors of a chunk while the next chunk is
+  walked (the predictors are 7.1 % of compression wall time, the walk 20.8 % on one
+  thread); a symbols-only pass for training (`num_syms` also packs the mantissa bits
+  there, unused; about 1 %).
+
 ### Checksum candidates (2026-11-20)
 
 One thread, whole demos, best of 5 passes, MB/s. Native: the first 500 demos, Rust
