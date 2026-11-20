@@ -342,8 +342,12 @@ fn large_tables() {
     assert_eq!(secs[1].0, K_TABLES);
     let m = wide_model(512);
     let mut t = Vec::new();
-    put_uv(&mut t, mvdz::streams::N_LAZY as u64);
-    for sid in 0..mvdz::streams::N_LAZY {
+    // a model for every structural stream
+    let lazy: Vec<usize> = (0..mvdz::streams::N_LAZY)
+        .filter(|&sid| mvdz::streams::is_lazy(sid))
+        .collect();
+    put_uv(&mut t, lazy.len() as u64);
+    for sid in lazy {
         put_uv(&mut t, sid as u64);
         put_uv(&mut t, m.len() as u64);
         t.extend_from_slice(&m);
@@ -371,7 +375,7 @@ fn large_tables() {
         "TABLES checks took {:?}",
         t0.elapsed()
     );
-    // the models: 35 x 513 LUTs of 16 KiB, about 280 MiB
+    // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
     let lim = mvdz::Limits {
         memory: 128 << 20,
         ..Default::default()

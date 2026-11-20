@@ -103,12 +103,6 @@ pub struct UcRec {
     pub grid: u8,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct StlRec {
-    pub off: u32,
-    pub key: u16,
-}
-
 /// An append-only record buffer with one writer (the walker) and any
 /// number of concurrent readers (the numeric groups) that see a published
 /// prefix. A fixed-capacity buffer never moves: the writer writes through a
@@ -255,7 +249,6 @@ pub struct Recs {
     pub pe: RecBuf<PeRec>,
     pub snd: RecBuf<SndRec>,
     pub te: RecBuf<TeRec>,
-    pub stl: RecBuf<StlRec>,
     pub uc: RecBuf<UcRec>,
 }
 
@@ -267,7 +260,6 @@ impl Recs {
             pe: RecBuf::growable(n / 32),
             snd: RecBuf::growable(n / 400),
             te: RecBuf::growable(n / 400),
-            stl: RecBuf::growable(n / 2000),
             uc: RecBuf::growable(0),
         }
     }
@@ -277,7 +269,6 @@ impl Recs {
         pe: usize,
         snd: usize,
         te: usize,
-        stl: usize,
         uc: usize,
     ) -> crate::error::Result<Recs> {
         Ok(Recs {
@@ -285,7 +276,6 @@ impl Recs {
             pe: RecBuf::fixed(pe)?,
             snd: RecBuf::fixed(snd)?,
             te: RecBuf::fixed(te)?,
-            stl: RecBuf::fixed(stl)?,
             uc: RecBuf::fixed(uc)?,
         })
     }
@@ -294,7 +284,6 @@ impl Recs {
         self.pe.finish();
         self.snd.finish();
         self.te.finish();
-        self.stl.finish();
         self.uc.finish();
     }
 }
@@ -473,6 +462,62 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         }
     }
 
+    /// A byte of the demo kept in blob stream `sid`.
+    #[inline(always)]
+    fn p8(&mut self, sid: usize) -> u8 {
+        if ENC {
+            let v = self.rd();
+            self.io.put_blob(sid, &[v]);
+            v
+        } else {
+            let v = self.tag(sid, 0);
+            self.wr(v);
+            v
+        }
+    }
+
+    /// A byte of the demo kept in blob stream `sid` as (v - pred) mod 256.
+    #[inline(always)]
+    fn pr8(&mut self, sid: usize, pred: u8) -> u8 {
+        if ENC {
+            let v = self.rd();
+            self.io.put_blob(sid, &[v.wrapping_sub(pred)]);
+            v
+        } else {
+            let v = self.tag(sid, 0).wrapping_add(pred);
+            self.wr(v);
+            v
+        }
+    }
+
+    /// n little-endian bytes of the demo kept in blob stream `sid`.
+    #[inline]
+    fn pn(&mut self, sid: usize, n: usize) -> u32 {
+        let mut v = 0u32;
+        for k in 0..n {
+            v |= (self.p8(sid) as u32) << (8 * k);
+        }
+        v
+    }
+
+    /// A byte that is not part of the demo (a tag, a length byte), kept in
+    /// blob stream `sid`: encode stores `v`, decode returns the stored byte.
+    #[inline(always)]
+    fn tag(&mut self, sid: usize, v: u8) -> u8 {
+        if ENC {
+            self.io.put_blob(sid, &[v]);
+            v
+        } else {
+            match self.io.take_blob(sid, 1) {
+                Some(b) => b[0],
+                None => {
+                    self.err = true;
+                    0
+                }
+            }
+        }
+    }
+
     /// n little-endian bytes, the byte index in context bits 14-15.
     #[inline]
     fn bn(&mut self, sid: usize, ctx: u32, n: usize) -> u32 {
@@ -554,7 +599,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         match ty & 7 {
             2 => self.copy_blob(SET, 8),
             3 => {
-                let mask = self.bn(MASK, 0, 4);
+                let mask = self.pn(MASK, 4);
                 self.length_prefixed(ty, mask == 0);
             }
             1 | 4 | 5 | 6 => self.length_prefixed(ty, false),
@@ -604,11 +649,9 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     fn escape(&mut self, end: usize) {
         if ENC {
             let mut n = (end - self.p) as u32;
-            let mut k = 0u32;
             loop {
                 let b = (n & 0x7f) as u8 | if n >= 0x80 { 0x80 } else { 0 };
-                self.io.byte(ESCLEN, k, b);
-                k += 1;
+                self.tag(ESCLEN, b);
                 n >>= 7;
                 if n == 0 {
                     break;
@@ -618,7 +661,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         } else {
             let mut n = 0u32;
             for k in 0..5u32 {
-                let b = self.io.byte(ESCLEN, k, 0);
+                let b = self.tag(ESCLEN, 0);
                 n |= ((b & 0x7f) as u32) << (7 * k);
                 if b < 0x80 {
                     break;
@@ -735,27 +778,20 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 self.st[t][i as usize] = v;
             }
             38 => {
-                let t = (self.target & 31) as u16;
-                let i = self.b8(STL_IDX, self.prev_cmd as u32);
-                let off = self.reserve(4);
-                if !self.recs.stl.push(StlRec {
-                    off,
-                    key: t << 8 | i as u16,
-                }) {
-                    self.err = true;
-                }
+                self.p8(STL_IDX);
+                self.copy_blob(STL_VAL, 4);
             }
             6 => self.sound(),
             23 => self.temp_entity(),
             8 => {
-                self.b8(PR_LEVEL, 0);
+                self.p8(PR_LEVEL);
                 self.generic(TEXT, 9);
             }
             9 | 26 => {
                 self.generic(TEXT, 9);
             }
             14 => {
-                self.bn(FRAGS, 0, 3);
+                self.copy_blob(FRAGS, 3);
             }
             36 | 37 | 53 => {
                 self.generic(PING, cmd);
@@ -825,7 +861,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     }
 
     fn playerinfo(&mut self) {
-        let num = self.b8(PI_NUM, self.pi_prev_num as u32);
+        let num = self.p8(PI_NUM);
         self.pi_prev_num = num;
         let ps = self.pl[num as usize];
         let flags = self.pi_flags(ps.flags);
@@ -851,13 +887,13 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             }
         }
         if flags & DF_MODEL != 0 {
-            self.b8(PI_MODEL, 0);
+            self.p8(PI_MODEL);
         }
         if flags & DF_SKIN != 0 {
-            self.b8(PI_SKIN, 0);
+            self.p8(PI_SKIN);
         }
         if flags & DF_EFFECTS != 0 {
-            self.b8(PI_EFF, 0);
+            self.p8(PI_EFF);
         }
         let mut wf = ps.wf;
         if flags & DF_WEAPONFRAME != 0 {
@@ -881,7 +917,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
 
     fn packet_entities(&mut self, delta: bool) {
         if delta {
-            let h = self.r8(PE_HDR, 0, self.last_hdr);
+            let h = self.pr8(PE_HDR, self.last_hdr);
             self.last_hdr = h;
         }
         self.pe_prev_d = 0;
@@ -982,22 +1018,22 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         self.ent[num].last_pkt = self.pkt_no;
         let mut es = self.ent[num];
         if bits & U_MODEL != 0 {
-            es.model = self.b8(PE_MODEL, es.model as u32);
+            es.model = self.p8(PE_MODEL);
         } else if more & X_MODELDBL != 0 {
-            self.bn(PE_MODEL, 0x100, 2);
+            self.pn(PE_MODEL, 2);
         }
         let model = es.model as u32;
         if bits & U_FRAME != 0 {
-            es.frame = self.r8(PE_FRAME, model, es.frame);
+            es.frame = self.pr8(PE_FRAME, es.frame);
         }
         if bits & U_COLORMAP != 0 {
-            self.b8(PE_MISC, model);
+            self.p8(PE_MISC);
         }
         if bits & U_SKIN != 0 {
-            self.b8(PE_MISC, model | 1 << 8);
+            self.p8(PE_MISC);
         }
         if bits & U_EFFECTS != 0 {
-            self.b8(PE_MISC, model | 2 << 8);
+            self.p8(PE_MISC);
         }
         let mut rb = 0u16;
         for (i, (o, a)) in [
@@ -1060,16 +1096,16 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             self.err = true;
         }
         if more & X_TRANS != 0 && self.proto.fte & FTE_TRANS != 0 {
-            self.b8(PE_MISC, 0x3000);
+            self.p8(PE_MISC);
         }
         if more & X_SCALE != 0 {
-            self.b8(PE_MISC, 0x3001);
+            self.p8(PE_MISC);
         }
         if more & X_FATNESS != 0 {
-            self.b8(PE_MISC, 0x3002);
+            self.p8(PE_MISC);
         }
         if more & X_COLOURMOD != 0 && self.proto.fte & FTE_COLOURMOD != 0 {
-            self.bn(PE_MISC, 0x3003, 3);
+            self.pn(PE_MISC, 3);
         }
         self.ent[num] = es;
     }
@@ -1078,10 +1114,10 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         let lo = self.b8(SND_CH, self.prev_cmd as u32) as u32;
         let ch = lo | (self.b8(SND_CH, 1 << 8 | lo) as u32) << 8;
         if ch & 0x8000 != 0 {
-            self.b8(SND_MISC, 0);
+            self.p8(SND_MISC);
         }
         if ch & 0x4000 != 0 {
-            self.b8(SND_MISC, 1);
+            self.p8(SND_MISC);
         }
         let ent = ((ch >> 3) & 1023) as usize;
         let num = self.b8(SND_NUM, (ch & 7) | (ent.min(33) as u32) << 3);
@@ -1117,11 +1153,11 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         if c != 2 {
             match t {
                 5 | 6 | 9 => {
-                    self.bn(TE_MISC, t as u32, 2);
+                    self.pn(TE_MISC, 2);
                     self.copy_blob(TEF, 6 * c);
                 }
                 2 | 12 => {
-                    self.b8(TE_MISC, t as u32 | 0x100);
+                    self.p8(TE_MISC);
                     self.copy_blob(TEF, 3 * c);
                 }
                 _ => self.copy_blob(TEF, 3 * c),
@@ -1130,7 +1166,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         }
         match t {
             5 | 6 | 9 => {
-                let e = self.bn(TE_MISC, t as u32, 2) as usize;
+                let e = self.pn(TE_MISC, 2) as usize;
                 let refs = if (1..=32).contains(&e) {
                     self.pl_off[e - 1]
                 } else {
@@ -1142,7 +1178,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 }
             }
             2 | 12 => {
-                self.b8(TE_MISC, t as u32 | 0x100);
+                self.p8(TE_MISC);
                 let off = self.reserve(6);
                 if !self.recs.te.push(TeRec {
                     off,
@@ -1175,7 +1211,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             if ENC {
                 let rem = end - self.p;
                 if rem == 0 {
-                    self.io.byte(HIDTAG, 0, 2);
+                    self.tag(HIDTAG, 2);
                     return;
                 }
                 let mut ok = rem >= 6;
@@ -1184,13 +1220,13 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                     ok = bl >= 1 && bl <= (rem - 6) as u64;
                 }
                 if !ok {
-                    self.io.byte(HIDTAG, 0, 0);
+                    self.tag(HIDTAG, 0);
                     self.escape(end);
                     return;
                 }
-                self.io.byte(HIDTAG, 0, 1);
+                self.tag(HIDTAG, 1);
             } else {
-                match self.io.byte(HIDTAG, 0, 0) {
+                match self.tag(HIDTAG, 0) {
                     0 => {
                         self.escape(0);
                         return;
@@ -1203,12 +1239,10 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                     }
                 }
             }
-            let bl = self.bn(HIDLEN, 0, 4);
-            let ty = self.bn(HIDTYPE, 0, 2);
+            let bl = self.pn(HIDLEN, 4);
+            let ty = self.pn(HIDTYPE, 2);
             if ty == 7 && bl == 8 {
-                for k in 0..4 {
-                    self.bn(HIDDMG, k, 2);
-                }
+                self.copy_blob(HIDDMG, 8);
             } else if ty == 1 && bl == 23 {
                 self.ucmd();
             } else if ty == 3 && self.dinfo {

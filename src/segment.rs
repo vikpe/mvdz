@@ -740,9 +740,8 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         ents.push((id, be as u8, count, len));
     }
     let blob_len = r.uz().ok_or(te)?;
-    // the blob streams decode to at most the segment; a blob body exactly
-    // when there are blob bytes
-    if blob_total > raw_len.saturating_add(16) || (blob_total == 0) != (blob_len == 0) {
+    // a blob body exactly when there are blob bytes
+    if (blob_total == 0) != (blob_len == 0) {
         return bad("blob body");
     }
     total = total.checked_add(blob_len).ok_or(te)?;
@@ -794,7 +793,6 @@ pub fn decode(
         + 16 * cnt(PE_BITS)
         + 20 * cnt(SND_NUM)
         + 20 * cnt(TE_TYPE)
-        + 8 * cnt(STL_IDX)
         + 8 * (cnt(UC) / UC_MIN_SYMS);
     let mut scratch = recs_bytes as u64;
     for &(id, be, count, _) in &h.ents {
@@ -839,7 +837,6 @@ pub fn decode(
         cnt(PE_BITS),
         cnt(SND_NUM),
         cnt(TE_TYPE),
-        cnt(STL_IDX),
         cnt(UC) / UC_MIN_SYMS,
     )?;
     let buf = Buf::new(dst);

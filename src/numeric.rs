@@ -216,7 +216,6 @@ pub enum Group {
     PiAAll,
     /// all three entity axes in one pass
     PeAll,
-    Stl,
     /// usercmd angles on the grid
     Uc,
     Snd,
@@ -224,7 +223,7 @@ pub enum Group {
 }
 
 /// Wave 1, split per axis (for multi-threaded decoding).
-pub const WAVE1: [Group; 11] = [
+pub const WAVE1: [Group; 10] = [
     Group::PiA(1),
     Group::PiA(0),
     Group::PiO(0),
@@ -234,15 +233,13 @@ pub const WAVE1: [Group; 11] = [
     Group::PeO(1),
     Group::PeO(2),
     Group::PiA(2),
-    Group::Stl,
     Group::Uc,
 ];
 /// Wave 1 for pipelined decoding next to the walker (one task per worker).
-pub const WAVE1_PIPE: [Group; 5] = [
+pub const WAVE1_PIPE: [Group; 4] = [
     Group::PiAAll,
     Group::PiOAll,
     Group::PeAll,
-    Group::Stl,
     Group::Uc,
 ];
 pub const WAVE2: [Group; 2] = [Group::Snd, Group::Te];
@@ -263,7 +260,6 @@ impl Group {
             Group::PeAll => &[PE_OX, PE_F0, PE_OX + 1, PE_F0 + 1, PE_OX + 2, PE_F0 + 2],
             Group::PiOAll => &[PI_OX, PI_F0, PI_OX + 1, PI_F0 + 1, PI_OX + 2, PI_F0 + 2],
             Group::PiAAll => &[PI_AP, PI_AP + 1, PI_AP + 2],
-            Group::Stl => &[STL_VAL],
             Group::Uc => &[UC_A],
             Group::Snd => &[SND_O],
             Group::Te => &[TE_O],
@@ -350,7 +346,6 @@ impl Group {
                     }
                 }
             }
-            Group::Stl => stl::<ENC, IO>(recs, buf, io),
             Group::Uc => uc::<ENC, IO>(recs, buf, io),
             Group::Snd => snd::<ENC, IO>(recs, buf, io),
             Group::Te => te::<ENC, IO>(recs, buf, io),
@@ -531,20 +526,6 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
         s.res = 0;
         s.fprev = s.flast;
         s.fres = 0;
-    }
-}
-
-fn stl<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
-    let mut last = vec![0u32; 1 << 13];
-    let mut lres = vec![0i32; 1 << 13];
-    for r in recs.stl.feed() {
-        let k = (r.key & 0x1fff) as usize;
-        let c = NCtx {
-            f: [r.key as u8, q(lres[k]), 0, 0, 0, 0],
-        };
-        let (v, d) = x32::<ENC, IO>(buf, r.off, last[k], io, 0, c);
-        last[k] = v;
-        lres[k] = d;
     }
 }
 

@@ -1,8 +1,11 @@
 //! Stream ids. Every byte of the input lands in exactly one
 //! stream: a lazy structural byte stream (coded with a side context, decoded
-//! one symbol at a time by the walker), a blob stream (decoded up front,
-//! read through the command sizer), or a numeric stream (residuals coded by
-//! the numeric groups after the walk).
+//! one symbol at a time by the walker), a blob stream (plain bytes, decoded
+//! up front), or a numeric stream (residuals coded by the numeric groups
+//! after the walk).
+//!
+//! Ids below 80 were all structural or numeric streams once; the ones in
+//! [`PLAIN`] have no model and are blob streams.
 
 pub const TIME: usize = 0;
 pub const TYPE: usize = 1;
@@ -79,17 +82,36 @@ pub const DINFO: usize = 79;
 pub const GEN_BASE: usize = 128;
 pub const N_STREAMS: usize = GEN_BASE + 256;
 
+/// Blob streams with an id below 80: fields whose model saved too little to
+/// be worth specifying (SIMPLIFY.md).
+pub const PLAIN: [usize; 20] = [
+    MASK, ESCLEN, HIDTAG, HIDLEN, HIDTYPE, HIDDMG, PI_NUM, PI_MODEL, PI_SKIN, PI_EFF, PE_HDR,
+    PE_MODEL, PE_FRAME, PE_MISC, STL_IDX, SND_MISC, TE_MISC, PR_LEVEL, FRAGS, STL_VAL,
+];
+/// Bit `id` set: `id` is in [`PLAIN`].
+const PLAIN_MASK: u64 = {
+    let (mut m, mut i) = (0u64, 0);
+    while i < PLAIN.len() {
+        m |= 1 << PLAIN[i];
+        i += 1;
+    }
+    m
+};
+#[inline]
+fn is_plain(id: usize) -> bool {
+    id < 64 && PLAIN_MASK >> id & 1 != 0
+}
 #[inline]
 pub fn is_lazy(id: usize) -> bool {
-    id < N_LAZY
+    id < N_LAZY && !is_plain(id)
 }
 #[inline]
 pub fn is_num(id: usize) -> bool {
-    (NUM_BASE..N_NUM_END).contains(&id)
+    (NUM_BASE..N_NUM_END).contains(&id) && !is_plain(id)
 }
 #[inline]
 pub fn is_blob(id: usize) -> bool {
-    (RAW..N_STREAMS).contains(&id) && !(TEF + 1..GEN_BASE).contains(&id)
+    is_plain(id) || (RAW..N_STREAMS).contains(&id) && !(TEF + 1..GEN_BASE).contains(&id)
 }
 
 pub fn name(id: usize) -> String {
