@@ -48,11 +48,6 @@ pub const DEFLATE_NORMAL: u32 = 9;
 /// DEFLATE level of the fast level's blob body, streams, untransformed
 /// segments and META.
 pub const DEFLATE_FAST: u32 = 6;
-/// DEFLATE level of an attachment's probe: an attachment that does not
-/// shrink by 1/32 at this level is stored without trying `DEFLATE_ATTACH`.
-pub const DEFLATE_ATTACH_PROBE: u32 = 1;
-/// DEFLATE level of attachments that pass the probe.
-pub const DEFLATE_ATTACH: u32 = 9;
 
 impl Level {
     /// The DEFLATE level of this level's blob body, streams, untransformed

@@ -1,10 +1,10 @@
-//! Metadata, census, attachments and forward compatibility. Synthetic
+//! Metadata, census and forward compatibility. Synthetic
 //! demos are built here, so most of these run without the demo cache.
 
 mod common;
 use common::*;
 use mvdz::format::{self, K_TRAILER, TRAILER_LEN};
-use mvdz::{Attachment, Level};
+use mvdz::Level;
 use std::io::Cursor;
 
 fn c0() -> mvdz::Config {
@@ -150,309 +150,22 @@ fn census_json_cannot_inject() {
     }
 }
 
-// ---------------------------------------------------------------- attachments
-
-fn att(name: &str, mime: &str, kv: &[(&str, &str)], data: &[u8]) -> Attachment {
-    Attachment {
-        name: name.into(),
-        mime: mime.into(),
-        kv: kv
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-        data: data.to_vec(),
-    }
-}
-
-fn body_end(c: &[u8]) -> (format::Trailer, &[u8]) {
-    let t = format::Trailer::parse_body(&c[c.len() - 40..]).unwrap();
-    (t, &c[..t.body_end as usize])
-}
-
-#[test]
-fn attachments_round_trip_and_leave_the_demo_alone() {
-    let demo = synthetic(&[(0, "{}")], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
-    let (t0, body0) = body_end(&c);
-    let mut rng = Rng(3);
-    let voice: Vec<u8> = (0..300_000).map(|_| rng.next() as u8).collect();
-    let vtt = b"WEBVTT\n\n00:00.000 --> 00:02.000\n<v alice>go quad\n".repeat(200);
-    let adds = [
-        att(
-            "voice/alice.opus",
-            "audio/ogg; codecs=opus",
-            &[
-                ("x-role", "voice"),
-                ("x-player", "alice"),
-                ("x-slot", "0"),
-                ("x-time_offset_ms", "-1500"),
-            ],
-            &voice,
-        ),
-        att(
-            "transcript/alice.vtt",
-            "text/vtt",
-            &[
-                ("x-role", "transcript"),
-                ("x-player", "alice"),
-                ("x-time_offset_ms", "-1500"),
-            ],
-            &vtt,
-        ),
-        // unknown role, unknown keys and an unknown type are preserved
-        att(
-            "x/odd.bin",
-            "application/x-unknown",
-            &[("x-role", "hologram"), ("x-custom", "42")],
-            b"\x00\x01\x02",
-        ),
-    ];
-    let c2 = mvdz::update_attachments_bytes(&c, &[], &adds).unwrap();
-    let (t2, body2) = body_end(&c2);
-    assert_eq!(body0, body2, "demo part copied byte for byte");
-    assert_eq!(
-        (t2.index_off, t2.meta_off, t2.body_end),
-        (t0.index_off, t0.meta_off, t0.body_end)
-    );
-    assert_eq!(readers_agree(&c2, "attachments").unwrap(), demo);
-    let list = mvdz::list_attachments(Cursor::new(&c2), "").unwrap();
-    assert_eq!(list.len(), 3);
-    assert_eq!(list[0].kv, adds[0].kv);
-    assert_eq!(list[2].kv, adds[2].kv);
-    assert_eq!(list[2].mime, "application/x-unknown");
-    assert_eq!(
-        list[0].codec,
-        format::A_STORE,
-        "incompressible data is stored"
-    );
-    assert_eq!(list[1].codec, format::A_DEFLATE, "text is stored compressed");
-    assert_eq!(
-        mvdz::list_attachments(Cursor::new(&c2), "transcript/")
-            .unwrap()
-            .len(),
-        1
-    );
-    for a in &adds {
-        assert_eq!(
-            mvdz::read_attachment(Cursor::new(&c2), &a.name).unwrap(),
-            a.data
-        );
-    }
-    // replace one, remove one; the others are copied unchanged
-    let v2 = att(
-        "voice/alice.opus",
-        "audio/ogg; codecs=opus",
-        &[("x-role", "voice")],
-        b"new",
-    );
-    let c3 =
-        mvdz::update_attachments_bytes(&c2, &["x/odd.bin"], std::slice::from_ref(&v2)).unwrap();
-    let l3 = mvdz::list_attachments(Cursor::new(&c3), "").unwrap();
-    assert_eq!(
-        l3.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-        ["transcript/alice.vtt", "voice/alice.opus"]
-    );
-    assert_eq!(
-        mvdz::read_attachment(Cursor::new(&c3), "voice/alice.opus").unwrap(),
-        b"new"
-    );
-    assert_eq!(
-        mvdz::read_attachment(Cursor::new(&c3), "transcript/alice.vtt").unwrap(),
-        vtt
-    );
-    assert_eq!(body_end(&c3).1, body0);
-    assert_eq!(mvdz::decompress(&c3, 1).unwrap(), demo);
-    // remove all: back to the original file
-    let c4 =
-        mvdz::update_attachments_bytes(&c3, &["voice/alice.opus", "transcript/alice.vtt"], &[])
-            .unwrap();
-    assert_eq!(c4, c);
-    assert!(matches!(
-        mvdz::read_attachment(Cursor::new(&c4), "voice/alice.opus"),
-        Err(mvdz::Error::NotFound)
-    ));
-    // duplicate or empty names are refused (correctness review F7)
-    let dup = [att("a", "", &[], b"1"), att("a", "", &[], b"2")];
-    assert!(matches!(
-        mvdz::update_attachments_bytes(&c, &[], &dup),
-        Err(mvdz::Error::Invalid(_))
-    ));
-    assert!(mvdz::update_attachments_bytes(&c, &[], &[att("", "", &[], b"1")]).is_err());
-}
-
-#[test]
-fn readers_skip_attachments_without_reading_them() {
-    // a large attachment: the sequential reader skips it unread
-    let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
-    let big: Vec<u8> = (0..20_000_000u32)
-        .map(|i| (i.wrapping_mul(2654435761) >> 7) as u8)
-        .collect();
-    let c2 = mvdz::update_attachments_bytes(&c, &[], &[att("big", "", &[], &big)]).unwrap();
-    let limits = mvdz::Limits {
-        memory: 4 << 20,
-        ..Default::default()
-    };
-    let mut out = Vec::new();
-    let mut r = mvdz::Reader::new(Cursor::new(&c2), 1, &limits.into()).unwrap();
-    std::io::Read::read_to_end(&mut r, &mut out).unwrap();
-    assert_eq!(out, demo);
-    // reading the attachment itself needs the memory
-    assert!(matches!(
-        mvdz::read_attachment_with(Cursor::new(&c2), "big", &limits),
-        Err(mvdz::Error::Limit(_))
-    ));
-}
-
-fn tmpdir(tag: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("mvdz-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-// the lock-and-rename update is POSIX behaviour (FORMAT.md §10, Updating)
-#[cfg(unix)]
-#[test]
-fn attachment_update_on_disk() {
-    let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
-    let dir = tmpdir("att");
-    let p = dir.join("a.mvdz");
-    std::fs::write(&p, &c).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-    }
-    let a = att(
-        "analysis/r.v1",
-        "application/vnd.example.result+json",
-        &[("x-role", "analysis")],
-        &vec![7u8; 600_000],
-    );
-    mvdz::update_attachments(&p, &[], std::slice::from_ref(&a)).unwrap();
-    let b = std::fs::read(&p).unwrap();
-    assert_eq!(
-        mvdz::read_attachment(Cursor::new(&b), "analysis/r.v1").unwrap(),
-        a.data
-    );
-    assert_eq!(
-        std::fs::read_dir(&dir).unwrap().count(),
-        1,
-        "no temporary file left"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-            0o640,
-            "permissions kept"
-        );
-        // through a symlink: the target is updated, the link stays a link
-        let l = dir.join("link.mvdz");
-        std::os::unix::fs::symlink(&p, &l).unwrap();
-        mvdz::update_attachments(&l, &["analysis/r.v1"], &[]).unwrap();
-        assert!(
-            std::fs::symlink_metadata(&l)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(std::fs::read(&p).unwrap(), c);
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Concurrent updaters (threads of one process) do not lose each other's
-/// attachments (robustness review 8: 44 of 60 updates were lost).
-// replacing a file that another handle holds open is POSIX behaviour
-#[cfg(unix)]
-#[test]
-fn concurrent_attachment_updates() {
-    let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
-    let dir = tmpdir("race");
-    let p = dir.join("r.mvdz");
-    std::fs::write(&p, &c).unwrap();
-    std::thread::scope(|s| {
-        for t in 0..4 {
-            let p = &p;
-            s.spawn(move || {
-                for k in 0..8 {
-                    let a = att(
-                        &format!("t{t}/{k}"),
-                        "",
-                        &[],
-                        &vec![(t * 8 + k) as u8; 50_000 + k],
-                    );
-                    mvdz::update_attachments(p, &[], &[a]).unwrap();
-                }
-            });
-        }
-    });
-    let b = std::fs::read(&p).unwrap();
-    assert_eq!(
-        mvdz::list_attachments(Cursor::new(&b), "").unwrap().len(),
-        32,
-        "no update lost"
-    );
-    assert_eq!(mvdz::decompress(&b, 1).unwrap(), demo);
-    assert_eq!(
-        std::fs::read_dir(&dir).unwrap().count(),
-        1,
-        "no temporary file left"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn corrupt_attachment_directory() {
-    let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &c0()).unwrap();
-    let c2 = mvdz::update_attachments_bytes(
-        &c,
-        &[],
-        &[att("a", "text/plain", &[("x-k", "v")], b"hello world")],
-    )
-    .unwrap();
-    let (t, _) = body_end(&c2);
-    let mut rng = Rng(99);
-    for i in 0..200 {
-        let mut b = c2.clone();
-        let span = c2.len() - TRAILER_LEN - t.adir_off as usize;
-        let k = t.adir_off as usize + rng.below(span);
-        b[k] ^= 1 << (i % 8);
-        let r = std::panic::catch_unwind(|| {
-            let _ = mvdz::list_attachments(Cursor::new(&b), "");
-            let _ = mvdz::read_attachment(Cursor::new(&b), "a");
-            let _ = mvdz::update_attachments_bytes(&b, &["a"], &[]);
-            // every reader applies the same directory rules
-            readers_agree(&b, "adir");
-        });
-        assert!(r.is_ok(), "attachment directory byte {k}");
-    }
-}
-
 // ---------------------------------------------------------------- forward compatibility
 
 #[test]
 fn unknown_sections_and_fields() {
     let demo = synthetic(&[(0, "{}")], false);
-    let c = mvdz::update_attachments_bytes(
-        &mvdz::compress(&demo, &c0()).unwrap(),
-        &[],
-        &[att("a", "text/plain", &[], b"x")],
-    )
-    .unwrap();
-    // a section of an unknown kind before the trailer
+    let c = mvdz::compress(&demo, &c0()).unwrap();
+    // a section of an unknown kind before the trailer (whose body_end is
+    // its own offset)
     let cut = c.len() - TRAILER_LEN;
     assert_eq!(c[cut], K_TRAILER);
+    let mut t = format::Trailer::parse_body(&c[c.len() - 40..]).unwrap();
     for (kind, ok) in [(0x40u8, true), (0x7eu8, true), (0xc0u8, false)] {
         let mut b = c[..cut].to_vec();
         format::section(&mut b, kind, b"future data");
-        b.extend_from_slice(&c[cut..]);
+        t.body_end = b.len() as u64;
+        b.extend_from_slice(&t.bytes());
         let r = readers_agree(&b, "unknown section");
         if ok {
             assert_eq!(
@@ -460,7 +173,6 @@ fn unknown_sections_and_fields() {
                 demo,
                 "unknown non-critical 0x{kind:02x} skipped"
             );
-            assert_eq!(mvdz::read_attachment(Cursor::new(&b), "a").unwrap(), b"x");
         } else {
             assert!(r.is_none(), "unknown critical kind refused");
             assert!(matches!(
@@ -500,15 +212,6 @@ fn unknown_sections_and_fields() {
         mvdz::Metadata::decode(&body, &mvdz::budget::Budget::unlimited()).unwrap(),
         m
     );
-    // an unknown attachment codec: listed, but not readable
-    let mut e = mvdz::list_attachments(Cursor::new(&c), "")
-        .unwrap()
-        .remove(0);
-    e.codec = 9;
-    assert!(matches!(
-        format::unpack_attachment(&e, b"x".to_vec(), &mvdz::budget::Budget::unlimited()),
-        Err(mvdz::Error::Format(_))
-    ));
 }
 
 /// Wall-clock sources and pauses (FORMAT.md §3.1): the 0x000B start stamp,

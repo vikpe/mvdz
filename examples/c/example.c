@@ -96,21 +96,7 @@ int main(int argc, char **argv) {
     if (mvdz_read(r, back, 10) != MVDZ_E_INVALID) { fprintf(stderr, "closed handle accepted\n"); return 1; }
     fclose(p);
 
-    /* 5. attachments */
-    const char *keys[] = {"x-recorded-by", "example.track"};
-    const char *vals[] = {"someone", "1"};
-    mvdz_attachment a = {"voice/someone.ogg", "audio/ogg; codecs=opus", keys, vals, 2, "OggS...", 7};
-    rc = mvdz_attachments_update(packed, NULL, 0, &a, 1);
-    if (rc) return fail("attachments_update", rc);
-    p = fopen(packed, "rb");
-    unsigned char *att; size_t att_n;
-    rc = mvdz_attachment_read(f_read, f_seek, p, "voice/someone.ogg", 0, &att, &att_n);
-    if (rc || att_n != 7 || memcmp(att, "OggS...", 7) != 0) return fail("attachment_read", rc);
-    mvdz_free(att, att_n);
-    fclose(p);
-    printf("attachment round trip ok\n");
-
-    /* 6. corrupt input never crashes */
+    /* 5. corrupt input never crashes */
     unsigned char junk[64] = "MVDZ\x01";
     r = mvdz_open_memory(junk, sizeof junk, 1, 0, 0, &err);
     printf("garbage: %s\n", r ? "opened?!" : mvdz_strerror(err));

@@ -1,5 +1,5 @@
 //! The MVDZ container (FORMAT.md, Part I): a 16-byte prefix and
-//! length-prefixed sections (metadata, segments, index, attachments,
+//! length-prefixed sections (metadata, segments, index,
 //! trailer), and the one set of layout rules every reader applies
 //! ([`Layout`]).
 //!
@@ -25,8 +25,6 @@ pub const TRAILER_LEN: usize = SEC_HDR + 32 + 8;
 pub const K_META: u8 = 0x01;
 pub const K_SEGMENT: u8 = 0x82;
 pub const K_INDEX: u8 = 0x03;
-pub const K_ATTACH: u8 = 0x04;
-pub const K_ADIR: u8 = 0x05;
 pub const K_TRAILER: u8 = 0x7f;
 /// the file's shared rANS models (back end 3), before every segment
 pub const K_TABLES: u8 = 0x86;
@@ -45,10 +43,10 @@ pub const C_STORE: u8 = 2;
 /// Largest raw length of one segment (record offsets are 32-bit).
 pub const MAX_SEG_RAW: u64 = 0xFFFF_0000;
 /// A segment decodes to at most `SEG_RATIO * section length + SEG_SLACK`
-/// bytes; an attachment to at most `SEG_RATIO * stored + SEG_SLACK`.
+/// bytes.
 pub const SEG_RATIO: u64 = 1024;
 pub const SEG_SLACK: u64 = 4096;
-/// Largest META raw payload, INDEX and ADIR section.
+/// Largest META raw payload and INDEX section.
 pub const META_MAX: u64 = 1 << 24;
 pub const DIR_MAX: u64 = 1 << 24;
 /// Largest TABLES section body.
@@ -127,7 +125,7 @@ pub struct Trailer {
     pub index_off: u64,
     pub meta_off: u64,
     pub adir_off: u64,
-    /// end of the demo part (everything before the attachments)
+    /// end of the demo part: the trailer's own offset
     pub body_end: u64,
 }
 
@@ -682,193 +680,6 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
     })
 }
 
-// ---------------------------------------------------------------- attachments
-
-pub const A_STORE: u8 = 0;
-pub const A_DEFLATE: u8 = 1;
-
-/// One attachment: a file stored beside the demo, not part of its bytes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Attachment {
-    pub name: String,
-    pub mime: String,
-    /// free-form key/values; keys carry a prefix (`x-...`, `vendor....`),
-    /// FORMAT.md §10.1
-    pub kv: Vec<(String, String)>,
-    pub data: Vec<u8>,
-}
-
-/// A directory entry.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AttachInfo {
-    pub name: String,
-    pub mime: String,
-    pub kv: Vec<(String, String)>,
-    pub codec: u8,
-    pub size: u64,
-    pub stored: u64,
-    pub sha256: [u8; 32],
-    /// file offset of the ATTACH section
-    pub off: u64,
-}
-
-pub fn adir_body(es: &[AttachInfo]) -> Vec<u8> {
-    let mut b = Vec::new();
-    put_uv(&mut b, es.len() as u64);
-    for e in es {
-        put_bytes(&mut b, e.name.as_bytes());
-        put_bytes(&mut b, e.mime.as_bytes());
-        b.push(e.codec);
-        put_uv(&mut b, e.size);
-        put_uv(&mut b, e.stored);
-        b.extend_from_slice(&e.sha256);
-        b.extend_from_slice(&e.off.to_le_bytes());
-        put_uv(&mut b, e.kv.len() as u64);
-        for (k, v) in &e.kv {
-            put_bytes(&mut b, k.as_bytes());
-            put_bytes(&mut b, v.as_bytes());
-        }
-    }
-    b
-}
-
-pub fn parse_adir(b: &[u8]) -> Result<Vec<AttachInfo>> {
-    let e = Error::Corrupt("attachment directory");
-    let mut r = Rd::new(b);
-    let n = r.uz().ok_or(e)?;
-    // every entry takes at least 46 bytes
-    if n > b.len() / 46 {
-        return Err(e);
-    }
-    let s = |r: &mut Rd| -> Result<String> {
-        Ok(std::str::from_utf8(r.bytes().ok_or(e)?)
-            .map_err(|_| e)?
-            .to_string())
-    };
-    let mut out: Vec<AttachInfo> = Vec::with_capacity(n);
-    let mut names = std::collections::HashSet::with_capacity(n);
-    for _ in 0..n {
-        let name = s(&mut r)?;
-        if name.is_empty() {
-            return Err(e);
-        }
-        let mime = s(&mut r)?;
-        let codec = r.u8().ok_or(e)?;
-        let size = r.uv().ok_or(e)?;
-        let stored = r.uv().ok_or(e)?;
-        let sha256: [u8; 32] = r.take(32).ok_or(e)?.try_into().unwrap();
-        let off = r.u64le().ok_or(e)?;
-        let nk = r.uz().ok_or(e)?;
-        if nk > b.len() / 2 {
-            return Err(e);
-        }
-        let mut kv: Vec<(String, String)> = Vec::new();
-        let mut keys = std::collections::HashSet::new();
-        for _ in 0..nk {
-            let k = s(&mut r)?;
-            if !keys.insert(k.clone()) {
-                return bad("duplicate attachment key");
-            }
-            kv.push((k, s(&mut r)?));
-        }
-        if !names.insert(name.clone()) {
-            return bad("duplicate attachment name");
-        }
-        out.push(AttachInfo {
-            name,
-            mime,
-            kv,
-            codec,
-            size,
-            stored,
-            sha256,
-            off,
-        });
-    }
-    if !r.done() {
-        return Err(e);
-    }
-    Ok(out)
-}
-
-/// Stored body of an attachment: zstd when it saves at least 1/16 (and the
-/// ratio limit allows it), else as is. Data that zstd level 1 does not
-/// shrink by 1/32 is stored without the slow level.
-pub fn pack_attachment(a: &Attachment, off: u64) -> (AttachInfo, Vec<u8>) {
-    use crate::segment::{DEFLATE_ATTACH, DEFLATE_ATTACH_PROBE};
-    let sha256: [u8; 32] = Sha256::digest(&a.data).into();
-    let n = a.data.len();
-    let probe = crate::deflate::compress(&a.data, DEFLATE_ATTACH_PROBE);
-    let z = (probe.len() + n / 32 < n).then(|| crate::deflate::compress(&a.data, DEFLATE_ATTACH));
-    let (codec, body) = match z {
-        Some(z) if ratio_ok(n as u64, z.len() as u64) && z.len() + n / 16 < n => (A_DEFLATE, z),
-        _ => (A_STORE, a.data.clone()),
-    };
-    let info = AttachInfo {
-        name: a.name.clone(),
-        mime: a.mime.clone(),
-        kv: a.kv.clone(),
-        codec,
-        size: a.data.len() as u64,
-        stored: body.len() as u64,
-        sha256,
-        off,
-    };
-    (info, body)
-}
-
-/// Decodes an attachment body and checks its SHA-256.
-pub fn unpack_attachment(e: &AttachInfo, body: Vec<u8>, budget: &Budget) -> Result<Vec<u8>> {
-    if body.len() as u64 != e.stored {
-        return bad("attachment length");
-    }
-    let d = match e.codec {
-        A_STORE if e.size == e.stored => body,
-        A_DEFLATE if ratio_ok(e.size, e.stored) => {
-            let n = usz(e.size).ok_or(Error::Limit("attachment size"))?;
-            let _c = budget.alloc(e.size)?;
-            crate::deflate::decompress(&body, n)?
-        }
-        A_STORE | A_DEFLATE => return bad("attachment size"),
-        _ => return Err(Error::Format("unknown attachment codec")),
-    };
-    if <[u8; 32]>::from(Sha256::digest(&d)) != e.sha256 {
-        return bad("attachment checksum");
-    }
-    Ok(d)
-}
-
-/// True if `k` is a key anyone may write (FORMAT.md §10.1): `x-...`, or a
-/// vendor prefix `vendor.name` (a non-empty part before the first dot).
-/// Keys without a prefix are reserved for future versions of the format.
-pub fn key_is_prefixed(k: &str) -> bool {
-    k.starts_with("x-") || k.find('.').is_some_and(|i| i > 0)
-}
-
-/// Checks attachments to add: names unique and non-empty, keys unique and
-/// prefixed (FORMAT.md §10.1).
-pub fn check_new_attachments(add: &[Attachment]) -> Result<()> {
-    let mut names = std::collections::HashSet::new();
-    for a in add {
-        if a.name.is_empty() {
-            return Err(Error::Invalid("empty attachment name"));
-        }
-        if !names.insert(a.name.as_str()) {
-            return Err(Error::Invalid("duplicate attachment name"));
-        }
-        let mut keys = std::collections::HashSet::new();
-        if !a.kv.iter().all(|(k, _)| keys.insert(k.as_str())) {
-            return Err(Error::Invalid("duplicate attachment key"));
-        }
-        if !a.kv.iter().all(|(k, _)| key_is_prefixed(k)) {
-            return Err(Error::Invalid(
-                "attachment key without a prefix (x- or vendor.): reserved for future versions",
-            ));
-        }
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------- layout rules
 
 /// What a reader has learned about a file's sections, fed in file order.
@@ -881,26 +692,20 @@ pub struct Layout {
     pub flags: u8,
     pub meta: Option<(u64, Metadata)>,
     pub index: Option<(u64, Index)>,
-    pub adir: Option<(u64, Vec<AttachInfo>)>,
     /// SEGMENT sections: (section, header)
     pub segs: Vec<(Sec, SegHdr)>,
-    /// ATTACH sections
-    pub attach: Vec<Sec>,
-    /// offset of the first ATTACH or ADIR section
-    pub attach_start: Option<u64>,
     pub trailer: Option<(u64, Trailer)>,
     /// the TABLES section
     pub tables: Option<crate::coder::rans::FileTables>,
     raw: u64,
     dinfo_next: u64,
-    /// the budget charge for everything above (metadata, index, directory,
-    /// one record per segment and attachment)
+    /// the budget charge for everything above (metadata, index, one record
+    /// per segment)
     held: Option<Charge>,
 }
 
-/// Bytes charged per recorded SEGMENT and ATTACH section.
+/// Bytes charged per recorded SEGMENT section.
 const SEG_BOOK: u64 = std::mem::size_of::<(Sec, SegHdr)>() as u64;
-const ATTACH_BOOK: u64 = std::mem::size_of::<Sec>() as u64;
 
 impl Layout {
     pub fn new(prefix: &[u8], budget: &Budget) -> Result<Layout> {
@@ -926,33 +731,15 @@ impl Layout {
         if self.trailer.is_some() {
             return bad("section after the trailer");
         }
-        let in_attach = self.attach_start.is_some();
         match s.kind {
             K_META if self.meta.is_some() => bad("duplicate META"),
             K_INDEX if self.index.is_some() => bad("duplicate INDEX"),
-            K_ADIR if self.adir.is_some() => bad("duplicate ADIR"),
             K_TABLES if self.tables.is_some() => bad("duplicate TABLES"),
-            K_META | K_INDEX | K_SEGMENT | K_TABLES if in_attach => {
-                bad("demo section after the attachments")
-            }
             K_SEGMENT if self.index.is_some() => bad("segment after the index"),
             K_TABLES if !self.segs.is_empty() || self.index.is_some() => {
                 bad("TABLES after a segment or the index")
             }
             K_META | K_INDEX | K_SEGMENT | K_TABLES | K_TRAILER => Ok(()),
-            K_ATTACH | K_ADIR => {
-                if self.attach_start.is_none() {
-                    self.attach_start = Some(s.off);
-                }
-                if s.kind == K_ATTACH {
-                    if self.adir.is_some() {
-                        return bad("attachment after the directory");
-                    }
-                    self.hold(ATTACH_BOOK)?;
-                    self.attach.push(*s);
-                }
-                Ok(())
-            }
             k if k & CRITICAL != 0 => Err(Error::Format("unknown critical section")),
             _ => Ok(()),
         }
@@ -975,24 +762,6 @@ impl Layout {
     pub fn index(&mut self, s: &Sec, ix: Index) -> Result<()> {
         self.hold((ix.segs.len() * std::mem::size_of::<IndexSeg>()) as u64)?;
         self.index = Some((s.off, ix));
-        Ok(())
-    }
-
-    pub fn adir(&mut self, s: &Sec, d: Vec<AttachInfo>) -> Result<()> {
-        let n: usize = d
-            .iter()
-            .map(|e| {
-                std::mem::size_of::<AttachInfo>()
-                    + e.name.len()
-                    + e.mime.len()
-                    + e.kv
-                        .iter()
-                        .map(|(k, v)| k.len() + v.len() + 48)
-                        .sum::<usize>()
-            })
-            .sum();
-        self.hold(n as u64)?;
-        self.adir = Some((s.off, d));
         Ok(())
     }
 
@@ -1061,10 +830,12 @@ impl Layout {
         if t.index_off != *ioff {
             return bad("index offset");
         }
-        if t.adir_off != self.adir.as_ref().map_or(0, |a| a.0) {
+        // no attachment part: its directory offset is 0 and the demo part
+        // ends at the trailer
+        if t.adir_off != 0 {
             return bad("attachment directory offset");
         }
-        if t.body_end != self.attach_start.unwrap_or(toff) {
+        if t.body_end != toff {
             return bad("trailer body_end");
         }
         if ix.segs.len() != self.segs.len() {
@@ -1080,20 +851,6 @@ impl Layout {
         }
         if self.dinfo_next != m.demoinfo.len() as u64 {
             return bad("demoinfo share");
-        }
-        match &self.adir {
-            None if !self.attach.is_empty() => return bad("attachments without a directory"),
-            None => {}
-            Some((_, d)) => {
-                if d.len() != self.attach.len() {
-                    return bad("attachment directory");
-                }
-                for (e, s) in d.iter().zip(&self.attach) {
-                    if e.off != s.off || e.stored != s.len {
-                        return bad("attachment directory");
-                    }
-                }
-            }
         }
         Ok(())
     }

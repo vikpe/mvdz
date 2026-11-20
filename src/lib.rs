@@ -34,14 +34,12 @@ pub mod walk;
 
 
 pub use api::{
-    Config, FileInfo, Info, Selection, Writer, check_demo, compress, compress_info, decompress,
-    decompress_stream, decompress_with, export_attachments, gunzip, is_gzip, is_mvdz,
-    list_attachments, read_attachment, read_attachment_with, read_metadata, read_metadata_with,
-    update_attachments, update_attachments_bytes, write_file_atomic, write_file_atomic_with,
-    write_gzip,
+    Config, FileInfo, Info, Writer, check_demo, compress, compress_info, decompress,
+    decompress_stream, decompress_with, gunzip, is_gzip, is_mvdz, read_metadata,
+    read_metadata_with, write_file_atomic, write_file_atomic_with, write_gzip,
 };
 pub use budget::{Limits, ReadOptions};
 pub use error::{Error, Result};
-pub use format::{AttachInfo, Attachment, Index, IndexSeg, Metadata};
+pub use format::{Index, IndexSeg, Metadata};
 pub use segment::Level;
 pub use stream::{Reader, Seekable, Seq};
