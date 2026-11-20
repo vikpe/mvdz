@@ -32,8 +32,8 @@ pub const LEN: usize = 4;
 
 /// Segment codings.
 pub const C_TRANSFORM: u8 = 0;
+/// The whole segment as one raw DEFLATE stream: the encoder's fallback.
 pub const C_DEFLATE: u8 = 1;
-pub const C_STORE: u8 = 2;
 
 /// Largest raw length of one segment. Below 2^32 so that every offset
 /// into a segment (plus the walker's small look-ahead) fits in a `u32`.
@@ -223,7 +223,7 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
     let dur_ms = r.u32le().ok_or(e)? as u64;
     let crc = r.u32le().ok_or(e)?;
     let coding = r.u8().ok_or(e)?;
-    if !matches!(coding, C_TRANSFORM | C_DEFLATE | C_STORE) {
+    if !matches!(coding, C_TRANSFORM | C_DEFLATE) {
         return Err(Error::Format("unknown segment coding"));
     }
     if raw_len == 0 {

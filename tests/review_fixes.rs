@@ -58,11 +58,10 @@ fn r_m2_padded_model() {
     let mut st = Vec::new();
     put_uv(&mut st, 0);
     let raw_len = n as u64 + 100;
-    // a transform body whose only stream is a time stream on rANS: fte,
-    // fte2, mvd1, tail; one entry (id 0, back end 2, count, length); no
-    // blob body
+    // a transform body whose only stream is a time stream: fte, fte2,
+    // mvd1, tail; one entry (id 0, count, length); no blob body
     let mut body = Vec::new();
-    for v in [0u64, 0, 0, 0, 1, 0, 2, n as u64 + 16, st.len() as u64, 0] {
+    for v in [0u64, 0, 0, 0, 1, 0, n as u64 + 16, st.len() as u64, 0] {
         put_uv(&mut body, v);
     }
     body.extend_from_slice(&st);
@@ -243,7 +242,7 @@ fn sha256_is_not_checked_on_decode() {
     );
     assert_eq!(unsafe { std::slice::from_raw_parts(out, n) }, &d[..]);
     unsafe { mvdz_free(out as *mut _, n) };
-    // one byte of a stored segment changed: the segment CRC catches it
+    // one byte of an untransformed segment changed: the segment CRC catches it
     let demo = synthetic(&[], false);
     let c = untransformed(&[demo.clone(), vec![0; 5000]].concat(), &cfg(0));
     let ok = mvdz::decompress(&c, 1).unwrap();

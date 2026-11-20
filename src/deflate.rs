@@ -11,7 +11,8 @@ use crate::budget::with_capacity;
 use crate::error::{Error, Result};
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
-/// Compresses `b` at `level` (1-9) into one raw DEFLATE stream. Never empty.
+/// Compresses `b` at `level` (1-9; 0: stored blocks) into one raw DEFLATE
+/// stream. Never empty.
 pub fn compress(b: &[u8], level: u32) -> Vec<u8> {
     let mut c = Compress::new(Compression::new(level), false);
     // room for incompressible input as stored blocks (5 bytes per 65535)
@@ -55,9 +56,9 @@ mod tests {
     #[test]
     fn streams() {
         let a = b"hello hello hello hello".repeat(50);
-        for level in [1, 6, 9] {
+        for level in [0, 1, 6, 9] {
             let z = super::compress(&a, level);
-            assert!(z.len() < a.len());
+            assert_eq!(z.len() < a.len(), level > 0);
             assert_eq!(super::decompress(&z, a.len()).unwrap(), a);
             assert_eq!(super::decompress_upto(&z, a.len() + 9).unwrap(), a);
             assert!(super::decompress(&z, a.len() - 1).is_err());

@@ -12,20 +12,31 @@ dropped, attachments, metadata, index, trailer, streaming writer, levels, chunk-
 option, trusted mode and the SHA-256 pass on decode removed, one model path, fixed-width
 container fields, five speed changes. See Decisions and Results per change.
 
-Tests: 43 pass, 9 fail, all nine on the list under "Known failing tests".
+Also done, in the working tree and not committed: one fallback (see "One fallback"
+under Results per change).
+
+Tests: 44 pass, 9 fail, all nine on the list under "Known failing tests".
 
 Whole session against `master`: see "Whole session" under Results per change.
 
 Next, in this order (nothing below is started):
 
-1. Decisions that change the file format, so it can freeze: fallback paths (open
-   question 1), the whole-demo CRC pass (2), which checksum (3).
+1. Decisions that change the file format, so it can freeze: the whole-demo CRC pass
+   (open question 2), which checksum (3).
 2. The other open questions (4 to 14).
 3. Finishing work, once the format no longer changes: regenerate the test vectors
    (clears 8 of the 9 failing tests), update the Go decoder (`interop/specdec`), rewrite
    FORMAT.md and README, update BENCHMARKS.md, measure at 1 and 12 threads.
 
-How changes are measured: `/tmp/blobplan/v2/measure_fast.sh <name>` (first 500 demos;
+How changes are measured from the fallback change on: `mvdz bench -r 3 -j 4` on the 500
+demos listed in `~/dev/mvdz-bench/rand500.txt` (1,786,252,992 bytes raw; drawn by
+`scripts/pick.py` there from the 82,980 files of `~/dev/qwdemos`, names sorted, Python
+`random.Random(20261120)`, all 500 MVD by `qworld file info`); results in
+`~/dev/mvdz-bench/results/`. This sample is not the earlier one: its figures do not
+compare with those above it. The earlier harness is lost (`/tmp/blobplan` did not survive
+a reboot); it was:
+
+`/tmp/blobplan/v2/measure_fast.sh <name>` (first 500 demos;
 `ROUNDS=3 PROBE=tmp_probe4`) for each change, `/tmp/blobplan/v2/measure.sh <name>` (all
 2,000) at milestones; results in `/tmp/blobplan/v2/<name>/`. The sample list is
 `/tmp/blobplan/mvd2000.txt`. `/tmp` does not survive a reboot: the harness sources are
@@ -61,6 +72,8 @@ All implemented unless marked.
 | General-purpose compressor | Raw DEFLATE (RFC 1951) replaces zstd | +0.41 % size and +0.24 % decode time; zstd was 26 % of compression time; DEFLATE is in the Go, Python, Java and Node standard libraries and in browsers |
 | Blob layout | One DEFLATE stream per chunk holds all blob streams | Blob decode 1.7 times faster than one stream each; one inflate call per chunk; 0.08 % larger |
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
+| Fallback | One: a chunk the transform cannot code is one raw DEFLATE stream. A modelled stream is always rANS with the file's model; the per-stream back-end id, the store and DEFLATE back ends and the `stored` chunk coding are gone | Two chunk codings, one coder per stream kind; -0.056 % size |
+| Model over the decision limit (rule M2) | The encoder makes it smaller (own contexts with the fewest symbols join the fallback table) instead of dropping it | Without this a stream with no model sends every chunk of its file to DEFLATE: one demo in 500 grew 3.6 times, the output 1.9 % |
 | Levels | One | No options |
 | Model step size | One value, 2 | Trying 4 as well was worth 77 bytes in 1.68 GB |
 | Model stored in a chunk | Removed; models only in the models block, also for one-chunk files | Costs 0.004 %; one model path |
@@ -114,13 +127,15 @@ Rules:
   it; a consumer that must authenticate it hashes the output.
 - `models` holds one rANS model per modelled stream that some chunk codes with it
   (`len` 0: none). It is read once, when the file is opened, and built on all threads.
-- Chunk `coding`: 0 transform, 1 the whole chunk as raw DEFLATE, 2 stored.
+- Chunk `coding`: 0 transform, 1 the whole chunk as raw DEFLATE (the encoder's only
+  fallback). Any other value is refused.
 - A transformed chunk: protocol state, a stream table, the stream bodies, then one raw
   DEFLATE stream holding all blob streams in table order (no zlib or gzip wrapper, no
   preset dictionary; it decodes to exactly the sum of their byte counts and nothing
-  follows its final block). A modelled stream's back end: 0 store, 1 DEFLATE, 2 rANS
-  with the file's model. The stream table inside a chunk still uses variable-length
-  integers.
+  follows its final block). A modelled stream is rANS with the file's model; its table
+  entry is id, count, length (a blob stream's: id, count). A modelled stream without a
+  model in the models block is an error. The stream table inside a chunk still uses
+  variable-length integers.
 - Each chunk decodes on its own, given the models block. Protocol state at the chunk
   start is in the chunk, so map changes decode as before.
 - KTX demoinfo blocks stay in their chunk; the shared demoinfo store is gone.
@@ -140,15 +155,9 @@ What consumers do without META:
 
 ## Open questions
 
-All Viktor's to decide. 1 to 3 change the file format.
+All Viktor's to decide. 2 and 3 change the file format.
 
-1. Fallback paths. Today a modelled stream without a usable model is coded with store or
-   DEFLATE, and a chunk the transform cannot represent is stored whole, as DEFLATE or
-   raw. Proposed: one fallback, the whole chunk as raw DEFLATE; then a chunk is either
-   transformed or deflated, a stream's kind decides its coder (no per-stream back-end
-   id) and the `stored` coding goes. In the 2,000 demos no chunk fell back and no
-   modelled stream used store or DEFLATE before models left the chunks; 217 streams had
-   no shared model then (which stream is not identified).
+1. Fallback paths: decided and implemented, see "One fallback".
 2. The whole-demo CRC pass: every chunk already has its own. 1.7 % of a 4-thread decode
    before the speed changes.
 3. Checksum algorithm: keep CRC-32C, or the CRC-32 of zlib (in every standard library
@@ -364,6 +373,45 @@ them. The decoder is not touched by this change: its two figures in this column 
 run-to-run variation. Peak memory on the largest demo 168.2 MB at 4 threads and 165.3 MB
 at 1 (the values now live until the file is written); 18.1 MB on the median demo.
 
+### One fallback (2026-11-20, not committed)
+
+`mvdz bench -r 3 -j 4` on the 500 demos of `~/dev/mvdz-bench/rand500.txt`, self-check
+on, MB/s median [min-max]. The machine was not idle (load average 3 to 5).
+
+| Measure | Before (3857a1c) | One fallback, model dropped at the limit | One fallback, model made smaller (final) |
+|---|---|---|---|
+| Output, bytes | 341,362,438 | 347,875,709 (+1.91 %) | 341,169,945 (-0.056 %) |
+| Round trip | 500 of 500 | 500 of 500 | 500 of 500 |
+| Chunks coded as DEFLATE | 0 | 56 | 0 |
+| Compress 1t | 36.6 [36.5-37.2] | 35.3 [34.6-35.8] | 36.6 [36.5-36.6] |
+| Compress 4t | 94.5 [93.0-94.8] | 93.0 [89.2-93.7] | 93.0 [92.7-94.6] |
+| Compress batch | 141.5 [138.7-142.1] | 137.0 [131.6-140.3] | 141.8 [138.7-142.5] |
+| Decompress 1t | 87.4 [87.4-89.0] | 85.4 [85.1-85.5] | 86.8 [83.5-87.6] |
+| Decompress 4t | 303.6 [289.5-303.9] | 291.2 [282.3-304.8] | 299.3 [298.0-304.2] |
+| Decompress batch | 336.2 [333.6-343.2] | 332.6 [325.3-338.3] | 342.2 [323.8-344.6] |
+
+- What changed in the format: no back-end id in a stream table entry; chunk coding 2
+  (stored) is gone. In the code: `LazyDec`, `NumDec`, the two decoder traits, the store
+  and DEFLATE stream coders and the back-end search in the encoder are gone.
+- The streams without a model are identified: in this sample it is `time` in one demo
+  (file 422 of the list, 14.5 MB, 56 chunks). Its model broke the decision limit (rule
+  M2: a header may take at most 128 decisions a byte plus 1,024), so it was dropped and
+  `time` was coded with DEFLATE in every chunk. With one fallback that sends all 56
+  chunks to DEFLATE: the file goes from 2,593,286 to 9,281,592 bytes.
+- The fix is in the encoder only (`Tally::shared`): a model over the limit loses the
+  eighth of its own contexts with the fewest symbols, again until it holds. That file is
+  then 2,575,828 bytes, smaller than before the change. A stream gets no model only if
+  its fallback table alone breaks the limit or the models block would pass 16 MiB; its
+  chunks are then DEFLATE. Neither happened in the 500 demos.
+- A fallback chunk whose DEFLATE stream would break the ratio limit (1024 times) is
+  written as stored DEFLATE blocks.
+- Every file is smaller, by the back-end byte of each stream entry: 192,493 bytes in
+  all.
+- Vectors: `tests/vectors.rs` builds its hand-made chunks with rANS streams now;
+  `random.stored.mvdz` is renamed `random.deflate.mvdz`, the `segment-coding` vector
+  uses coding 2. The files in `tests/vectors/` are not regenerated.
+- Not done: the Go decoder and FORMAT.md (with the other finishing work).
+
 ### Checksum candidates (2026-11-20)
 
 One thread, whole demos, best of 5 passes, MB/s. Native: the first 500 demos, Rust
@@ -419,7 +467,8 @@ All 2,000 demos, 4 threads; every variant round-trips every demo.
 
 Rule: between commits, no test may fail that is not on this list. On rc.4, 79 pass and
 1 fails. After A9: 44 pass, 9 fail. Since 1ccd654: 43 pass, 9 fail (the test of unknown C
-flags went with the flags argument). Tests of removed features were deleted with them
+flags went with the flags argument). With one fallback: 44 pass, 9 fail (one new test,
+of a model made smaller at the decision limit). Tests of removed features were deleted with them
 (attachments, the zstd frame rules, the streaming writer, metadata, census, extension
 keys, unknown sections, demoinfo sharing).
 

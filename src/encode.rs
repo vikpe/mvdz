@@ -1,8 +1,7 @@
 //! Compression: walk, code, assemble, and check that the file decodes to
-//! the input (falling back per segment to DEFLATE or stored bytes).
+//! the input (falling back per segment to DEFLATE).
 
 use crate::budget::{Budget, Limits};
-use crate::coder::BE_RANS;
 use crate::coder::rans::Shared;
 use crate::decode::{SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
@@ -37,7 +36,7 @@ impl Default for Config {
 #[derive(Clone, Debug, Default)]
 pub struct Info {
     pub segments: usize,
-    /// Segments stored with DEFLATE or raw instead of the transform.
+    /// Segments coded as DEFLATE instead of the transform.
     pub fallback_segments: usize,
     /// Input bytes the transform stored raw (escapes and unframeable tail).
     pub escaped: usize,
@@ -113,23 +112,22 @@ pub fn walk_one(s: &[u8], proto: &mut Proto) -> Option<Walked> {
     Some(wk)
 }
 
-/// The body of a segment stored without the transform: DEFLATE when the
-/// ratio limit allows it and it is smaller, else stored.
+/// The body of a segment coded without the transform: the whole segment
+/// as one raw DEFLATE stream. If the best compression breaks the ratio
+/// limit, the stream is written as stored blocks instead.
 pub fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
-    let crc = crc32(s);
-    let z = crate::deflate::compress(s, DEFLATE_LEVEL);
-    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc, C_DEFLATE);
-    if z.len() < s.len() && seg_ratio_ok(s.len() as u64, (b.len() + z.len()) as u64) {
-        b.extend_from_slice(&z);
-        return b;
+    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc32(s), C_DEFLATE);
+    let mut z = crate::deflate::compress(s, DEFLATE_LEVEL);
+    if !seg_ratio_ok(s.len() as u64, (b.len() + z.len()) as u64) {
+        z = crate::deflate::compress(s, 0);
     }
-    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc, C_STORE);
-    b.extend_from_slice(s);
+    b.extend_from_slice(&z);
     b
 }
 
-/// The body of a walked segment with numeric values `nums`, or None if it
-/// breaks the ratio limit; `shared`: the file's shared models (empty: none).
+/// The body of a walked segment with numeric values `nums`, or None if one
+/// of its streams has no model in `shared` (the file's models) or it breaks
+/// the ratio limit.
 pub fn transform_body(
     s: &[u8],
     wk: &Walked,
@@ -140,7 +138,7 @@ pub fn transform_body(
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
     let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc32(s), C_TRANSFORM);
-    b.extend_from_slice(&segment::encode(wk, nums, threads, st, shared));
+    b.extend_from_slice(&segment::encode(wk, nums, threads, st, shared)?);
     seg_ratio_ok(s.len() as u64, b.len() as u64).then_some(b)
 }
 
@@ -158,8 +156,8 @@ pub fn compress_segmented(src: &[u8], segment: usize, cfg: &Config) -> Result<(V
     compress_inner(src, segment, cfg, false)
 }
 
-/// Compresses a demo with every segment stored without the transform
-/// (DEFLATE or raw): the layout the encoder falls back to. For test vectors.
+/// Compresses a demo with every segment coded without the transform (as
+/// DEFLATE): the layout the encoder falls back to. For test vectors.
 #[doc(hidden)]
 pub fn compress_untransformed(
     src: &[u8],
@@ -256,7 +254,7 @@ fn compress_inner(
     ))
 }
 
-/// Builds the file from the plans; `raw[i]` stores segment i without the
+/// Builds the file from the plans; `raw[i]` codes segment i without the
 /// transform.
 #[allow(clippy::too_many_arguments)]
 fn assemble(
@@ -285,7 +283,7 @@ fn assemble(
     // the models: the shared model of every stream some segment codes with it
     let mut used = vec![false; shared.len()];
     for st in bodies.iter().flat_map(|b| &b.2) {
-        if st.be == BE_RANS {
+        if st.id != crate::streams::BLOB_BODY && !crate::streams::is_blob(st.id) {
             used[st.id] = true;
         }
     }

@@ -131,14 +131,37 @@ fn amplifying_model(n: u32) -> Vec<u8> {
 /// A transform body made by hand: the structural streams `lazy` (id, back
 /// end, count, body) and the blob streams `blobs` (id, bytes), in that
 /// order.
-fn transform_body(lazy: &[(usize, u64, u64, &[u8])], blobs: &[(usize, &[u8])]) -> Vec<u8> {
+/// Returns the models block's body and the transform body. Each structural
+/// stream is coded with a model of its own symbols (so few that the model
+/// is its fallback table alone: the contexts do not matter).
+fn transform_body(lazy: &[(usize, &[u8])], blobs: &[(usize, &[u8])]) -> (Vec<u8>, Vec<u8>) {
+    use mvdz::coder::rans;
+    let mut models: Vec<Option<rans::Shared>> = Vec::new();
+    let mut ids = Vec::new();
+    let mut bodies = Vec::new();
+    for (id, syms) in lazy {
+        let ctxs = vec![0u32; syms.len()];
+        let mut t = rans::Tally::new(256);
+        t.add(&rans::byte_syms(syms, &ctxs));
+        let m = t.shared().unwrap();
+        bodies.push(rans::encode_bytes(syms, &ctxs, &m));
+        models.resize_with(models.len().max(id + 1), || None);
+        models[*id] = Some(m);
+        ids.push(*id);
+    }
+    let lazy: Vec<(usize, u64, &[u8])> = lazy
+        .iter()
+        .zip(&bodies)
+        .map(|((id, syms), b)| (*id, syms.len() as u64, &b[..]))
+        .collect();
+    let lazy = &lazy;
     let mut body = Vec::new();
     // fte, fte2, mvd1, tail; the number of streams
     for x in [0, 0, 0, 0, (lazy.len() + blobs.len()) as u64] {
         put_uv(&mut body, x);
     }
-    for (id, be, count, b) in lazy {
-        for x in [*id as u64, *be, *count, b.len() as u64] {
+    for (id, count, b) in lazy {
+        for x in [*id as u64, *count, b.len() as u64] {
             put_uv(&mut body, x);
         }
     }
@@ -154,15 +177,15 @@ fn transform_body(lazy: &[(usize, u64, u64, &[u8])], blobs: &[(usize, &[u8])]) -
         mvdz::deflate::compress(&all, 9)
     };
     put_uv(&mut body, z.len() as u64);
-    for (_, _, _, b) in lazy {
+    for (_, _, b) in lazy {
         body.extend_from_slice(b);
     }
     body.extend_from_slice(&z);
-    body
+    (mvdz::segment::tables_body(&models, &ids), body)
 }
 
-/// The file of `demo` as one transform segment with this body.
-fn one_segment(demo: &[u8], body: &[u8]) -> Vec<u8> {
+/// The file of `demo` as one transform segment with these models and body.
+fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> Vec<u8> {
     let (_, ms, _) = mvdz::segment::frame_scan(demo);
     let crc = mvdz::util::crc32(demo);
     let mut b = seg_hdr_bytes(demo.len() as u64, ms, crc, C_TRANSFORM);
@@ -174,7 +197,7 @@ fn one_segment(demo: &[u8], body: &[u8]) -> Vec<u8> {
             crc,
             sha256: Sha256::digest(demo).into(),
         },
-        models: Vec::new(),
+        models: models.clone(),
         segs: vec![b],
     }
     .build()
@@ -238,12 +261,12 @@ fn hostile(v: &mut Vec<Vector>) {
         "one bit of the second segment's CRC-32C flipped",
     );
     let mut q = p.clone();
-    q.segs[1][h.body_off - 1] = 3;
-    add("segment-coding", q.build(), "a segment with coding 3");
+    q.segs[1][h.body_off - 1] = 2;
+    add("segment-coding", q.build(), "a segment with coding 2");
     let mut q = p.clone();
     q.segs
-        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_STORE));
-    add("segment-empty", q.build(), "an empty stored segment");
+        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_DEFLATE));
+    add("segment-empty", q.build(), "an empty segment");
     let mut q = p.clone();
     let mut b = seg_hdr_bytes(MAX_SEG_RAW, 0, 0, C_DEFLATE);
     b.extend_from_slice(&mvdz::deflate::compress(&[0u8; 10], 9));
@@ -254,13 +277,13 @@ fn hostile(v: &mut Vec<Vector>) {
         q.build(),
         "a few-byte DEFLATE segment declaring 4 GiB",
     );
-    // a stored segment whose header claims 1 ms more than its frames hold
+    // a DEFLATE segment whose header claims 1 ms more than its frames hold
     // (the header's duration raised with it)
     let plain = synthetic(&[], false);
     let (_, ms, _) = mvdz::segment::frame_scan(&plain);
     let crc = mvdz::util::crc32(&plain);
-    let mut b = seg_hdr_bytes(plain.len() as u64, ms + 1, crc, C_STORE);
-    b.extend_from_slice(&plain);
+    let mut b = seg_hdr_bytes(plain.len() as u64, ms + 1, crc, C_DEFLATE);
+    b.extend_from_slice(&mvdz::deflate::compress(&plain, 9));
     add(
         "segment-duration",
         Parts {
@@ -274,7 +297,7 @@ fn hostile(v: &mut Vec<Vector>) {
             segs: vec![b],
         }
         .build(),
-        "a stored segment whose dur_ms is 1 more than its frame times",
+        "a DEFLATE segment whose dur_ms is 1 more than its frame times",
     );
     let mut x = base[..HEADER_LEN].to_vec();
     x.extend_from_slice(&(256u32 << 20).to_le_bytes());
@@ -289,7 +312,7 @@ fn hostile(v: &mut Vec<Vector>) {
         segment_block(&mut x, s);
     }
     add("models-missing", x, "the base file without its models block");
-    // one usercmd block in a segment of stored streams built by hand
+    // one usercmd block in a segment built by hand
     let mut one = Demo(Vec::new());
     one.hidden(
         0,
@@ -298,9 +321,9 @@ fn hostile(v: &mut Vec<Vector>) {
     let one = one.0;
     let ucmd_seg = |uc: Option<&[u8]>, misc: Option<&[u8]>| {
         use mvdz::streams::*;
-        let mut lazy: Vec<(usize, u64, u64, &[u8])> = vec![(TIME, 0, 1, &[0]), (TYPE, 0, 1, &[3])];
+        let mut lazy: Vec<(usize, &[u8])> = vec![(TIME, &[0]), (TYPE, &[3])];
         if let Some(u) = uc {
-            lazy.push((UC, 0, u.len() as u64, u));
+            lazy.push((UC, u));
         }
         let mut blobs: Vec<(usize, &[u8])> = vec![
             (MASK, &[0; 4]),
@@ -316,7 +339,7 @@ fn hostile(v: &mut Vec<Vector>) {
     add(
         "ucmd-grid",
         ucmd_seg(Some(&[0, 0, 13, 9]), None),
-        "a usercmd block whose grid flags symbol is 9 (stored streams)",
+        "a usercmd block whose grid flags symbol is 9",
     );
     let misc = usercmd_block(0, 0, 13, [0.0; 3], [0; 3], [0, 0]);
     add(
@@ -549,10 +572,10 @@ fn all_vectors() -> Option<Vec<Vector>> {
     );
     let rs = untransformed(&random, &cfg(0));
     add(
-        "random.stored.mvdz",
+        "random.deflate.mvdz",
         rs,
         &random,
-        "the same, untransformed: zstd does not pay, stored",
+        "the same, untransformed: one DEFLATE segment",
     );
     add(
         "empty.normal.mvdz",

@@ -229,12 +229,52 @@ impl Tally {
         }
     }
 
-    /// The model of these counts (a stream's in every segment of a file),
-    /// or None if it is not allowed (rule M2).
+    /// The model of these counts (a stream's in every segment of a file).
+    /// A model whose header breaks the decision limit (rule M2) is made
+    /// smaller until it holds: the own contexts with the fewest symbols
+    /// join the fallback, an eighth of them at a time. None if even the
+    /// fallback table alone breaks the limit.
     pub fn shared(&self) -> Option<Shared> {
-        let model = build_model(&select(self));
-        let hdr = header(&model)?;
-        Some(Shared { model, hdr })
+        let mut counts = select(self);
+        loop {
+            let model = build_model(&counts);
+            if let Some(hdr) = header(&model) {
+                return Some(Shared { model, hdr });
+            }
+            if counts.own.is_empty() {
+                return None;
+            }
+            counts.fold_smallest(counts.own.len().div_ceil(8));
+        }
+    }
+}
+
+impl Counts {
+    /// Moves the `n` own contexts with the fewest symbols (ties: the
+    /// highest context first) into the fallback's counts.
+    fn fold_smallest(&mut self, n: usize) {
+        let alpha = self.alpha;
+        let row = |i: usize| &self.own_counts[i * alpha..(i + 1) * alpha];
+        let mut order: Vec<usize> = (0..self.own.len()).collect();
+        order.sort_by_key(|&i| (row(i).iter().map(|&x| x as u64).sum::<u64>(), std::cmp::Reverse(i)));
+        let mut drop = vec![false; self.own.len()];
+        for &i in order.iter().take(n) {
+            drop[i] = true;
+        }
+        let mut own = Vec::new();
+        let mut own_counts = Vec::new();
+        for i in 0..self.own.len() {
+            if drop[i] {
+                for (r, &c) in self.rest.iter_mut().zip(row(i)) {
+                    *r += c;
+                }
+            } else {
+                own.push(self.own[i]);
+                own_counts.extend_from_slice(row(i));
+            }
+        }
+        self.own = own;
+        self.own_counts = own_counts;
     }
 }
 
@@ -1133,6 +1173,28 @@ mod tests {
             d.get(ctxs[i]);
         }
         assert!(!d.done());
+    }
+
+    /// A model whose header would break the decision limit (thousands of
+    /// own tables of one symbol each cost almost no bytes) is made smaller
+    /// until it holds, and still codes the stream.
+    #[test]
+    fn model_over_the_decision_limit_shrinks() {
+        let n = 60_000u32;
+        let ctxs: Vec<u32> = (0..n).map(|i| i % 3000).collect();
+        let syms: Vec<u8> = ctxs.iter().map(|&c| (c % 4) as u8).collect();
+        let mut t = Tally::new(256);
+        t.add(&byte_syms(&syms, &ctxs));
+        let full = build_model(&select(&t));
+        assert!(header(&full).is_none(), "the full model breaks rule M2");
+        let (sh, dm) = models(&byte_syms(&syms, &ctxs), 256);
+        assert!(sh.model.own.len() < full.own.len());
+        let b = encode_bytes(&syms, &ctxs, &sh);
+        let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
+        for (i, &s) in syms.iter().enumerate() {
+            assert_eq!(d.get(ctxs[i]), Some(s));
+        }
+        assert!(d.done());
     }
 
     #[test]

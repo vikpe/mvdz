@@ -52,7 +52,7 @@ pub fn unchecked(src: &[u8], c: &Cfg) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
     }
 }
 
-/// Every segment stored without the transform.
+/// Every segment coded without the transform (as DEFLATE).
 pub fn untransformed(src: &[u8], c: &Cfg) -> Vec<u8> {
     let seg = if c.seg == 0 {
         mvdz::segment::SEGMENT

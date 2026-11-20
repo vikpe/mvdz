@@ -324,7 +324,7 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
     })?;
     if info.fallback_segments > 0 {
         eprintln!(
-            "note: {i}: {} of {} segments stored without the transform",
+            "note: {i}: {} of {} segments coded as DEFLATE, without the transform",
             info.fallback_segments, info.segments
         );
     }

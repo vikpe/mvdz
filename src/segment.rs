@@ -1,5 +1,5 @@
 //! Transform-coded segments: the structural walk, the numeric groups and
-//! the per-stream back ends (FORMAT.md, "Transform segment body").
+//! the stream bodies (FORMAT.md, "Transform segment body").
 //!
 //! ```text
 //! fte uv | fte2 uv | mvd1 uv | tail uv
@@ -7,17 +7,20 @@
 //! bodies of the structural and numeric streams, in table order
 //! blob body: blob_len bytes
 //!
-//! entry := id uv, backend uv, count uv, len uv     structural, numeric
-//!          id uv, count uv                         blob
+//! entry := id uv, count uv, len uv     structural, numeric
+//!          id uv, count uv             blob
 //! ```
 //!
+//! A structural or numeric stream is rANS with its model in the file's
+//! models block; a segment with such a stream that has no model there is
+//! not transform-coded (the encoder deflates it whole).
 //! The blob streams have no bodies of their own: their bytes, concatenated
 //! in table order, are one raw DEFLATE stream, the blob body. Without blob
 //! streams `blob_len` is 0 and there is no blob body.
 
 use crate::budget::Budget;
 use crate::coder::rans::FileTables;
-use crate::coder::{self, BE_DEFLATE, BE_RANS, BE_STORE, LazyDec, NumDec, rans};
+use crate::coder::{self, rans};
 use crate::error::{Error, Result, bad};
 use crate::format::TABLES_MAX;
 use crate::numeric::{Buf, Group, NCtx, NumIO, WAVE1, WAVE1_PIPE, WAVE2};
@@ -32,8 +35,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// or after this many bytes.
 pub const SEGMENT: usize = 256 * 1024;
 
-/// DEFLATE level of the blob body, of streams and segments that fall back
-/// to DEFLATE.
+/// DEFLATE level of the blob body and of segments that fall back to
+/// DEFLATE.
 pub const DEFLATE_LEVEL: u32 = 9;
 
 /// Per-stream statistics for reporting. The blob streams of a segment
@@ -42,7 +45,6 @@ pub const DEFLATE_LEVEL: u32 = 9;
 #[derive(Clone, Debug, Default)]
 pub struct StreamStat {
     pub id: usize,
-    pub be: u8,
     pub count: usize,
     pub packed: usize,
 }
@@ -98,79 +100,13 @@ impl NumIO for NumEnc {
 
 // ---------------------------------------------------------------- decode side I/O
 
-/// A structural-stream decoder (one per stream).
-pub trait LazyCoder: Sized {
-    fn get(&mut self, ctx: u32) -> Option<u8>;
-    fn done(&self) -> bool;
-    fn empty() -> Self;
-}
-
-impl LazyCoder for LazyDec<'_> {
-    #[inline(always)]
-    fn get(&mut self, ctx: u32) -> Option<u8> {
-        LazyDec::get(self, ctx)
-    }
-    fn done(&self) -> bool {
-        LazyDec::done(self)
-    }
-    fn empty() -> Self {
-        LazyDec::Empty
-    }
-}
-
-impl LazyCoder for rans::ByteDec<'_> {
-    #[inline(always)]
-    fn get(&mut self, ctx: u32) -> Option<u8> {
-        rans::ByteDec::get(self, ctx)
-    }
-    fn done(&self) -> bool {
-        rans::ByteDec::done(self)
-    }
-    fn empty() -> Self {
-        rans::ByteDec::empty()
-    }
-}
-
-/// A numeric-stream decoder (one per stream).
-pub trait NumCoder: Sized {
-    fn get(&mut self, c: NCtx) -> Option<i32>;
-    fn done(&self) -> bool;
-    fn empty() -> Self;
-}
-
-impl NumCoder for NumDec<'_> {
-    #[inline(always)]
-    fn get(&mut self, c: NCtx) -> Option<i32> {
-        NumDec::get(self, c)
-    }
-    fn done(&self) -> bool {
-        NumDec::done(self)
-    }
-    fn empty() -> Self {
-        NumDec::Empty
-    }
-}
-
-impl NumCoder for rans::NumDec<'_> {
-    #[inline(always)]
-    fn get(&mut self, c: NCtx) -> Option<i32> {
-        rans::NumDec::get(self, c)
-    }
-    fn done(&self) -> bool {
-        rans::NumDec::done(self)
-    }
-    fn empty() -> Self {
-        rans::NumDec::empty()
-    }
-}
-
-pub struct DecIO<'a, L> {
-    lazy: [L; N_LAZY],
+pub struct DecIO<'a> {
+    lazy: [rans::ByteDec<'a>; N_LAZY],
     blobs: Vec<(Cow<'a, [u8]>, usize)>,
     pub over: bool,
 }
 
-impl<L: LazyCoder> SymIO for DecIO<'_, L> {
+impl SymIO for DecIO<'_> {
     #[inline(always)]
     fn byte(&mut self, sid: usize, ctx: u32, _: u8) -> u8 {
         debug_assert!(ctx <= 0xffff, "stream {sid}: context {ctx:#x} over 16 bits");
@@ -198,12 +134,12 @@ impl<L: LazyCoder> SymIO for DecIO<'_, L> {
 
 const MAXK: usize = 6;
 
-struct NumDecIO<N> {
-    d: [N; MAXK],
+struct NumDecIO<'a> {
+    d: [rans::NumDec<'a>; MAXK],
     over: bool,
 }
 
-impl<N: NumCoder> NumIO for NumDecIO<N> {
+impl NumIO for NumDecIO<'_> {
     #[inline(always)]
     fn code(&mut self, k: usize, ctx: NCtx, _: i32) -> i32 {
         match self.d[k].get(ctx) {
@@ -216,12 +152,12 @@ impl<N: NumCoder> NumIO for NumDecIO<N> {
     }
 }
 
-/// (back end, body, count) of a present stream.
-type StreamEnt<'a> = Option<(u8, &'a [u8], usize)>;
+/// (body, count) of a present stream.
+type StreamEnt<'a> = Option<(&'a [u8], usize)>;
 
-fn walk_dec<L: LazyCoder>(
-    lazy: [L; N_LAZY],
-    blobs: Vec<(Cow<'_, [u8]>, usize)>,
+fn walk_dec<'a>(
+    lazy: [rans::ByteDec<'a>; N_LAZY],
+    blobs: Vec<(Cow<'a, [u8]>, usize)>,
     dst: Buf,
     recs: &Recs,
     proto: Proto,
@@ -232,7 +168,7 @@ fn walk_dec<L: LazyCoder>(
         blobs,
         over: false,
     };
-    let mut w: Walker<false, DecIO<L>> =
+    let mut w: Walker<false, DecIO> =
         Walker::new(&[], dst.ptr(), dst.len(), recs, io, proto);
     w.run(tail);
     if w.err || w.io.over {
@@ -244,21 +180,21 @@ fn walk_dec<L: LazyCoder>(
     Ok(())
 }
 
-fn run_group<'a, N: NumCoder>(
+fn run_group(
     g: Group,
     recs: &Recs,
     buf: Buf,
-    ents: &[StreamEnt<'a>],
-    mk: impl Fn(u8, usize, &'a [u8], usize) -> Result<N>,
+    ents: &[StreamEnt],
+    fm: Option<&rans::Models>,
 ) -> Result<()> {
-    let mut d: [N; MAXK] = std::array::from_fn(|_| N::empty());
+    let mut d: [rans::NumDec; MAXK] = std::array::from_fn(|_| rans::NumDec::empty());
     for (k, &sid) in g.streams().iter().enumerate() {
-        if let Some((be, b, c)) = ents[sid] {
-            d[k] = mk(be, sid, b, c)?;
+        if let Some((b, c)) = ents[sid] {
+            d[k] = rans::NumDec::new(sid, b, c, coder::file_model(fm, sid)?)?;
         }
     }
     let mut io = NumDecIO { d, over: false };
-    g.run::<false, NumDecIO<N>>(recs, buf, &mut io);
+    g.run::<false, NumDecIO>(recs, buf, &mut io);
     if io.over || !io.d.iter().all(|d| d.done()) {
         return bad("numeric stream");
     }
@@ -322,13 +258,6 @@ enum Kind {
     Blobs,
 }
 
-/// Back ends the encoder tries for a structural or numeric stream,
-/// smallest output wins; if none of them can code the stream, the fallback
-/// list is tried. `file`: the file has a model for the stream.
-fn candidates(file: bool) -> &'static [u8] {
-    if file { &[BE_RANS] } else { &[] }
-}
-
 /// The blob streams of a walked segment, in id order.
 fn blob_ids(wk: &Walked) -> Vec<usize> {
     (0..N_STREAMS)
@@ -336,54 +265,27 @@ fn blob_ids(wk: &Walked) -> Vec<usize> {
         .collect()
 }
 
+/// The body of one stream; None for a structural or numeric stream
+/// without a model in the file.
 fn pack_one(
     kind: Kind,
-    be: u8,
     sid: usize,
     wk: &Walked,
     num: &[(NCtx, i32)],
     file: Option<&rans::Shared>,
 ) -> Option<Vec<u8>> {
-    let z = DEFLATE_LEVEL;
     match kind {
-        Kind::Lazy => coder::encode_lazy(be, &wk.io.syms[sid], &wk.io.ctxs[sid], z, file),
-        Kind::Num => coder::encode_num(be, sid, num, z, file),
+        Kind::Lazy => Some(rans::encode_bytes(&wk.io.syms[sid], &wk.io.ctxs[sid], file?)),
+        Kind::Num => Some(rans::encode_num(sid, num, file?)),
         Kind::Blobs => {
             let ids = blob_ids(wk);
             let mut all = Vec::with_capacity(ids.iter().map(|&i| wk.io.blobs[i].len()).sum());
             for i in ids {
                 all.extend_from_slice(&wk.io.blobs[i]);
             }
-            Some(crate::deflate::compress(&all, z))
+            Some(crate::deflate::compress(&all, DEFLATE_LEVEL))
         }
     }
-}
-
-fn pack_best(
-    kind: Kind,
-    sid: usize,
-    wk: &Walked,
-    num: &[(NCtx, i32)],
-    file: Option<&rans::Shared>,
-) -> (u8, Vec<u8>) {
-    if matches!(kind, Kind::Blobs) {
-        let body = pack_one(kind, BE_DEFLATE, sid, wk, num, file);
-        return (BE_DEFLATE, body.expect("the blob body"));
-    }
-    for list in [candidates(file.is_some()), &[BE_STORE, BE_DEFLATE]] {
-        let mut best: Option<(u8, Vec<u8>)> = None;
-        for &be in list {
-            if let Some(c) = pack_one(kind, be, sid, wk, num, file) {
-                if best.as_ref().is_none_or(|b| c.len() < b.1.len()) {
-                    best = Some((be, c));
-                }
-            }
-        }
-        if let Some(b) = best {
-            return b;
-        }
-    }
-    unreachable!("store always codes a stream")
 }
 
 /// The numeric groups in coding order.
@@ -462,8 +364,8 @@ pub fn tables_body(models: &[Option<rans::Shared>], ids: &[usize]) -> Vec<u8> {
 }
 
 /// Drops the models with the largest headers until the models block is at
-/// most `max` bytes (its limit, FORMAT.md §9); those streams are then
-/// stored or DEFLATE.
+/// most `max` bytes (its limit, FORMAT.md §9); a segment with one of those
+/// streams is then not transform-coded.
 fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
     loop {
         let ids: Vec<usize> = (0..models.len()).filter(|&i| models[i].is_some()).collect();
@@ -478,15 +380,16 @@ fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
     }
 }
 
-/// The transform body of a walked segment with numeric values `nums`. A
-/// stream with a model in `shared` (by stream id; empty: none) uses it.
+/// The transform body of a walked segment with numeric values `nums`, or
+/// None if one of its structural or numeric streams has no model in
+/// `shared` (by stream id).
 pub fn encode(
     wk: &Walked,
     nums: &Nums,
     threads: usize,
     stats: &mut Vec<StreamStat>,
     shared: &[Option<rans::Shared>],
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     let groups = groups();
     // every non-empty stream is a job: (sid, kind, group, index in group)
     let mut jobs: Vec<(usize, Kind, usize, usize)> = Vec::new();
@@ -524,11 +427,11 @@ pub fn encode(
             &[]
         };
         let file = shared.get(sid).and_then(|m| m.as_ref());
-        pack_best(kind, sid, wk, num, file)
+        pack_one(kind, sid, wk, num, file)
     });
-    let mut packed: Vec<Option<(u8, Vec<u8>)>> = (0..jobs.len()).map(|_| None).collect();
+    let mut packed: Vec<Vec<u8>> = (0..jobs.len()).map(|_| Vec::new()).collect();
     for (k, p) in packed_sorted.into_iter().enumerate() {
-        packed[order[k]] = Some(p);
+        packed[order[k]] = p?;
     }
     // table order: stream id; the blob streams follow (their ids are the
     // highest), each with its own entry but one shared body
@@ -541,7 +444,7 @@ pub fn encode(
         Kind::Blobs => blob_total,
     };
     let blob_body: &[u8] = match blob_job {
-        Some(i) => &packed[i].as_ref().expect("packed").1,
+        Some(i) => &packed[i],
         None => &[],
     };
     let mut out = Vec::new();
@@ -551,14 +454,12 @@ pub fn encode(
     put_uv(&mut out, wk.tail as u64);
     put_uv(&mut out, (ids.len() + blobs.len()) as u64);
     for &i in &ids {
-        let (be, body) = packed[i].as_ref().expect("packed");
+        let body = &packed[i];
         put_uv(&mut out, jobs[i].0 as u64);
-        put_uv(&mut out, *be as u64);
         put_uv(&mut out, count(i) as u64);
         put_uv(&mut out, body.len() as u64);
         stats.push(StreamStat {
             id: jobs[i].0,
-            be: *be,
             count: count(i),
             packed: body.len(),
         });
@@ -568,7 +469,6 @@ pub fn encode(
         put_uv(&mut out, wk.io.blobs[sid].len() as u64);
         stats.push(StreamStat {
             id: sid,
-            be: BE_DEFLATE,
             count: wk.io.blobs[sid].len(),
             packed: 0,
         });
@@ -577,16 +477,15 @@ pub fn encode(
     if blob_job.is_some() {
         stats.push(StreamStat {
             id: BLOB_BODY,
-            be: BE_DEFLATE,
             count: blob_total,
             packed: blob_body.len(),
         });
     }
     for &i in &ids {
-        out.extend_from_slice(&packed[i].as_ref().expect("packed").1);
+        out.extend_from_slice(&packed[i]);
     }
     out.extend_from_slice(blob_body);
-    out
+    Some(out)
 }
 
 /// Cut points: frame boundaries about every `seg` bytes (0: one segment).
@@ -625,8 +524,8 @@ pub fn frame_scan(b: &[u8]) -> (u64, u64, usize) {
 pub struct Header {
     proto: Proto,
     tail: usize,
-    /// (id, back end, count, body length); a blob stream: back end 1, 0
-    ents: Vec<(usize, u8, usize, usize)>,
+    /// (id, count, body length); a blob stream has no body of its own: 0
+    ents: Vec<(usize, usize, usize)>,
     /// length of the blob body, after the stream bodies
     blob_len: usize,
     body_off: usize,
@@ -658,16 +557,9 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         if id >= N_STREAMS || !(is_lazy(id) || is_num(id) || is_blob(id)) {
             return bad("stream id");
         }
-        // a blob stream has no back end and no body of its own
-        let (be, count, len) = if is_blob(id) {
-            (BE_DEFLATE as u64, r.uz().ok_or(te)?, 0)
-        } else {
-            let be = r.uv().ok_or(te)?;
-            (be, r.uz().ok_or(te)?, r.uz().ok_or(te)?)
-        };
-        if be > BE_RANS as u64 {
-            return bad("stream back end");
-        }
+        // a blob stream has no body of its own
+        let count = r.uz().ok_or(te)?;
+        let len = if is_blob(id) { 0 } else { r.uz().ok_or(te)? };
         if is_blob(id) {
             blob_total = blob_total.checked_add(count).ok_or(te)?;
         }
@@ -680,7 +572,7 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
             return bad("stream count");
         }
         total = total.checked_add(len).ok_or(te)?;
-        ents.push((id, be as u8, count, len));
+        ents.push((id, count, len));
     }
     let blob_len = r.uz().ok_or(te)?;
     // a blob body exactly when there are blob bytes
@@ -712,39 +604,34 @@ pub fn decode(
 ) -> Result<()> {
     let n = h.ents.len();
     // the file's models
-    let fm = match tables {
-        Some(t) if h.ents.iter().any(|e| e.1 == BE_RANS) => Some(t.models()),
-        _ => None,
-    };
+    let fm = tables.map(|t| t.models());
     let mut bodies: Vec<&[u8]> = Vec::with_capacity(n);
     let mut r = Rd {
         b: body,
         i: h.body_off,
     };
-    for &(_, _, _, len) in &h.ents {
+    for &(_, _, len) in &h.ents {
         bodies.push(r.take(len).ok_or(Error::Corrupt("stream body"))?);
     }
     let blob_body = r.take(h.blob_len).ok_or(Error::Corrupt("stream body"))?;
-    let cnt = |sid: usize| h.ents.iter().find(|e| e.0 == sid).map_or(0, |e| e.2);
-    // scratch: the decoded blobs and stored/DEFLATE streams, the record lists
+    let cnt = |sid: usize| h.ents.iter().find(|e| e.0 == sid).map_or(0, |e| e.1);
+    // scratch: the decoded blobs and the record lists
     let recs_bytes = 12 * cnt(PI_NUM)
         + 16 * cnt(PE_BITS)
         + 20 * cnt(SND_NUM)
         + 20 * cnt(TE_TYPE)
         + 8 * (cnt(UC) / UC_MIN_SYMS);
     let mut scratch = recs_bytes as u64;
-    for &(id, be, count, _) in &h.ents {
-        scratch += if is_blob(id) {
-            count as u64
-        } else {
-            coder::scratch(be, is_num(id), count)
-        };
+    for &(id, count, _) in &h.ents {
+        if is_blob(id) {
+            scratch += count as u64;
+        }
     }
     let _charge = budget.alloc(scratch)?;
     // the blob streams first: one DEFLATE stream, cut by their counts
     let blob_total: usize = (0..n)
         .filter(|&i| is_blob(h.ents[i].0))
-        .map(|i| h.ents[i].2)
+        .map(|i| h.ents[i].1)
         .sum();
     let blob_bytes = if blob_total > 0 {
         crate::deflate::decompress(blob_body, blob_total)?
@@ -755,18 +642,18 @@ pub fn decode(
         .map(|_| (Cow::Borrowed(&[][..]), 0))
         .collect();
     let mut at = 0;
-    for &(id, _, count, _) in h.ents.iter().filter(|e| is_blob(e.0)) {
+    for &(id, count, _) in h.ents.iter().filter(|e| is_blob(e.0)) {
         blob_bufs[id].0 = Cow::Borrowed(&blob_bytes[at..at + count]);
         at += count;
     }
     let mut num_ents: Vec<StreamEnt> = vec![None; N_STREAMS];
     let mut lazy_ents: Vec<StreamEnt> = vec![None; N_LAZY];
     for i in 0..n {
-        let (id, be, count, _) = h.ents[i];
+        let (id, count, _) = h.ents[i];
         if is_lazy(id) {
-            lazy_ents[id] = Some((be, bodies[i], count));
+            lazy_ents[id] = Some((bodies[i], count));
         } else if is_num(id) {
-            num_ents[id] = Some((be, bodies[i], count));
+            num_ents[id] = Some((bodies[i], count));
         }
     }
     let recs = Recs::fixed(
@@ -777,49 +664,21 @@ pub fn decode(
         cnt(UC) / UC_MIN_SYMS,
     )?;
     let buf = Buf::new(dst);
-    let run_g = |g: Group| -> Result<()> {
-        let all_rans = g
-            .streams()
-            .iter()
-            .all(|&sid| num_ents[sid].is_none_or(|e| e.0 == BE_RANS));
-        if all_rans {
-            run_group(g, &recs, buf, &num_ents, |_, sid, b, c| {
-                rans::NumDec::new(sid, b, c, coder::file_model(fm, sid)?)
-            })
-        } else {
-            run_group(g, &recs, buf, &num_ents, |be, sid, b, c| {
-                NumDec::new(be, sid, b, c, fm)
-            })
-        }
-    };
+    let run_g = |g: Group| run_group(g, &recs, buf, &num_ents, fm);
     let blob_cell = std::sync::Mutex::new(Some(blob_bufs));
-    // the walk; a monomorphic fast path when every structural stream is rANS
     let walk = || -> Result<()> {
         let blobs = blob_cell
             .lock()
             .map_err(|_| Error::Internal("lock"))?
             .take()
             .ok_or(Error::Internal("walk"))?;
-        if lazy_ents
-            .iter()
-            .all(|e| e.is_none_or(|e| e.0 == BE_RANS))
-        {
-            let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
-            for (id, e) in lazy_ents.iter().enumerate() {
-                if let Some((_, b, c)) = *e {
-                    lazy[id] = rans::ByteDec::new(b, c, coder::file_model(fm, id)?)?;
-                }
+        let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
+        for (id, e) in lazy_ents.iter().enumerate() {
+            if let Some((b, c)) = *e {
+                lazy[id] = rans::ByteDec::new(b, c, coder::file_model(fm, id)?)?;
             }
-            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
-        } else {
-            let mut lazy: [LazyDec; N_LAZY] = std::array::from_fn(|_| LazyDec::Empty);
-            for (id, e) in lazy_ents.iter().enumerate() {
-                if let Some((be, b, c)) = *e {
-                    lazy[id] = LazyDec::new(be, id, b, c, fm)?;
-                }
-            }
-            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
         }
+        walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
     };
     if threads > 1 && HAS_THREADS {
         // pipelined: wave-1 groups follow the walker on worker threads
@@ -905,6 +764,18 @@ mod tests {
         dst
     }
 
+    /// The transform body of `src` with the models trained on it, and those
+    /// models as a reader has them.
+    fn coded(src: &[u8]) -> (Vec<u8>, FileTables) {
+        let (wk, _) = walk(src, Proto::default()).unwrap();
+        let nums = numerics(src, &wk, 1);
+        let models = train(&[(&wk, &nums)], 1);
+        let ids: Vec<usize> = (0..models.len()).filter(|&i| models[i].is_some()).collect();
+        let ft = FileTables::new(&tables_body(&models, &ids), 1, &Budget::unlimited()).unwrap();
+        let body = encode(&wk, &nums, 1, &mut Vec::new(), &models).unwrap();
+        (body, ft)
+    }
+
     /// A tiny demo: playerinfo, packet entities, sounds, stats, a print.
     fn demo() -> Vec<u8> {
         let mut d = Vec::new();
@@ -935,11 +806,9 @@ mod tests {
     fn segment_round_trip() {
         let src = demo();
         for threads in [1, 3] {
-            let (wk, _) = walk(&src, Proto::default()).unwrap();
-            let mut st = Vec::new();
-            let body = encode(&wk, &numerics(&src, &wk, 1), 1, &mut st, &[]);
+            let (body, ft) = coded(&src);
             let h = parse_header(&body, src.len()).unwrap();
-            let dst = decoded(&body, &h, src.len(), None, threads);
+            let dst = decoded(&body, &h, src.len(), Some(&ft), threads);
             assert!(dst == src, "{threads}");
         }
     }
@@ -983,25 +852,23 @@ mod tests {
         }
         src.extend(demo());
         for threads in [1, 3] {
-            let (wk, _) = walk(&src, Proto::default()).unwrap();
-            let body = encode(&wk, &numerics(&src, &wk, 1), 1, &mut Vec::new(), &[]);
+            let (body, ft) = coded(&src);
             let h = parse_header(&body, src.len()).unwrap();
-            let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().2;
+            let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().1;
             assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
-            let dst = decoded(&body, &h, src.len(), None, threads);
+            let dst = decoded(&body, &h, src.len(), Some(&ft), threads);
             assert!(dst == src, "{threads}");
         }
         // without usercmd blocks neither stream is in the table
         let plain = demo();
-        let (wk, _) = walk(&plain, Proto::default()).unwrap();
-        let body = encode(&wk, &numerics(&plain, &wk, 1), 1, &mut Vec::new(), &[]);
+        let (body, _) = coded(&plain);
         let h = parse_header(&body, plain.len()).unwrap();
         assert!(h.ents.iter().all(|e| e.0 != UC && e.0 != UC_A));
     }
 
     /// Models a models block over its limit would hold are dropped,
-    /// largest header first; their streams are then stored or DEFLATE, and
-    /// the segment still decodes.
+    /// largest header first; a segment with one of their streams is then
+    /// not transform-coded.
     #[test]
     fn tables_limit() {
         let src = demo();
@@ -1027,14 +894,10 @@ mod tests {
                 .filter(|&s| s != big)
                 .collect::<Vec<_>>()
         );
-        let ft = FileTables::new(&tables_body(&models, &kept), 1, &Budget::unlimited()).unwrap();
-        let mut st = Vec::new();
-        let body = encode(&wk, &nums, 1, &mut st, &models);
-        let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;
-        assert!(be(big) < BE_RANS, "a stream without a model is stored or DEFLATE");
-        assert!(kept.iter().all(|&sid| be(sid) == BE_RANS));
-        let h = parse_header(&body, src.len()).unwrap();
-        assert!(decoded(&body, &h, src.len(), Some(&ft), 1) == src);
+        assert!(
+            encode(&wk, &nums, 1, &mut Vec::new(), &models).is_none(),
+            "a stream without a model: no transform body"
+        );
         // nothing fits: no model is kept
         fit_tables(&mut models, 0);
         assert!(ids(&models).is_empty());

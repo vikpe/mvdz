@@ -83,7 +83,7 @@ fn structure_rules() {
     // an empty segment in between
     let mut q = p.clone();
     q.segs
-        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_STORE));
+        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_DEFLATE));
     refused(&q.build(), "empty segment", corrupt);
     // the models block missing
     let mut b = c[..HEADER_LEN].to_vec();
@@ -183,11 +183,10 @@ fn model_amplification() {
             put_uv(&mut models, v);
         }
         models.extend_from_slice(hdr);
-        // a segment whose only stream is a time stream on rANS: fte, fte2,
-        // mvd1, tail; one entry (id 0, back end 2, count, length); no blob
-        // body
+        // a segment whose only stream is a time stream: fte, fte2, mvd1,
+        // tail; one entry (id 0, count, length); no blob body
         let mut body = Vec::new();
-        for v in [0u64, 0, 0, 0, 1, 0, 2, demo.len() as u64, rest.len() as u64, 0] {
+        for v in [0u64, 0, 0, 0, 1, 0, demo.len() as u64, rest.len() as u64, 0] {
             put_uv(&mut body, v);
         }
         body.extend_from_slice(rest);

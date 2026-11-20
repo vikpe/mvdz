@@ -96,7 +96,7 @@ fn non_mvd_input_streams() {
 }
 
 /// A flood of svc_nop compresses beyond the ratio limit: the encoder must
-/// store such segments in a form every reader accepts (correctness F4).
+/// code such segments in a form every reader accepts (correctness F4).
 #[test]
 fn ratio_limit_fallback() {
     let mut d = Demo(Vec::new());
@@ -258,7 +258,7 @@ fn file_tables() {
     let (seg, info) = compress_info(&src, &cfg(8192)).unwrap();
     assert!(info.segments > 2);
     assert!(has(&seg), "models");
-    assert!(info.streams.iter().any(|s| s.be == 2), "rANS is used");
+    assert_eq!(info.fallback_segments, 0, "every segment is transformed");
     assert!(readers_agree(&seg, "tables").unwrap() == src);
     let one = compress(&src, &cfg(0)).unwrap();
     assert_eq!(parts(&one).segs.len(), 1);

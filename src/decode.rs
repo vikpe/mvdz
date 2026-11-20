@@ -164,8 +164,6 @@ pub fn decode_segment(
             let _c = budget.alloc(h.raw_len)?;
             dst.copy_from_slice(&crate::deflate::decompress(coded, dst.len())?);
         }
-        C_STORE if coded.len() == dst.len() => dst.copy_from_slice(coded),
-        C_STORE => return bad("stored segment length"),
         _ => return Err(Error::Format("unknown segment coding")),
     }
     if crc32(dst) != h.crc {
