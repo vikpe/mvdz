@@ -117,8 +117,11 @@ fn r_m4_section_bookkeeping() {
     let f = compress(&demo, &cfg(1)).unwrap();
     assert!(parts(&f).segs.len() > 60_000);
     assert_eq!(mvdz::decompress(&f, 1).unwrap(), demo);
+    // the demo is 0.6 MB and a sequential reader holds one segment at a
+    // time: only the record kept per segment (64 bytes each, 3.8 MB) can
+    // exceed this
     let l: ReadOptions = Limits {
-        memory: 4 << 20,
+        memory: 3 << 20,
         ..Default::default()
     }
     .into();

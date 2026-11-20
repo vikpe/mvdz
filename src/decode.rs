@@ -72,13 +72,15 @@ fn read_vec(src: &mut impl Src, off: u64, n: u64, budget: &Budget) -> Result<(Ve
     Ok((v, c))
 }
 
-/// The `uv` at file offset `off` of a file of `len` bytes: its value and
-/// its length in bytes (None: the file ends first, or it is not a `uv`).
-fn uv_at(src: &mut impl Src, off: u64, len: u64) -> Result<Option<(u64, usize)>> {
-    let mut b = [0u8; UV_MAX];
-    let n = (len - off).min(UV_MAX as u64) as usize;
-    src.read_at(off, &mut b[..n])?;
-    Ok(uv_prefix(&b[..n]))
+/// The length field at file offset `off` of a file of `len` bytes (None:
+/// the file ends first).
+fn len_at(src: &mut impl Src, off: u64, len: u64) -> Result<Option<u64>> {
+    if len - off < LEN as u64 {
+        return Ok(None);
+    }
+    let mut b = [0u8; LEN];
+    src.read_at(off, &mut b)?;
+    Ok(len_field(&b))
 }
 
 /// Reads and checks the whole structure of a complete file: the header,
@@ -92,10 +94,10 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
     let mut lay = Layout::new(&h[..n], budget)?;
     let mut off = HEADER_LEN as u64;
     // the models
-    let Some((mlen, k)) = uv_at(src, off, len)? else {
+    let Some(mlen) = len_at(src, off, len)? else {
         return bad("incomplete file");
     };
-    off += k as u64;
+    off += LEN as u64;
     if mlen > TABLES_MAX {
         return bad("models too large");
     }
@@ -111,18 +113,17 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
     off += mlen;
     // the segments, until they hold the whole demo
     while !lay.complete() {
-        let Some((slen, k)) = uv_at(src, off, len)? else {
+        let Some(coded) = len_at(src, off, len)? else {
             return bad("incomplete file");
         };
         let s = Sec {
             off,
-            hdr: k as u8,
-            len: slen,
+            len: coded + SEG_FIELDS as u64,
         };
-        if slen > len - s.body_off() {
+        if s.len > len - s.body_off() {
             return bad("incomplete file");
         }
-        let mut b = vec![0u8; slen.min(SEG_HDR_MAX as u64) as usize];
+        let mut b = [0u8; SEG_FIELDS];
         src.read_at(s.body_off(), &mut b)?;
         lay.segment(&s, parse_seg_hdr(&b)?)?;
         off = s.end();

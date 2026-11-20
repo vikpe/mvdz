@@ -4,13 +4,14 @@
 //!
 //! ```text
 //! file    := header | models | segment*
-//! header  := "MVDZ" | version u32le | size u64le | duration_ms u64le
-//!            | crc u64le | sha256[32]                              (64 bytes)
-//! models  := len uv | body[len]
-//! segment := len uv | body[len]
-//! body    := raw_len uv | dur_ms uv | crc u32le | coding u8 | coded
+//! header  := "MVDZ" | version u32 | size u64 | duration_ms u64
+//!            | crc u64 | sha256[32]                                (64 bytes)
+//! models  := len u32 | body[len]
+//! segment := len u32 | raw_len u32 | dur_ms u32 | crc u32 | coding u8
+//!            | coded[len]                              (17 bytes, then coded)
 //! ```
 //!
+//! Every integer is little-endian and of fixed width.
 //! Every header field describes the original demo: its length, its total
 //! frame time, its CRC-32C (the low 32 bits of the field; the high 32 are
 //! 0) and its SHA-256. `models` holds the shared rANS models (`len` 0:
@@ -21,13 +22,13 @@
 use crate::budget::{Budget, Charge};
 use crate::coder::rans::FileTables;
 use crate::error::{Error, Result, bad};
-use crate::util::{Rd, put_uv};
+use crate::util::Rd;
 
 pub const MAGIC: &[u8; 4] = b"MVDZ";
 pub const VERSION: u32 = 2;
 pub const HEADER_LEN: usize = 64;
-/// Most bytes a `uv` (LEB128 u64) takes.
-pub const UV_MAX: usize = 10;
+/// Bytes of a length field (of the models block, of a segment).
+pub const LEN: usize = 4;
 
 /// Segment codings.
 pub const C_TRANSFORM: u8 = 0;
@@ -112,34 +113,38 @@ impl Header {
     }
 }
 
-/// Appends a length-prefixed block (the models, a segment).
-pub fn block(out: &mut Vec<u8>, body: &[u8]) {
-    put_uv(out, body.len() as u64);
+/// Appends the models block: its length, then `body` (empty: no models).
+pub fn models_block(out: &mut Vec<u8>, body: &[u8]) {
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(body);
 }
 
-/// The `uv` at the start of `b`: its value and its length in bytes.
-pub fn uv_prefix(b: &[u8]) -> Option<(u64, usize)> {
-    let mut r = Rd::new(b);
-    let v = r.uv()?;
-    Some((v, r.i))
+/// Appends a segment: the length of its coded data, then `body` (the
+/// segment's header fields and its coded data, from [`seg_hdr_bytes`] on).
+pub fn segment_block(out: &mut Vec<u8>, body: &[u8]) {
+    out.extend_from_slice(&((body.len() - SEG_FIELDS) as u32).to_le_bytes());
+    out.extend_from_slice(body);
 }
 
-/// A length-prefixed block of a file: where its length field starts, how
-/// many bytes that field takes, and the length of its body.
+/// The length field at the start of `b`.
+pub fn len_field(b: &[u8]) -> Option<u64> {
+    Some(u32::from_le_bytes(b.get(..LEN)?.try_into().ok()?) as u64)
+}
+
+/// A segment of a file: where its length field starts, and the length of
+/// its body (its header fields after the length, and its coded data).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sec {
     pub off: u64,
-    pub hdr: u8,
     pub len: u64,
 }
 
 impl Sec {
     pub fn body_off(&self) -> u64 {
-        self.off + self.hdr as u64
+        self.off + LEN as u64
     }
     pub fn end(&self) -> u64 {
-        self.off + self.hdr as u64 + self.len
+        self.off + LEN as u64 + self.len
     }
 }
 
@@ -194,25 +199,28 @@ pub struct SegHdr {
     pub body_off: usize,
 }
 
+/// The header fields of a segment body: `raw_len`, `dur_ms` (both must fit
+/// in 32 bits), `crc`, `coding`.
 pub fn seg_hdr_bytes(raw_len: u64, dur_ms: u64, crc: u32, coding: u8) -> Vec<u8> {
-    let mut b = Vec::new();
-    put_uv(&mut b, raw_len);
-    put_uv(&mut b, dur_ms);
+    let mut b = Vec::with_capacity(SEG_FIELDS);
+    b.extend_from_slice(&(raw_len as u32).to_le_bytes());
+    b.extend_from_slice(&(dur_ms as u32).to_le_bytes());
     b.extend_from_slice(&crc.to_le_bytes());
     b.push(coding);
     b
 }
 
-/// Bytes of a segment body that hold every header field.
-pub const SEG_HDR_MAX: usize = 2 * UV_MAX + 4 + 1;
+/// Bytes of a segment's header fields after its length field: the coded
+/// data starts here in a segment body.
+pub const SEG_FIELDS: usize = 4 + 4 + 4 + 1;
 
-/// Parses a segment header from the first bytes of its body (`b` may be
-/// cut at [`SEG_HDR_MAX`]).
+/// Parses a segment's header fields from the first [`SEG_FIELDS`] bytes of
+/// its body.
 pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
     let e = Error::Corrupt("segment header");
     let mut r = Rd::new(b);
-    let raw_len = r.uv().ok_or(e)?;
-    let dur_ms = r.uv().ok_or(e)?;
+    let raw_len = r.u32le().ok_or(e)? as u64;
+    let dur_ms = r.u32le().ok_or(e)? as u64;
     let crc = r.u32le().ok_or(e)?;
     let coding = r.u8().ok_or(e)?;
     if !matches!(coding, C_TRANSFORM | C_DEFLATE | C_STORE) {
@@ -231,7 +239,7 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
         dur_ms,
         crc,
         coding,
-        body_off: r.i,
+        body_off: SEG_FIELDS,
     })
 }
 

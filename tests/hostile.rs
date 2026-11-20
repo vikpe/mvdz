@@ -90,7 +90,7 @@ fn structure_rules() {
     // the models block missing
     let mut b = c[..HEADER_LEN].to_vec();
     for s in &p.segs {
-        block(&mut b, s);
+        segment_block(&mut b, s);
     }
     refused(&b, "no models block", corrupt);
     // the high half of the header's checksum field set
@@ -134,15 +134,15 @@ fn declared_sizes() {
     refused(&q.build(), "60 GB header", corrupt);
     // a models block of 256 MiB declared in a few bytes
     let mut b = c[..HEADER_LEN].to_vec();
-    put_uv(&mut b, 256 << 20);
+    b.extend_from_slice(&(256u32 << 20).to_le_bytes());
     b.extend_from_slice(&[0; 100]);
     refused(&b, "256 MiB models", |e| {
         *e == Error::Corrupt("models too large")
     });
     // a segment whose length field runs past the end of the file
     let mut b = c[..HEADER_LEN].to_vec();
-    block(&mut b, &p.models);
-    put_uv(&mut b, 1 << 40);
+    models_block(&mut b, &p.models);
+    b.extend_from_slice(&u32::MAX.to_le_bytes());
     b.extend_from_slice(&p.segs[0]);
     refused(&b, "segment length", corrupt);
     // the caller's memory budget

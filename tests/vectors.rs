@@ -284,7 +284,7 @@ fn hostile(v: &mut Vec<Vector>) {
         "a stored segment whose dur_ms is 1 more than its frame times",
     );
     let mut x = base[..HEADER_LEN].to_vec();
-    put_uv(&mut x, 256 << 20);
+    x.extend_from_slice(&(256u32 << 20).to_le_bytes());
     x.extend_from_slice(&[0; 100]);
     add(
         "models-size",
@@ -293,7 +293,7 @@ fn hostile(v: &mut Vec<Vector>) {
     );
     let mut x = base[..HEADER_LEN].to_vec();
     for s in &p.segs {
-        block(&mut x, s);
+        segment_block(&mut x, s);
     }
     add("models-missing", x, "the base file without its models block");
     // one usercmd block in a segment of stored streams built by hand

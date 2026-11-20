@@ -485,7 +485,8 @@ pub fn readers_agree(b: &[u8], what: &str) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------- file surgery
 
 /// A file taken apart: its header, the body of its models block and the
-/// body of every segment.
+/// body of every segment (its header fields after the length, then its
+/// coded data).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parts {
     pub header: Header,
@@ -497,18 +498,20 @@ pub struct Parts {
 pub fn parts(c: &[u8]) -> Parts {
     let header = Header::parse(c).unwrap();
     let mut off = HEADER_LEN;
-    let mut next = |c: &[u8]| -> Vec<u8> {
-        let (len, k) = uv_prefix(&c[off..]).unwrap();
-        let b = c[off + k..off + k + len as usize].to_vec();
-        off += k + len as usize;
+    // the next block: `extra` bytes of fields, then as many as its length
+    // field says
+    let mut next = |c: &[u8], extra: usize| -> Vec<u8> {
+        let len = len_field(&c[off..]).unwrap() as usize + extra;
+        let b = c[off + LEN..off + LEN + len].to_vec();
+        off += LEN + len;
         b
     };
-    let models = next(c);
+    let models = next(c, 0);
     let mut segs = Vec::new();
     let mut raw = 0;
     while raw < header.size {
-        let b = next(c);
-        raw += parse_seg_hdr(&b[..b.len().min(SEG_HDR_MAX)]).unwrap().raw_len;
+        let b = next(c, SEG_FIELDS);
+        raw += parse_seg_hdr(&b[..SEG_FIELDS]).unwrap().raw_len;
         segs.push(b);
     }
     Parts {
@@ -522,9 +525,9 @@ impl Parts {
     /// The file these parts make (whatever they hold).
     pub fn build(&self) -> Vec<u8> {
         let mut out = self.header.bytes().to_vec();
-        block(&mut out, &self.models);
+        models_block(&mut out, &self.models);
         for s in &self.segs {
-            block(&mut out, s);
+            segment_block(&mut out, s);
         }
         out
     }

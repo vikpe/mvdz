@@ -202,27 +202,21 @@ impl<S: Source> Reader<S> {
         }
     }
 
-    /// The next `uv` of the stream: its value and its length in bytes
-    /// (None: the stream ends before its first byte).
-    fn read_uv(&mut self) -> Result<Option<(u64, usize)>> {
-        let mut b = [0u8; UV_MAX];
+    /// The next length field of the stream (None: the stream ends before
+    /// its first byte).
+    fn read_len(&mut self) -> Result<Option<u64>> {
+        let mut b = [0u8; LEN];
         let mut n = 0;
-        loop {
-            match self.r.read(&mut b[n..n + 1]) {
+        while n < LEN {
+            match self.r.read(&mut b[n..]) {
                 Ok(0) if n == 0 => return Ok(None),
                 Ok(0) => return bad("incomplete file"),
-                Ok(_) => n += 1,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(k) => n += k.min(LEN - n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e.into()),
             }
-            if b[n - 1] < 0x80 || n == UV_MAX {
-                break;
-            }
         }
-        match uv_prefix(&b[..n]) {
-            Some((v, k)) if k == n => Ok(Some((v, n))),
-            _ => bad("length field"),
-        }
+        Ok(len_field(&b))
     }
 
     /// The `len` bytes of a block, charged to the budget while the charge
@@ -262,7 +256,7 @@ impl<S: Source> Reader<S> {
     fn advance_seq(&mut self, mut pos: u64) -> Result<u64> {
         while !self.done && self.at == self.cur.len() {
             if !self.lay.has_models() {
-                let Some((len, k)) = self.read_uv()? else {
+                let Some(len) = self.read_len()? else {
                     return bad("incomplete file");
                 };
                 if len > TABLES_MAX {
@@ -275,7 +269,7 @@ impl<S: Source> Reader<S> {
                     None
                 };
                 self.lay.models(t)?;
-                pos += k as u64 + len;
+                pos += LEN as u64 + len;
                 continue;
             }
             if self.lay.complete() {
@@ -298,16 +292,15 @@ impl<S: Source> Reader<S> {
             }
             // the stream may end here, short of the demo: every complete
             // segment has been delivered
-            let Some((len, k)) = self.read_uv()? else {
+            let Some(coded) = self.read_len()? else {
                 return bad("incomplete file");
             };
             let s = Sec {
                 off: pos,
-                hdr: k as u8,
-                len,
+                len: coded + SEG_FIELDS as u64,
             };
-            let (b, _c) = self.read_body(len)?;
-            let h = parse_seg_hdr(&b[..b.len().min(SEG_HDR_MAX)])?;
+            let (b, _c) = self.read_body(s.len)?;
+            let h = parse_seg_hdr(&b[..SEG_FIELDS])?;
             let h = self.lay.segment(&s, h)?;
             self.deliver(&h, &b)?;
             pos = s.end();

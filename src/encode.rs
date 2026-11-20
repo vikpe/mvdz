@@ -185,6 +185,9 @@ fn compress_inner(
     }
     let mut proto = Proto::default();
     let plans = plan(src, &cuts, &mut proto);
+    if plans.iter().any(|p| p.dur_ms > u32::MAX as u64) {
+        return Err(Error::Invalid("segment over 2^32 ms"));
+    }
     let header = Header {
         size: src.len() as u64,
         duration_ms: plans.iter().map(|p| p.dur_ms).sum(),
@@ -271,16 +274,16 @@ fn assemble(
     }
     let ids: Vec<usize> = (0..used.len()).filter(|&sid| used[sid]).collect();
     if ids.is_empty() {
-        block(&mut out, &[]);
+        models_block(&mut out, &[]);
     } else {
-        block(&mut out, &segment::tables_body(shared, &ids));
+        models_block(&mut out, &segment::tables_body(shared, &ids));
     }
     let mut info = Info {
         segments: nseg,
         ..Default::default()
     };
     for (i, (b, fb, st)) in bodies.into_iter().enumerate() {
-        block(&mut out, &b);
+        segment_block(&mut out, &b);
         info.fallback_segments += fb as usize;
         info.escaped += plans[i]
             .walked
