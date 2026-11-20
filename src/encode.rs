@@ -8,7 +8,9 @@ use crate::decode::{SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
 use crate::proto::{Proto, frame_len};
-use crate::segment::{self, DEFLATE_LEVEL, SEGMENT, StreamStat, Walked, cut_points, frame_scan};
+use crate::segment::{
+    self, DEFLATE_LEVEL, Nums, SEGMENT, StreamStat, Walked, cut_points, frame_scan,
+};
 use crate::util::{crc32, par_map};
 use sha2::{Digest, Sha256};
 
@@ -84,6 +86,8 @@ pub fn starts_like_mvd(b: &[u8]) -> bool {
 /// One segment as the encoder sees it.
 pub struct Planned {
     pub walked: Option<Walked>,
+    /// the numeric values of the walk, once the predictors have run
+    pub nums: Option<Nums>,
     /// its frame time: the sum of its frame time bytes
     pub dur_ms: u64,
 }
@@ -95,6 +99,7 @@ pub fn plan(src: &[u8], cuts: &[usize], proto: &mut Proto) -> Vec<Planned> {
         let s = &src[w[0]..w[1]];
         out.push(Planned {
             walked: walk_one(s, proto),
+            nums: None,
             dur_ms: frame_scan(s).1,
         });
     }
@@ -123,18 +128,19 @@ pub fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
     b
 }
 
-/// The body of a walked segment, or None if it breaks the ratio limit;
-/// `shared`: the file's shared models (empty: none).
+/// The body of a walked segment with numeric values `nums`, or None if it
+/// breaks the ratio limit; `shared`: the file's shared models (empty: none).
 pub fn transform_body(
     s: &[u8],
     wk: &Walked,
+    nums: &Nums,
     dur_ms: u64,
     threads: usize,
     st: &mut Vec<StreamStat>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
     let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc32(s), C_TRANSFORM);
-    b.extend_from_slice(&segment::encode(s, wk, threads, st, shared));
+    b.extend_from_slice(&segment::encode(wk, nums, threads, st, shared));
     seg_ratio_ok(s.len() as u64, b.len() as u64).then_some(b)
 }
 
@@ -184,7 +190,7 @@ fn compress_inner(
         return Err(Error::Invalid("segment over 4 GiB"));
     }
     let mut proto = Proto::default();
-    let plans = plan(src, &cuts, &mut proto);
+    let mut plans = plan(src, &cuts, &mut proto);
     if plans.iter().any(|p| p.dur_ms > u32::MAX as u64) {
         return Err(Error::Invalid("segment over 2^32 ms"));
     }
@@ -199,13 +205,23 @@ fn compress_inner(
     } else {
         (1, threads)
     };
+    // the numeric predictors run once over every walked segment: the
+    // models are trained on their values and the segments coded from them
+    if !force_raw {
+        let nums = par_map(outer, nseg, |i| {
+            let wk = plans[i].walked.as_ref()?;
+            Some(segment::numerics(&src[cuts[i]..cuts[i + 1]], wk, inner))
+        });
+        for (p, n) in plans.iter_mut().zip(nums) {
+            p.nums = n;
+        }
+    }
     // one model per rANS stream from its symbols in every segment, in the
     // models block (FORMAT.md §12)
     let shared = if nseg > 0 && !force_raw {
-        let segs: Vec<(&[u8], &Walked)> = plans
+        let segs: Vec<(&Walked, &Nums)> = plans
             .iter()
-            .enumerate()
-            .filter_map(|(i, p)| Some((&src[cuts[i]..cuts[i + 1]], p.walked.as_ref()?)))
+            .filter_map(|p| Some((p.walked.as_ref()?, p.nums.as_ref()?)))
             .collect();
         segment::train(&segs, threads)
     } else {
@@ -257,8 +273,9 @@ fn assemble(
     let bodies: Vec<(Vec<u8>, bool, Vec<StreamStat>)> = par_map(outer, nseg, |i| {
         let s = &src[cuts[i]..cuts[i + 1]];
         let mut st = Vec::new();
-        if let (Some(wk), false) = (&plans[i].walked, raw[i]) {
-            if let Some(b) = transform_body(s, wk, plans[i].dur_ms, inner, &mut st, shared) {
+        if let (Some(wk), Some(nums), false) = (&plans[i].walked, &plans[i].nums, raw[i]) {
+            let p = &plans[i];
+            if let Some(b) = transform_body(s, wk, nums, p.dur_ms, inner, &mut st, shared) {
                 return (b, false, st);
             }
         }

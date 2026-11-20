@@ -393,7 +393,12 @@ fn groups() -> Vec<Group> {
 
 /// The numeric values of a walked segment, per group (in [`groups`] order)
 /// and stream of the group.
-fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Vec<Vec<Vec<(NCtx, i32)>>> {
+pub type Nums = Vec<Vec<Vec<(NCtx, i32)>>>;
+
+/// Runs the numeric predictors over a walked segment `src`. The encoder
+/// does this once: the models are trained on the values and the segment is
+/// coded from them.
+pub fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Nums {
     let groups = groups();
     let buf = Buf::ro(src);
     par_map(threads, groups.len(), |gi| {
@@ -408,11 +413,8 @@ fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Vec<Vec<Vec<(NCtx, i32)>
 
 /// The shared models of a file (FORMAT.md §12 rule 11): one per
 /// structural and numeric stream, from its per-context counts summed over
-/// every walked segment `(bytes, walk)`, in segment order.
-pub fn train(segs: &[(&[u8], &Walked)], threads: usize) -> Vec<Option<rans::Shared>> {
-    // the numeric values of every segment, segments in parallel
-    let inner = if segs.len() >= threads { 1 } else { threads };
-    let nums = par_map(threads, segs.len(), |i| numerics(segs[i].0, segs[i].1, inner));
+/// every walked segment `(walk, numeric values)`, in segment order.
+pub fn train(segs: &[(&Walked, &Nums)], threads: usize) -> Vec<Option<rans::Shared>> {
     // where a numeric stream's values are: (group, index in the group)
     let mut at: Vec<Option<(usize, usize)>> = vec![None; N_STREAMS];
     for (gi, g) in groups().iter().enumerate() {
@@ -431,12 +433,12 @@ pub fn train(segs: &[(&[u8], &Walked)], threads: usize) -> Vec<Option<rans::Shar
                     .add(v);
             }
         };
-        for (i, &(_, wk)) in segs.iter().enumerate() {
+        for &(wk, nums) in segs {
             if sid < N_LAZY {
                 add(256, &rans::byte_syms(&wk.io.syms[sid], &wk.io.ctxs[sid]));
             }
             if let Some((gi, k)) = at[sid] {
-                add(rans::NALPHA, &rans::num_syms(sid, &nums[i][gi][k]).0);
+                add(rans::NALPHA, &rans::num_syms(sid, &nums[gi][k]).0);
             }
         }
         tally.and_then(|t| t.shared())
@@ -476,17 +478,16 @@ fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
     }
 }
 
-/// The transform body of a walked segment. A stream with a model in
-/// `shared` (by stream id; empty: none) uses it.
+/// The transform body of a walked segment with numeric values `nums`. A
+/// stream with a model in `shared` (by stream id; empty: none) uses it.
 pub fn encode(
-    src: &[u8],
     wk: &Walked,
+    nums: &Nums,
     threads: usize,
     stats: &mut Vec<StreamStat>,
     shared: &[Option<rans::Shared>],
 ) -> Vec<u8> {
     let groups = groups();
-    let nums = numerics(src, wk, threads);
     // every non-empty stream is a job: (sid, kind, group, index in group)
     let mut jobs: Vec<(usize, Kind, usize, usize)> = Vec::new();
     for sid in 0..N_LAZY {
@@ -936,7 +937,7 @@ mod tests {
         for threads in [1, 3] {
             let (wk, _) = walk(&src, Proto::default()).unwrap();
             let mut st = Vec::new();
-            let body = encode(&src, &wk, 1, &mut st, &[]);
+            let body = encode(&wk, &numerics(&src, &wk, 1), 1, &mut st, &[]);
             let h = parse_header(&body, src.len()).unwrap();
             let dst = decoded(&body, &h, src.len(), None, threads);
             assert!(dst == src, "{threads}");
@@ -983,7 +984,7 @@ mod tests {
         src.extend(demo());
         for threads in [1, 3] {
             let (wk, _) = walk(&src, Proto::default()).unwrap();
-            let body = encode(&src, &wk, 1, &mut Vec::new(), &[]);
+            let body = encode(&wk, &numerics(&src, &wk, 1), 1, &mut Vec::new(), &[]);
             let h = parse_header(&body, src.len()).unwrap();
             let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().2;
             assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
@@ -993,7 +994,7 @@ mod tests {
         // without usercmd blocks neither stream is in the table
         let plain = demo();
         let (wk, _) = walk(&plain, Proto::default()).unwrap();
-        let body = encode(&plain, &wk, 1, &mut Vec::new(), &[]);
+        let body = encode(&wk, &numerics(&plain, &wk, 1), 1, &mut Vec::new(), &[]);
         let h = parse_header(&body, plain.len()).unwrap();
         assert!(h.ents.iter().all(|e| e.0 != UC && e.0 != UC_A));
     }
@@ -1005,7 +1006,8 @@ mod tests {
     fn tables_limit() {
         let src = demo();
         let (wk, _) = walk(&src, Proto::default()).unwrap();
-        let mut models = train(&[(&src[..], &wk), (&src[..], &wk)], 1);
+        let nums = numerics(&src, &wk, 1);
+        let mut models = train(&[(&wk, &nums), (&wk, &nums)], 1);
         let ids = |m: &[Option<rans::Shared>]| -> Vec<usize> {
             (0..m.len()).filter(|&i| m[i].is_some()).collect()
         };
@@ -1027,7 +1029,7 @@ mod tests {
         );
         let ft = FileTables::new(&tables_body(&models, &kept), 1, &Budget::unlimited()).unwrap();
         let mut st = Vec::new();
-        let body = encode(&src, &wk, 1, &mut st, &models);
+        let body = encode(&wk, &nums, 1, &mut st, &models);
         let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;
         assert!(be(big) < BE_RANS, "a stream without a model is stored or DEFLATE");
         assert!(kept.iter().all(|&sid| be(sid) == BE_RANS));
