@@ -408,32 +408,38 @@ fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Vec<Vec<Vec<(NCtx, i32)>
 
 /// The shared models of a file (FORMAT.md §12 rule 11): one per
 /// structural and numeric stream, from its per-context counts summed over
-/// every walked segment `(bytes, walk)`, one segment at a time.
+/// every walked segment `(bytes, walk)`, in segment order.
 pub fn train(segs: &[(&[u8], &Walked)], threads: usize) -> Vec<Option<rans::Shared>> {
-    let mut tally: Vec<Option<rans::Tally>> = (0..N_STREAMS).map(|_| None).collect();
-    let mut add = |sid: usize, alpha: usize, v: &[(u32, u16)]| {
-        if !v.is_empty() {
-            tally[sid]
-                .get_or_insert_with(|| rans::Tally::new(alpha))
-                .add(v);
-        }
-    };
-    for &(s, wk) in segs {
-        for sid in 0..N_LAZY {
-            add(
-                sid,
-                256,
-                &rans::byte_syms(&wk.io.syms[sid], &wk.io.ctxs[sid]),
-            );
-        }
-        for (g, vals) in groups().iter().zip(numerics(s, wk, threads)) {
-            for (&sid, x) in g.streams().iter().zip(vals) {
-                add(sid, rans::NALPHA, &rans::num_syms(sid, &x).0);
-            }
+    // the numeric values of every segment, segments in parallel
+    let inner = if segs.len() >= threads { 1 } else { threads };
+    let nums = par_map(threads, segs.len(), |i| numerics(segs[i].0, segs[i].1, inner));
+    // where a numeric stream's values are: (group, index in the group)
+    let mut at: Vec<Option<(usize, usize)>> = vec![None; N_STREAMS];
+    for (gi, g) in groups().iter().enumerate() {
+        for (k, &sid) in g.streams().iter().enumerate() {
+            at[sid] = Some((gi, k));
         }
     }
+    // a stream's counts do not depend on another stream's: streams in
+    // parallel, each over the segments in order
     let mut models: Vec<Option<rans::Shared>> = par_map(threads, N_STREAMS, |sid| {
-        tally[sid].as_ref().and_then(|t| t.shared())
+        let mut tally: Option<rans::Tally> = None;
+        let mut add = |alpha: usize, v: &[(u32, u16)]| {
+            if !v.is_empty() {
+                tally
+                    .get_or_insert_with(|| rans::Tally::new(alpha))
+                    .add(v);
+            }
+        };
+        for (i, &(_, wk)) in segs.iter().enumerate() {
+            if sid < N_LAZY {
+                add(256, &rans::byte_syms(&wk.io.syms[sid], &wk.io.ctxs[sid]));
+            }
+            if let Some((gi, k)) = at[sid] {
+                add(rans::NALPHA, &rans::num_syms(sid, &nums[i][gi][k]).0);
+            }
+        }
+        tally.and_then(|t| t.shared())
     });
     fit_tables(&mut models, TABLES_MAX);
     models
