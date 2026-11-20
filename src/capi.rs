@@ -21,8 +21,8 @@ use crate::error::Error;
 use crate::segment::Level;
 use crate::stream::{Reader, Seekable, Seq};
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_int, c_longlong, c_void};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::ffi::{c_char, c_int, c_longlong, c_void};
+use std::io::{Read, Seek, SeekFrom};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -245,9 +245,6 @@ pub type ReadFn =
 /// seek: new absolute position, negative on error; whence 0 SET, 1 CUR, 2 END.
 pub type SeekFn =
     Option<unsafe extern "C" fn(user: *mut c_void, off: c_longlong, whence: c_int) -> c_longlong>;
-/// write: bytes consumed (> 0), negative on error.
-pub type WriteFn =
-    Option<unsafe extern "C" fn(user: *mut c_void, buf: *const c_void, n: usize) -> c_longlong>;
 
 struct Cb {
     rd: ReadFn,
@@ -305,16 +302,12 @@ struct RHandle {
     raw_size: i64,
 }
 
-struct WHandle(Option<api::Writer<WCb>>);
-
 enum Handle {
     R(RHandle),
-    W(WHandle),
 }
 
 /// Opaque handle types (ids, never dereferenced).
 pub type MvdzReader = c_void;
-pub type MvdzWriter = c_void;
 
 /// A live handle: its lock and the thread that holds it (0 = none).
 struct Slot {
@@ -397,7 +390,6 @@ fn with_reader<T: From<c_int>>(p: *const c_void, f: impl FnOnce(&mut RHandle) ->
     };
     match &mut *g.g {
         Handle::R(r) => f(r),
-        Handle::W(_) => T::from(MVDZ_E_INVALID),
     }
 }
 
@@ -682,246 +674,4 @@ pub unsafe extern "C" fn mvdz_info_json_memory(
             Err(e) => code(&e),
         }
     })
-}
-
-/// A UTF-8 C string (None: NULL or not UTF-8).
-unsafe fn cstr(p: *const c_char) -> Option<String> {
-    if p.is_null() {
-        None
-    } else {
-        unsafe { CStr::from_ptr(p) }.to_str().ok().map(String::from)
-    }
-}
-
-// ---------------------------------------------------------------- streaming writer
-
-pub struct WCb {
-    wr: WriteFn,
-    user: *mut c_void,
-}
-
-// SAFETY: as for Cb.
-unsafe impl Send for WCb {}
-
-impl Write for WCb {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        if b.is_empty() {
-            return Ok(0);
-        }
-        let f = self
-            .wr
-            .ok_or_else(|| std::io::Error::other("no write callback"))?;
-        let r = unsafe { f(self.user, b.as_ptr() as *const c_void, b.len()) };
-        if r <= 0 || r as u64 > b.len() as u64 {
-            return Err(std::io::Error::other("write callback failed"));
-        }
-        Ok(r as usize)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Opens a streaming compressor writing through `write`. `level`: 0
-/// normal, 1 fast. `segment`: raw bytes per segment (0 = 1 MiB).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_writer_open(
-    write: WriteFn,
-    user: *mut c_void,
-    lvl: c_int,
-    segment: usize,
-    threads: c_int,
-    err: *mut c_int,
-) -> *mut MvdzWriter {
-    guard(std::ptr::null_mut(), || {
-        let Some(level) = level(lvl) else {
-            unsafe { set(err, MVDZ_E_INVALID) };
-            return std::ptr::null_mut();
-        };
-        if write.is_none() {
-            unsafe { set(err, MVDZ_E_INVALID) };
-            return std::ptr::null_mut();
-        }
-        let cfg = Config {
-            level,
-            segment,
-            threads: threads.max(1) as usize,
-            ..Default::default()
-        };
-        match api::Writer::new(WCb { wr: write, user }, &cfg) {
-            Ok(w) => {
-                unsafe { set(err, MVDZ_OK) };
-                register(Handle::W(WHandle(Some(w))))
-            }
-            Err(e) => {
-                unsafe { set(err, code(&e)) };
-                std::ptr::null_mut()
-            }
-        }
-    })
-}
-
-/// Appends demo bytes. After an error every later call (and finish)
-/// returns the same error.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_writer_write(
-    w: *mut MvdzWriter,
-    data: *const c_void,
-    n: usize,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || {
-        let Some(d) = (unsafe { slice(data, n) }) else {
-            return MVDZ_E_INVALID;
-        };
-        let Some(h) = lookup(w) else {
-            return MVDZ_E_INVALID;
-        };
-        let mut g = match lock(&h) {
-            Ok(g) => g,
-            Err(e) => return e,
-        };
-        match &mut *g.g {
-            Handle::W(WHandle(Some(wr))) => match wr.write_demo(d) {
-                Ok(()) => MVDZ_OK,
-                Err(e) => code(&e),
-            },
-            _ => MVDZ_E_INVALID,
-        }
-    })
-}
-
-/// Sets an extension metadata key (UTF-8, NUL-terminated) to `n` bytes
-/// at `value`, replacing an earlier value of the key. A refused key leaves
-/// the writer as it was.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_writer_set_ext(
-    w: *mut MvdzWriter,
-    key: *const c_char,
-    value: *const c_void,
-    n: usize,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || {
-        let (Some(k), Some(v)) = (unsafe { cstr(key) }, unsafe { slice(value, n) }) else {
-            return MVDZ_E_INVALID;
-        };
-        let Some(h) = lookup(w) else {
-            return MVDZ_E_INVALID;
-        };
-        let mut g = match lock(&h) {
-            Ok(g) => g,
-            Err(e) => return e,
-        };
-        match &mut *g.g {
-            Handle::W(WHandle(Some(wr))) => match wr.set_ext(&k, v) {
-                Ok(()) => MVDZ_OK,
-                Err(e) => code(&e),
-            },
-            _ => MVDZ_E_INVALID,
-        }
-    })
-}
-
-/// Takes the writer out of its handle and unregisters the handle. A handle
-/// whose earlier call panicked is unregistered too, its writer dropped
-/// unfinished, and gives MVDZ_E_PANIC: finish and abort always free a
-/// writer handle, except from inside its own callback.
-fn take_writer(w: *const c_void) -> Result<api::Writer<WCb>, c_int> {
-    let h = lookup(w).ok_or(MVDZ_E_INVALID)?;
-    if h.owner.load(Ordering::SeqCst) == thread_id() {
-        return Err(MVDZ_E_INVALID);
-    }
-    let mut g = match h.h.lock() {
-        Ok(g) => g,
-        Err(p) => {
-            if !matches!(*p.into_inner(), Handle::W(_)) {
-                return Err(MVDZ_E_INVALID);
-            }
-            drop(unregister(w));
-            return Err(MVDZ_E_PANIC);
-        }
-    };
-    let Handle::W(wh) = &mut *g else {
-        return Err(MVDZ_E_INVALID);
-    };
-    let wr = wh.0.take();
-    drop(g);
-    drop(unregister(w));
-    wr.ok_or(MVDZ_E_INVALID)
-}
-
-/// Ends the demo (writes metadata, index, trailer) and frees the handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_writer_finish(w: *mut MvdzWriter) -> c_int {
-    guard(MVDZ_E_PANIC, || match take_writer(w) {
-        Ok(wr) => match wr.finish() {
-            Ok(_) => MVDZ_OK,
-            Err(e) => code(&e),
-        },
-        Err(c) => c,
-    })
-}
-
-/// Frees the handle without finishing the file: what was written is an
-/// incomplete file (no trailer) whose complete segments still decode.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_writer_abort(w: *mut MvdzWriter) -> c_int {
-    guard(MVDZ_E_PANIC, || match take_writer(w) {
-        Ok(wr) => {
-            let _ = wr.abort();
-            MVDZ_OK
-        }
-        Err(c) => c,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    unsafe extern "C" fn sink(_: *mut c_void, _: *const c_void, n: usize) -> c_longlong {
-        n as c_longlong
-    }
-
-    fn open() -> *mut MvdzWriter {
-        let mut err = 0;
-        let w = unsafe { mvdz_writer_open(Some(sink), std::ptr::null_mut(), 0, 0, 1, &mut err) };
-        assert_eq!(err, MVDZ_OK);
-        w
-    }
-
-    /// Poisons the handle's lock, as a call that panicked inside it does.
-    fn poison(w: *const c_void) {
-        let h = lookup(w).unwrap();
-        let _ = std::thread::spawn(move || {
-            let _g = h.h.lock().unwrap();
-            panic!("poison the handle");
-        })
-        .join();
-    }
-
-    #[test]
-    fn a_panicked_writer_handle_is_freed_by_finish_and_abort() {
-        for finish in [true, false] {
-            let w = open();
-            poison(w);
-            let f = |w| unsafe {
-                if finish {
-                    mvdz_writer_finish(w)
-                } else {
-                    mvdz_writer_abort(w)
-                }
-            };
-            assert_eq!(f(w), MVDZ_E_PANIC);
-            assert!(lookup(w).is_none(), "the handle is freed");
-            assert_eq!(f(w), MVDZ_E_INVALID);
-        }
-    }
-
-    #[test]
-    fn finish_and_abort_free_a_healthy_writer_handle() {
-        let w = open();
-        assert_eq!(unsafe { mvdz_writer_abort(w) }, MVDZ_OK);
-        assert!(lookup(w).is_none());
-        assert_eq!(unsafe { mvdz_writer_abort(w) }, MVDZ_E_INVALID);
-    }
 }

@@ -261,20 +261,6 @@ pub fn duel() -> Option<Vec<u8>> {
     sample("3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92")
 }
 
-/// Compresses with the streaming writer, in uneven chunks.
-pub fn stream(src: &[u8], c: &Config) -> Vec<u8> {
-    let mut w = mvdz::Writer::new(Vec::new(), c).unwrap();
-    let mut i = 0;
-    let mut step = 1 + src.len() % 7;
-    while i < src.len() {
-        let j = (i + step).min(src.len());
-        w.write_demo(&src[i..j]).unwrap();
-        i = j;
-        step = (step * 31 + 17) % 70_000 + 1;
-    }
-    w.finish().unwrap()
-}
-
 // ---------------------------------------------------------------- every reader
 
 /// A reader that hands out at most 7 bytes per call.

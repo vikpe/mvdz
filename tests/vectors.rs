@@ -731,13 +731,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
     };
     // without the input check: some vectors hold non-demo input
     let one = |d: &[u8], c: Config| mvdz::encode::compress(d, &c).unwrap().0;
-    let st = |d: &[u8], c: Config| {
-        let mut w = mvdz::stream::StreamEncoder::new_unchecked(Vec::new(), &c).unwrap();
-        for ch in d.chunks(4000) {
-            w.write_demo(ch).unwrap();
-        }
-        w.finish().unwrap()
-    };
     let src = "duel = sample 3ff1f82b...8d92";
     add(
         "duel.normal.mvdz",
@@ -769,18 +762,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
         one(&duel, c(Level::Fast, 65536)),
         &duel,
         &format!("{src}; compress --fast -s 64K"),
-    );
-    add(
-        "duel.normal.streamed.mvdz",
-        st(&duel, c(Level::Normal, 65536)),
-        &duel,
-        &format!("{src}; Writer, segment 64K, 4000-byte writes (META before the demoinfo segment)"),
-    );
-    add(
-        "duel.fast.streamed.mvdz",
-        st(&duel, c(Level::Fast, 65536)),
-        &duel,
-        &format!("{src}; Writer --fast, segment 64K"),
     );
     let (fb, _) = mvdz::encode::compress_untransformed(&duel, &c(Level::Normal, 65536)).unwrap();
     add(
@@ -851,12 +832,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
         &fte,
         "the first 300000 bytes of sample 3fdd8018 (FTE float coordinates)",
     );
-    add(
-        "float-fte.normal.streamed.mvdz",
-        st(&fte, c(Level::Normal, 65536)),
-        &fte,
-        "the same, Writer, segment 64K (no demoinfo: META written last)",
-    );
     let esc = escapes();
     add(
         "escapes.normal.mvdz",
@@ -878,12 +853,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
         "synthetic demo carrying a 3-block KTX demoinfo twice; segment 1000",
     );
     add(
-        "demoinfo-multi.normal.streamed.mvdz",
-        st(&md, c(Level::Normal, 1000)),
-        &md,
-        "the same, Writer, segment 1000",
-    );
-    add(
         "random.normal.mvdz",
         one(&random, c(Level::Normal, 0)),
         &random,
@@ -901,12 +870,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
         one(b"", c(Level::Normal, 0)),
         b"",
         "an empty demo",
-    );
-    add(
-        "empty.streamed.mvdz",
-        st(b"", c(Level::Normal, 0)),
-        b"",
-        "an empty demo, Writer (no segment)",
     );
     let su = start_u64();
     let sc = one(&su, c(Level::Normal, 0));
@@ -936,12 +899,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
         one(&uc, c(Level::Normal, 8192)),
         &uc,
         "the same, -s 8K",
-    );
-    add(
-        "usercmd.normal.streamed.mvdz",
-        st(&uc, c(Level::Normal, 8192)),
-        &uc,
-        "the same, Writer, segment 8K",
     );
     hostile(&mut v);
     Some(v)

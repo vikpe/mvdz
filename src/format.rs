@@ -29,9 +29,6 @@ pub const K_TRAILER: u8 = 0x7f;
 pub const K_TABLES: u8 = 0x86;
 pub const CRITICAL: u8 = 0x80;
 
-/// prefix flag: written by the streaming encoder (metadata near the end)
-pub const F_STREAMED: u8 = 1;
-
 /// Segment codings.
 pub const C_TRANSFORM: u8 = 0;
 pub const C_DEFLATE: u8 = 1;

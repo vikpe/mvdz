@@ -34,12 +34,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "stream_writer"
-path = "fuzz_targets/stream_writer.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "capi"
 path = "fuzz_targets/capi.rs"
 test = false

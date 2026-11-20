@@ -34,7 +34,7 @@ pub mod walk;
 
 
 pub use api::{
-    Config, FileInfo, Info, Writer, check_demo, compress, compress_info, decompress,
+    Config, FileInfo, Info, check_demo, compress, compress_info, decompress,
     decompress_stream, decompress_with, gunzip, is_gzip, is_mvdz, read_metadata,
     read_metadata_with, write_file_atomic, write_file_atomic_with, write_gzip,
 };

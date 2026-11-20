@@ -36,13 +36,6 @@ unsafe extern "C" fn sk(u: *mut c_void, off: c_longlong, wh: c_int) -> c_longlon
     p
 }
 
-unsafe extern "C" fn wr(u: *mut c_void, buf: *const c_void, n: usize) -> c_longlong {
-    let v = unsafe { &mut *(u as *mut Vec<u8>) };
-    let k = n.min(13);
-    v.extend_from_slice(unsafe { std::slice::from_raw_parts(buf as *const u8, k) });
-    k as c_longlong
-}
-
 fn check_json(p: *mut i8, n: usize) {
     assert!(!p.is_null());
     let s = unsafe { std::slice::from_raw_parts(p as *const u8, n + 1) };
@@ -175,62 +168,6 @@ fuzz_target!(|data: &[u8]| {
                 {
                     check_json(p, n);
                 }
-            }
-            14 => {
-                let mut v: Vec<u8> = Vec::new();
-                let w = unsafe {
-                    mvdz_writer_open(
-                        Some(wr),
-                        &mut v as *mut Vec<u8> as *mut c_void,
-                        (op >> 7) as c_int,
-                        64 + op as usize,
-                        1,
-                        &mut err,
-                    )
-                };
-                assert!(!w.is_null());
-                let demo = &file[..file.len().min(4096)];
-                // input that is not a demo is refused (sticky)
-                let not_demo = mvdz::check_demo(demo).is_err();
-                let rc =
-                    unsafe { mvdz_writer_write(w, demo.as_ptr() as *const c_void, demo.len()) };
-                assert!(rc == 0 || (not_demo && rc == MVDZ_E_NOTMVD), "{rc}");
-                if op & 32 != 0 && not_demo {
-                    assert_eq!(unsafe { mvdz_writer_finish(w) }, MVDZ_E_NOTMVD);
-                } else if op & 32 != 0 {
-                    assert_eq!(unsafe { mvdz_writer_finish(w) }, 0);
-                    let mut p: *mut u8 = std::ptr::null_mut();
-                    let mut n = 0usize;
-                    assert_eq!(
-                        unsafe {
-                            mvdz_decompress(
-                                v.as_ptr() as *const c_void,
-                                v.len(),
-                                1,
-                                0,
-                                0,
-                                &mut p,
-                                &mut n,
-                            )
-                        },
-                        0
-                    );
-                    assert_eq!(n, demo.len());
-                    if n > 0 {
-                        assert_eq!(unsafe { std::slice::from_raw_parts(p, n) }, demo);
-                    }
-                    unsafe { mvdz_free(p as *mut c_void, n) };
-                } else {
-                    assert_eq!(unsafe { mvdz_writer_abort(w) }, 0);
-                }
-                // the handle is gone
-                assert!(unsafe { mvdz_writer_finish(w) } < 0);
-                assert!(unsafe { mvdz_writer_abort(w) } < 0);
-                assert!(
-                    unsafe { mvdz_writer_write(w, demo.as_ptr() as *const c_void, demo.len()) } < 0
-                );
-                // a writer id is not a reader
-                assert!(unsafe { mvdz_read(w, out.as_mut_ptr() as *mut c_void, 1) } < 0);
             }
             _ => {
                 let mut p: *mut u8 = std::ptr::null_mut();

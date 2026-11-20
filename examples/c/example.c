@@ -1,6 +1,6 @@
-/* Example: decode an .mvdz through stdio callbacks (as an engine would
- * through its VFS), seek by time, read the metadata, and stream-compress
- * a demo back (with an extension metadata key). Usage: example file.mvd  (any QuakeWorld MVD demo). */
+/* Example: compress a demo, decode the .mvdz through stdio callbacks (as
+ * an engine would through its VFS), seek by time and read the metadata.
+ * Usage: example file.mvd  (any QuakeWorld MVD demo). */
 #define _FILE_OFFSET_BITS 64
 #include "mvdz.h"
 #include <stdio.h>
@@ -16,9 +16,6 @@ static long long f_seek(void *u, long long off, int whence) {
     /* 64-bit offsets (fseeko/ftello; _fseeki64 on Windows) */
     if (fseeko((FILE *)u, (off_t)off, w) != 0) return -1;
     return (long long)ftello((FILE *)u);
-}
-static long long f_write(void *u, const void *buf, size_t n) {
-    return fwrite(buf, 1, n, (FILE *)u) == n ? (long long)n : -1;
 }
 
 static int fail(const char *what, int rc) {
@@ -38,24 +35,17 @@ int main(int argc, char **argv) {
     fclose(f);
     printf("mvdz %s\n", mvdz_version());
 
-    /* 1. stream-compress the demo in small chunks, as a recorder would */
+    /* 1. compress the demo (256 KiB segments, so the file can seek) */
     const char *packed = "example_out.mvdz";
-    FILE *o = fopen(packed, "wb");
+    unsigned char *c; size_t c_n;
     int err = 0;
-    mvdz_writer *w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_NORMAL, 256 * 1024, 1, &err);
-    if (!w) return fail("writer_open", err);
-    /* extension metadata: where the demo came from (any time before finish) */
-    int rc = mvdz_writer_set_ext(w, "source", "example.c", 9);
-    if (rc) return fail("writer_set_ext", rc);
-    for (long i = 0; i < n; i += 4000) {
-        long k = n - i < 4000 ? n - i : 4000;
-        int rc = mvdz_writer_write(w, demo + i, (size_t)k);
-        if (rc) return fail("writer_write", rc);
-    }
-    rc = mvdz_writer_finish(w);
-    if (rc) return fail("writer_finish", rc);
-    long packed_n = ftell(o);
+    int rc = mvdz_compress(demo, (size_t)n, MVDZ_LEVEL_NORMAL, 256 * 1024, 1, &c, &c_n);
+    if (rc) return fail("compress", rc);
+    FILE *o = fopen(packed, "wb");
+    if (!o || fwrite(c, 1, c_n, o) != c_n) { perror(packed); return 1; }
     fclose(o);
+    long packed_n = (long)c_n;
+    mvdz_free(c, c_n);
     printf("compressed %ld -> %ld bytes\n", n, packed_n);
 
     /* 2. metadata without decoding */
@@ -101,18 +91,8 @@ int main(int argc, char **argv) {
     r = mvdz_open_memory(junk, sizeof junk, 1, 0, 0, &err);
     printf("garbage: %s\n", r ? "opened?!" : mvdz_strerror(err));
     if (r) mvdz_close(r);
-    /* 7. an aborted recording: no trailer, its segments still decode */
-    o = fopen(packed, "wb");
-    w = mvdz_writer_open(f_write, o, MVDZ_LEVEL_FAST, 64 * 1024, 1, &err);
-    if (!w) return fail("writer_open", err);
-    rc = mvdz_writer_write(w, demo, (size_t)(n / 2));
-    if (rc) return fail("writer_write", rc);
-    rc = mvdz_writer_abort(w);
-    if (rc || mvdz_writer_finish(w) != MVDZ_E_INVALID) return fail("writer_abort", rc);
-    fclose(o);
-    printf("aborted recording ok\n");
 
-    /* 8. whole-buffer API (.mvd or .mvd.gz input); input that is not a
+    /* 6. whole-buffer API (.mvd or .mvd.gz input); input that is not a
      * demo is refused */
     unsigned char *z; size_t z_n;
     rc = mvdz_compress(demo, (size_t)n, MVDZ_LEVEL_FAST, 0, 1, &z, &z_n);

@@ -68,7 +68,6 @@ fn go_decoder_agrees() {
             for c in [
                 mvdz::compress(&src, &cfg(level, 0)).unwrap(),
                 mvdz::compress(&src, &cfg(level, 300_000)).unwrap(),
-                stream(&src, &cfg(level, 300_000)),
             ] {
                 std::fs::write(&tmp, &c).unwrap();
                 let sha: String = <sha2::Sha256 as sha2::Digest>::digest(&src)

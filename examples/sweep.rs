@@ -1,6 +1,6 @@
-//! Round-trip sweep: every file at both levels, whole-file and segmented,
-//! one-shot and streamed; decoded by the whole-file and the sequential
-//! reader and compared by SHA-256. Usage: sweep [-s size] files...
+//! Round-trip sweep: every file at both levels, whole-file and segmented;
+//! decoded by the whole-file and the sequential reader and compared by
+//! SHA-256. Usage: sweep [-s size] files...
 //! (`size` takes K, M, G suffixes, binary, as the command-line tool does).
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -12,32 +12,23 @@ fn main() {
         seg = size(&args[1]);
         args.drain(..2);
     }
-    let configs: Vec<(mvdz::Level, usize, bool)> = [mvdz::Level::Normal, mvdz::Level::Fast]
+    let configs: Vec<(mvdz::Level, usize)> = [mvdz::Level::Normal, mvdz::Level::Fast]
         .into_iter()
-        .flat_map(|l| [(l, 0, false), (l, seg, false), (l, 0, true), (l, seg, true)])
+        .flat_map(|l| [(l, 0), (l, seg)])
         .collect();
     let res = mvdz::util::par_map(4, args.len(), |i| {
         let src = std::fs::read(&args[i]).unwrap();
         let want = Sha256::digest(&src);
         let mut fails = Vec::new();
         let mut fb = 0;
-        for &(level, s, streamed) in &configs {
+        for &(level, s) in &configs {
             let cfg = mvdz::Config {
                 level,
                 segment: s,
                 ..Default::default()
             };
-            let c = if streamed {
-                let mut w = mvdz::Writer::new(Vec::new(), &cfg).unwrap();
-                for ch in src.chunks(65_536) {
-                    w.write_demo(ch).unwrap();
-                }
-                w.finish().unwrap()
-            } else {
-                let (c, info) = mvdz::compress_info(&src, &cfg).unwrap();
-                fb += info.fallback_segments;
-                c
-            };
+            let (c, info) = mvdz::compress_info(&src, &cfg).unwrap();
+            fb += info.fallback_segments;
             let ok1 = mvdz::decompress(&c, 1)
                 .map(|d| Sha256::digest(&d) == want)
                 .unwrap_or(false);
@@ -46,7 +37,7 @@ fn main() {
                 .map(|mut r| r.read_to_end(&mut d).is_ok() && Sha256::digest(&d) == want)
                 .unwrap_or(false);
             if !(ok1 && ok2) {
-                fails.push(format!("{level:?} seg {s} streamed {streamed}"));
+                fails.push(format!("{level:?} seg {s}"));
             }
         }
         (args[i].clone(), src.len(), fails, fb)

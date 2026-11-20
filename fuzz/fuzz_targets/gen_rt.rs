@@ -2,7 +2,7 @@
 //! Review target: a structure-aware demo; (1) the transform alone, with
 //! verification off, must round-trip (else the encoder relies on its
 //! fallback: a transform bug); (2) the normal path (verify on) must
-//! succeed and round-trip, one-shot and streamed, at any thread count.
+//! succeed and round-trip at any thread count.
 use libfuzzer_sys::fuzz_target;
 mod mgen;
 
@@ -53,23 +53,4 @@ fuzz_target!(|data: &[u8]| {
     let (c, _) = mvdz::encode::compress(&demo, &cfg).expect("compress");
     rt(&c, &demo, "one-shot");
     assert!(mvdz::decompress(&c, 3).unwrap() == demo);
-    let scfg = mvdz::Config {
-        segment: seg.max(64),
-        ..cfg
-    };
-    // the streaming writer checks its input as the one-shot API does
-    if mvdz::check_demo(&demo).is_err() {
-        return;
-    }
-    let mut w = mvdz::Writer::new(Vec::new(), &scfg).unwrap();
-    let mut i = 0;
-    let mut step = 1 + data[1] as usize;
-    while i < demo.len() {
-        let j = (i + step).min(demo.len());
-        w.write_demo(&demo[i..j]).unwrap();
-        i = j;
-        step = step * 7 % 997 + 1;
-    }
-    let f = w.finish().expect("writer finish");
-    rt(&f, &demo, "streamed");
 });

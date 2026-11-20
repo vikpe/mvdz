@@ -8,7 +8,7 @@ use mvdz::budget::{Budget, Limits, ReadOptions};
 use mvdz::capi::*;
 use mvdz::format::*;
 use mvdz::util::{crc32, put_uv};
-use mvdz::{Config, Error, Level};
+use mvdz::{Error, Level};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
@@ -298,9 +298,8 @@ fn sets(n: usize) -> Vec<u8> {
     v
 }
 
-/// C-M1, C-L2: more segments than the writers allow is refused up front
-/// by the one-shot encoder and at the first segment over the limit by the
-/// streaming writer, never by writing an INDEX readers refuse.
+/// C-M1, C-L2: more segments than the encoder allows is refused up front,
+/// never by writing an INDEX readers refuse.
 #[test]
 fn c_m1_segment_limit() {
     let demo = sets(MAX_SEGMENTS + 10);
@@ -311,38 +310,10 @@ fn c_m1_segment_limit() {
         Error::Invalid("too many segments: use a larger segment size")
     );
     assert!(t.elapsed() < Duration::from_secs(5));
-    let mut w = mvdz::Writer::new(Vec::new(), &cfg(Level::Fast, 1)).unwrap();
-    let r = demo.chunks(1 << 16).try_for_each(|c| w.write_demo(c));
-    assert_eq!(
-        r.unwrap_err(),
-        Error::Invalid("too many segments: use a larger segment size")
-    );
     // at the limit itself, the file is written and decodes
     let demo = sets(2000);
     let c = mvdz::compress(&demo, &cfg(Level::Fast, 1)).unwrap();
     assert_eq!(mvdz::decompress(&c, 1).unwrap(), demo);
-}
-
-/// C-L1: extension metadata is checked when the writer is created.
-#[test]
-fn c_l1_writer_checks_ext() {
-    let big = Config {
-        ext: vec![("k".into(), vec![b'v'; 2 << 20])],
-        ..cfg(Level::Fast, 4096)
-    };
-    assert_eq!(
-        mvdz::Writer::new(Vec::new(), &big).err(),
-        Some(Error::Invalid("extension metadata over 1 MiB"))
-    );
-    let dup = Config {
-        ext: vec![("k".into(), b"a".to_vec()), ("k".into(), b"b".to_vec())],
-        ..cfg(Level::Fast, 4096)
-    };
-    assert_eq!(
-        mvdz::Writer::new(Vec::new(), &dup).err(),
-        Some(Error::Invalid("duplicate extension key"))
-    );
-    assert!(mvdz::compress(b"", &dup).is_err());
 }
 
 /// D3, D9: the transform flags are checked by every reader at open.

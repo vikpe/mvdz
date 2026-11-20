@@ -4,7 +4,7 @@ use crate::budget::{Budget, Limits, ReadOptions};
 use crate::decode::{SeekSrc, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
-use crate::stream::{Reader, Seq, StreamEncoder};
+use crate::stream::{Reader, Seq};
 use std::io::{Read, Seek, Write};
 
 pub use crate::encode::{Config, Info};
@@ -115,48 +115,6 @@ pub fn decompress_stream<R: Read, W: Write>(
     Ok(n)
 }
 
-/// Streaming compressor for a growing demo: `write` demo bytes as they
-/// arrive, then `finish` (or `abort`). Segments are written as they fill.
-/// The first error is sticky: every later call returns it and nothing more
-/// is written.
-pub struct Writer<W: Write>(StreamEncoder<W>);
-
-impl<W: Write> Writer<W> {
-    /// `cfg.segment`: segment size in raw bytes (0 = 1 MiB).
-    pub fn new(w: W, cfg: &Config) -> Result<Self> {
-        Ok(Writer(StreamEncoder::new(w, cfg)?))
-    }
-    /// Appends demo bytes.
-    pub fn write_demo(&mut self, b: &[u8]) -> Result<()> {
-        self.0.write_demo(b)
-    }
-    /// Sets an extension metadata key, replacing an earlier value of the
-    /// same key; any time before `finish`. A refused key (the extension
-    /// metadata over 1 MiB) leaves the writer as it was.
-    pub fn set_ext(&mut self, key: &str, value: &[u8]) -> Result<()> {
-        self.0.set_ext(key, value)
-    }
-    /// Ends the demo (metadata, index, trailer) and returns the writer.
-    pub fn finish(self) -> Result<W> {
-        self.0.finish()
-    }
-    /// Stops without finishing: the output is an incomplete file whose
-    /// complete segments still decode sequentially.
-    pub fn abort(self) -> W {
-        self.0.abort()
-    }
-}
-
-impl<W: Write> Write for Writer<W> {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.write_demo(b)?;
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------- metadata
 
 /// What a file says about itself, read without decoding the demo.
@@ -218,7 +176,6 @@ struct JSeg {
 #[derive(serde::Serialize)]
 struct JInfo {
     version: u8,
-    streamed: bool,
     file_size: u64,
     sha256: String,
     size: u64,
@@ -270,7 +227,6 @@ impl FileInfo {
             .filter(|r| r.get().trim_start().starts_with('{'));
         let j = JInfo {
             version: VERSION,
-            streamed: self.flags & F_STREAMED != 0,
             file_size: self.file_size,
             sha256: hex(&m.sha256),
             size: m.size,

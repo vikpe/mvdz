@@ -1,6 +1,5 @@
 //! Round trips through every reader: both levels, whole-file and
-//! segmented, one-shot and streamed; seeking; odd and non-MVD input;
-//! determinism.
+//! segmented; seeking; odd and non-MVD input; determinism.
 
 mod common;
 use common::*;
@@ -28,22 +27,7 @@ fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) {
             }
             let back = readers_agree(&one, what)
                 .unwrap_or_else(|| panic!("{what}: {level:?} seg {seg} refused"));
-            assert!(back == src, "{what}: {level:?} seg {seg} one-shot");
-            let st = if mvdz::check_demo(src).is_ok() {
-                stream(
-                    src,
-                    &Config {
-                        segment: if seg == 0 { 100_000 } else { seg },
-                        ..c.clone()
-                    },
-                )
-            } else {
-                // the streaming writer refuses non-demos (see above)
-                one.clone()
-            };
-            let back = readers_agree(&st, what)
-                .unwrap_or_else(|| panic!("{what}: {level:?} seg {seg} streamed refused"));
-            assert!(back == src, "{what}: {level:?} seg {seg} streamed");
+            assert!(back == src, "{what}: {level:?} seg {seg}");
         }
     }
 }
@@ -66,8 +50,7 @@ fn sample_demos() {
     }
 }
 
-/// Input that is not an MVD demo is refused by every encoder, before
-/// anything is written by the one-shot one.
+/// Input that is not an MVD demo is refused by the encoder.
 #[test]
 fn empty_and_tiny_inputs() {
     let mut rng = Rng(7);
@@ -86,17 +69,14 @@ fn empty_and_tiny_inputs() {
         for level in LEVELS {
             let e = mvdz::compress(src, &cfg(level, 0)).unwrap_err();
             assert!(matches!(e, mvdz::Error::NotMvd(_)), "{e}");
-            let mut w = mvdz::Writer::new(Vec::new(), &cfg(level, 1000)).unwrap();
-            let r = w.write_demo(src).and_then(|_| w.finish().map(|_| ()));
-            assert!(matches!(r, Err(mvdz::Error::NotMvd(_))), "{r:?}");
         }
         // the unchecked encoder still round-trips any bytes
         check_all_ways(src, &format!("{src:?}"), false);
     }
 }
 
-/// Input that does not frame from the first byte: the streaming writer
-/// used to panic on it (correctness review F2, robustness 7).
+/// Input that does not frame from the first byte, or stops framing early
+/// (correctness review F2, robustness 7).
 #[test]
 fn non_mvd_input_streams() {
     let mut rng = Rng(7);
@@ -112,18 +92,17 @@ fn non_mvd_input_streams() {
         inputs.push(cut);
     }
     for (i, src) in inputs.iter().enumerate() {
-        // the streaming writer refuses what is not a demo
+        // the encoder refuses what is not a demo
         if mvdz::check_demo(src).is_err() {
-            let mut w = mvdz::Writer::new(Vec::new(), &cfg(Level::Fast, 1000)).unwrap();
-            let r = w.write_demo(src).and_then(|_| w.finish().map(|_| ()));
+            let r = mvdz::compress(src, &cfg(Level::Fast, 1000));
             assert!(matches!(r, Err(mvdz::Error::NotMvd(_))), "input {i}");
             continue;
         }
         for level in LEVELS {
             for seg in [1000usize, 1 << 20] {
-                let st = stream(src, &cfg(level, seg));
+                let c = mvdz::compress(src, &cfg(level, seg)).unwrap();
                 assert!(
-                    readers_agree(&st, "non-mvd").unwrap() == *src,
+                    readers_agree(&c, "non-mvd").unwrap() == *src,
                     "input {i} {level:?} seg {seg}"
                 );
             }
@@ -145,8 +124,6 @@ fn ratio_limit_fallback() {
             let (c, info) = mvdz::compress_info(&src, &cfg(level, seg)).unwrap();
             assert!(info.fallback_segments > 0);
             assert!(readers_agree(&c, "nop").unwrap() == src);
-            let st = stream(&src, &cfg(level, 4 << 20));
-            assert!(readers_agree(&st, "nop streamed").unwrap() == src);
         }
     }
 }
@@ -157,7 +134,7 @@ fn seeking() {
     for level in LEVELS {
         for c in [
             mvdz::compress(&src, &cfg(level, 40_000)).unwrap(),
-            stream(&src, &cfg(level, 50_000)),
+            mvdz::compress(&src, &cfg(level, 50_000)).unwrap(),
         ] {
             let mut r = mvdz::Reader::open(Cursor::new(&c), 2, &Default::default()).unwrap();
             let ix = r.index().unwrap().clone();
@@ -225,11 +202,7 @@ fn edited_demos_round_trip() {
         }
         let c = mvdz::compress(&d, &cfg(level, seg)).unwrap();
         assert!(mvdz::decompress(&c, 1).unwrap() == d, "case {case}");
-        let st = stream(&d, &cfg(level, seg.max(4096)));
-        assert!(
-            mvdz::decompress(&st, 2).unwrap() == d,
-            "case {case} streamed"
-        );
+        assert!(mvdz::decompress(&c, 2).unwrap() == d, "case {case}, 2 threads");
     }
     // edits within the demo keep it a demo: only cuts into the first frame
     // are refused
@@ -273,10 +246,9 @@ fn constructed_demos() {
                     mvdz::decompress(&c, 2).unwrap() == src,
                     "{name} {level:?} {seg}"
                 );
-                let st = stream(&src, &cfg(level, seg.max(50_000)));
                 assert!(
-                    mvdz::decompress(&st, 1).unwrap() == src,
-                    "{name} {level:?} streamed"
+                    mvdz::decompress(&c, 1).unwrap() == src,
+                    "{name} {level:?} {seg}, 1 thread"
                 );
             }
         }
@@ -298,15 +270,6 @@ fn deterministic_output() {
             )
             .unwrap();
             assert!(a == b, "{level:?} {seg}: threads change the output");
-            let s1 = stream(&src, &cfg(level, seg.max(30_000)));
-            let s2 = stream(
-                &src,
-                &Config {
-                    threads: 3,
-                    ..cfg(level, seg.max(30_000))
-                },
-            );
-            assert!(s1 == s2);
         }
     }
 }
@@ -324,11 +287,6 @@ fn extension_metadata() {
     let f = mvdz::compress(&src, &c).unwrap();
     let m = mvdz::read_metadata(Cursor::new(&f)).unwrap().meta;
     assert_eq!(m.ext, c.ext);
-    let st = stream(&src, &c);
-    assert_eq!(
-        mvdz::read_metadata(Cursor::new(&st)).unwrap().meta.ext,
-        c.ext
-    );
     // over the limit, or a duplicate key: refused at compress time
     let big = Config {
         ext: vec![("x".into(), vec![0; 2 << 20])],
@@ -349,7 +307,7 @@ fn extension_metadata() {
 }
 
 /// TABLES (FORMAT.md §2.6): one-shot segmented files at the normal level
-/// have it, right after META; whole, fast and streamed files do not.
+/// have it, right after META; whole and fast files do not.
 /// Every reader handles it.
 #[test]
 fn file_tables() {
@@ -363,8 +321,7 @@ fn file_tables() {
     for c in [
         mvdz::compress(&src, &cfg(Level::Normal, 0)).unwrap(),
         mvdz::compress(&src, &cfg(Level::Fast, 8192)).unwrap(),
-        stream(&src, &cfg(Level::Normal, 8192)),
     ] {
-        assert!(!has(&c), "whole, fast and streamed files have no TABLES");
+        assert!(!has(&c), "whole and fast files have no TABLES");
     }
 }
