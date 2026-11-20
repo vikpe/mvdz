@@ -228,7 +228,7 @@ fn hostile(v: &mut Vec<Vector>) {
     add("header-duration", q.build(), "the header's duration_ms + 1");
     let mut q = p.clone();
     q.header.crc ^= 1;
-    add("header-crc", q.build(), "one bit of the header's CRC-32C flipped");
+    add("header-crc", q.build(), "one bit of the header's CRC-32 flipped");
     let mut x = base.clone();
     x[30] = 1;
     add(
@@ -258,7 +258,7 @@ fn hostile(v: &mut Vec<Vector>) {
     add(
         "segment-crc",
         q.build(),
-        "one bit of the second segment's CRC-32C flipped",
+        "one bit of the second segment's CRC-32 flipped",
     );
     let mut q = p.clone();
     q.segs[1][h.body_off - 1] = 2;

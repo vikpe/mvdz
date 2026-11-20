@@ -46,7 +46,7 @@ fn header_describes_the_demo() {
         assert_eq!(json["size"], demo.len());
         assert_eq!(json["duration_ms"], ms);
         assert_eq!(json["sha256"], mvdz::api::hex(&h.sha256));
-        assert_eq!(json["crc32c"], format!("{:08x}", h.crc));
+        assert_eq!(json["crc32"], format!("{:08x}", h.crc));
         assert_eq!(json["file_size"], c.len());
         assert_eq!(
             json["segments"].as_array().unwrap().len(),

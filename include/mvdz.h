@@ -35,7 +35,7 @@
  *  - `max_memory` arguments cap the memory one call or reader may hold, in
  *    bytes (0 = the default, 1 GiB on 64-bit targets). Exceeding it gives
  *    MVDZ_E_LIMIT.
- *  - Decoding checks the CRC-32C of every segment and of the whole demo.
+ *  - Decoding checks the CRC-32 of every segment and of the whole demo.
  *    The SHA-256 in the header names the demo (it is what mvdz_info_json
  *    reports); decoding does not recompute it. A caller that must know a
  *    file holds the demo its header names hashes the decoded demo itself.
@@ -108,9 +108,9 @@ mvdz_reader *mvdz_open_memory(const void *buf, size_t n, int threads, uint64_t m
 mvdz_reader *mvdz_open_callbacks(mvdz_read_fn read, mvdz_seek_fn seek, void *user, int threads,
                                  uint64_t max_memory, int *err);
 /* Reads up to n bytes of the original demo: returns the count, 0 at the
- * end, or a negative MVDZ_E_* code. Every segment's CRC-32C is checked
+ * end, or a negative MVDZ_E_* code. Every segment's CRC-32 is checked
  * before its bytes are returned; reading from the start, the end is
- * reported only after the whole-demo checks (CRC-32C, size and timing)
+ * reported only after the whole-demo checks (CRC-32, size and timing)
  * have passed. Reading after a seek checks each segment only. */
 long long mvdz_read(mvdz_reader *r, void *out, size_t n);
 /* Size of the original demo in bytes (from the file's header). */
@@ -129,7 +129,7 @@ int mvdz_seek_time(mvdz_reader *r, uint64_t ms, uint64_t *seg_start_ms, uint64_t
 int mvdz_seek_segment(mvdz_reader *r, size_t segment, uint64_t *raw_offset);
 void mvdz_close(mvdz_reader *r);
 
-/* The file's header (the demo's size, duration, CRC-32C and SHA-256) and
+/* The file's header (the demo's size, duration, CRC-32 and SHA-256) and
  * its segments (start time, raw offset and raw length of each) as a
  * NUL-terminated JSON string, read without decoding the demo; the file's
  * structure is checked. The hashes are what the file claims: only a full

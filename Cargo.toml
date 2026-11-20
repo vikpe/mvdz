@@ -18,6 +18,8 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 sha2 = "0.10"
+# the CRC-32 of zlib; flate2 depends on it already
+crc32fast = "1"
 libc = { version = "0.2", optional = true }
 # raw DEFLATE, the format's general-purpose compressor, and gzip input (most
 # archives hand out .mvd.gz): the pure-Rust miniz_oxide back end, so no C

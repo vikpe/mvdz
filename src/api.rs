@@ -156,7 +156,7 @@ impl FileInfo {
 
     /// JSON rendering, refused with a limit error once it would exceed
     /// `max` bytes: one object with `version`, `file_size`, `size`,
-    /// `duration_ms`, `crc32c` and `sha256` (hexadecimal strings) and
+    /// `duration_ms`, `crc32` and `sha256` (hexadecimal strings) and
     /// `segments`, a list of `{t_start_ms, raw_offset, raw_len}`.
     pub fn to_json_with(&self, max: usize) -> Result<String> {
         use std::fmt::Write as _;
@@ -166,7 +166,7 @@ impl FileInfo {
         let mut s = String::new();
         let _ = write!(
             s,
-            "{{\"version\":{VERSION},\"file_size\":{},\"size\":{},\"duration_ms\":{},\"crc32c\":\"{:08x}\",\"sha256\":\"{}\",\"segments\":[",
+            "{{\"version\":{VERSION},\"file_size\":{},\"size\":{},\"duration_ms\":{},\"crc32\":\"{:08x}\",\"sha256\":\"{}\",\"segments\":[",
             self.file_size,
             h.size,
             h.duration_ms,

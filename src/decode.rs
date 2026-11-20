@@ -199,7 +199,7 @@ impl DemoCheck {
         self.open = tm.2 != out.len();
         Ok(())
     }
-    /// After the last segment: the header's size, duration and CRC-32C.
+    /// After the last segment: the header's size, duration and CRC-32.
     pub fn finish(self, lay: &Layout) -> Result<()> {
         let h = &lay.header;
         if self.crc.finish() != h.crc || self.size != h.size {

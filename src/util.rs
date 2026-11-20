@@ -1,4 +1,4 @@
-//! Shared helpers: LEB128 varints, checked integer conversions, CRC-32C,
+//! Shared helpers: LEB128 varints, checked integer conversions, CRC-32,
 //! a scoped parallel map.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,100 +87,22 @@ pub fn usz(v: u64) -> Option<usize> {
 
 // ---------------------------------------------------------------- crc32
 
-static CRC_TABLE: std::sync::OnceLock<[[u32; 256]; 8]> = std::sync::OnceLock::new();
-
-/// CRC-32C (Castagnoli). Hardware `crc32` instruction when SSE4.2 is
-/// present, slice-by-8 tables otherwise.
+/// CRC-32 as in zlib, gzip and PNG (ISO 3309; polynomial 0xEDB88320
+/// reflected): the checksum every platform with DEFLATE already has.
 pub fn crc32(b: &[u8]) -> u32 {
-    !crc32c_update(!0, b)
+    crc32fast::hash(b)
 }
 
-/// CRC-32C register update (no pre/post inversion): crc32(b) =
-/// !crc32c_update(!0, b), and updates chain over consecutive chunks.
-pub fn crc32c_update(c: u32, b: &[u8]) -> u32 {
-    #[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
-    {
-        if std::arch::is_x86_feature_detected!("sse4.2") {
-            // SAFETY: the CPU supports SSE4.2 (checked above)
-            return unsafe { crc32c_hw(c, b) };
-        }
-    }
-    crc32c_sw(c, b)
-}
-
-#[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
-#[target_feature(enable = "sse4.2")]
-unsafe fn crc32c_hw(c0: u32, b: &[u8]) -> u32 {
-    use std::arch::x86_64::*;
-    let mut c = c0 as u64;
-    let mut ch = b.chunks_exact(8);
-    for w in &mut ch {
-        c = _mm_crc32_u64(c, u64::from_le_bytes(w.try_into().unwrap()));
-    }
-    let mut c = c as u32;
-    for &x in ch.remainder() {
-        c = _mm_crc32_u8(c, x);
-    }
-    c
-}
-
-pub fn crc32c_sw(c0: u32, b: &[u8]) -> u32 {
-    let t = CRC_TABLE.get_or_init(|| {
-        let mut t = [[0u32; 256]; 8];
-        for i in 0..256u32 {
-            let mut c = i;
-            for _ in 0..8 {
-                c = if c & 1 != 0 {
-                    0x82F6_3B78 ^ (c >> 1)
-                } else {
-                    c >> 1
-                };
-            }
-            t[0][i as usize] = c;
-        }
-        for i in 0..256 {
-            for k in 1..8 {
-                t[k][i] = (t[k - 1][i] >> 8) ^ t[0][(t[k - 1][i] & 0xff) as usize];
-            }
-        }
-        t
-    });
-    let mut c = c0;
-    let mut ch = b.chunks_exact(8);
-    for w in &mut ch {
-        let lo = c ^ u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
-        let hi = u32::from_le_bytes([w[4], w[5], w[6], w[7]]);
-        c = t[7][(lo & 0xff) as usize]
-            ^ t[6][((lo >> 8) & 0xff) as usize]
-            ^ t[5][((lo >> 16) & 0xff) as usize]
-            ^ t[4][(lo >> 24) as usize]
-            ^ t[3][(hi & 0xff) as usize]
-            ^ t[2][((hi >> 8) & 0xff) as usize]
-            ^ t[1][((hi >> 16) & 0xff) as usize]
-            ^ t[0][(hi >> 24) as usize];
-    }
-    for &x in ch.remainder() {
-        c = (c >> 8) ^ t[0][((c ^ x as u32) & 0xff) as usize];
-    }
-    c
-}
-
-/// Running CRC-32C over consecutive chunks.
-#[derive(Clone, Copy)]
-pub struct Crc(u32);
-
-impl Default for Crc {
-    fn default() -> Self {
-        Crc(!0)
-    }
-}
+/// Running CRC-32 over consecutive chunks.
+#[derive(Clone, Default)]
+pub struct Crc(crc32fast::Hasher);
 
 impl Crc {
     pub fn update(&mut self, b: &[u8]) {
-        self.0 = crc32c_update(self.0, b);
+        self.0.update(b);
     }
     pub fn finish(&self) -> u32 {
-        !self.0
+        self.0.clone().finalize()
     }
 }
 
@@ -226,11 +148,12 @@ unsafe impl<T> Send for SyncPtr<T> {}
 #[cfg(test)]
 mod tests {
     #[test]
-    fn crc32c_check_value() {
-        assert_eq!(super::crc32(b"123456789"), 0xE306_9283);
-        assert_eq!(super::crc32c_sw(!0, b"123456789"), !0xE306_9283);
-        let c = super::crc32c_update(super::crc32c_update(!0, b"1234"), b"56789");
-        assert_eq!(!c, 0xE306_9283);
+    fn crc32_check_value() {
+        assert_eq!(super::crc32(b"123456789"), 0xCBF4_3926);
+        let mut c = super::Crc::default();
+        c.update(b"1234");
+        c.update(b"56789");
+        assert_eq!(c.finish(), 0xCBF4_3926);
     }
 
     #[test]

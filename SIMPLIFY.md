@@ -12,8 +12,8 @@ dropped, attachments, metadata, index, trailer, streaming writer, levels, chunk-
 option, trusted mode and the SHA-256 pass on decode removed, one model path, fixed-width
 container fields, five speed changes. See Decisions and Results per change.
 
-Also done, in the working tree and not committed: one fallback (see "One fallback"
-under Results per change).
+Also done: one fallback (ad53e50; see "One fallback" under Results per change), and
+measured at 1, 4 and 12 threads and in WebAssembly (see "Threads and WebAssembly").
 
 Tests: 44 pass, 9 fail, all nine on the list under "Known failing tests".
 
@@ -26,7 +26,7 @@ Next, in this order (nothing below is started):
 2. The other open questions (4 to 14).
 3. Finishing work, once the format no longer changes: regenerate the test vectors
    (clears 8 of the 9 failing tests), update the Go decoder (`interop/specdec`), rewrite
-   FORMAT.md and README, update BENCHMARKS.md, measure at 1 and 12 threads.
+   FORMAT.md and README, update BENCHMARKS.md.
 
 How changes are measured from the fallback change on: `mvdz bench -r 3 -j 4` on the 500
 demos listed in `~/dev/mvdz-bench/rand500.txt` (1,786,252,992 bytes raw; drawn by
@@ -206,7 +206,7 @@ of 3 rounds, MB/s of raw demo. Every change is measured against this.
 | Decompress, files in parallel on 4 threads | 20.9 s, 330.9 [328.6-331.7] MB/s |
 
 At rc.4's default whole-file setting the output is 1,617,122,442 bytes (0.2340); 256K
-chunks cost 3.65 %. 1 and 12 threads: not measured yet.
+chunks cost 3.65 %.
 
 ## Results per change
 
@@ -373,7 +373,7 @@ them. The decoder is not touched by this change: its two figures in this column 
 run-to-run variation. Peak memory on the largest demo 168.2 MB at 4 threads and 165.3 MB
 at 1 (the values now live until the file is written); 18.1 MB on the median demo.
 
-### One fallback (2026-11-20, not committed)
+### One fallback (2026-11-20, ad53e50)
 
 `mvdz bench -r 3 -j 4` on the 500 demos of `~/dev/mvdz-bench/rand500.txt`, self-check
 on, MB/s median [min-max]. The machine was not idle (load average 3 to 5).
@@ -411,6 +411,48 @@ on, MB/s median [min-max]. The machine was not idle (load average 3 to 5).
   `random.stored.mvdz` is renamed `random.deflate.mvdz`, the `segment-coding` vector
   uses coding 2. The files in `tests/vectors/` are not regenerated.
 - Not done: the Go decoder and FORMAT.md (with the other finishing work).
+
+### Threads and WebAssembly (2026-11-20, ad53e50)
+
+The 500 demos of `~/dev/mvdz-bench/rand500.txt`, `mvdz bench -r 3`, self-check on, MB/s
+median [min-max]. Results in `~/dev/mvdz-bench/results/ad53e50.*`.
+
+| Measure | 1 thread | 4 threads | 12 threads |
+|---|---|---|---|
+| Compress, one file at a time | 36.2 [35.9-36.7] | 91.3 [90.0-94.8] | 98.7 [97.9-100.5] |
+| Compress, batch | as 1 thread | 137.4 [133.4-139.2] | 241.0 [233.6-242.4] |
+| Decompress, one file at a time | 84.9 [83.7-88.0] | 289.2 [286.7-305.8] | 277.4 [274.5-281.1] |
+| Decompress, batch | as 1 thread | 338.0 [322.1-342.8] | 612.0 [583.1-620.6] |
+
+- Inside one file 12 threads give little over 4: compress +8 %, decompress -4 %. In
+  batch they give 6.7 times one thread for compress and 7.2 times for decompress (6
+  cores, 12 threads).
+- The 4-thread run started with the load average at 5 (the 12-thread run had just
+  ended); the 12-thread run started at 0.8.
+
+WebAssembly: `wasm32-unknown-unknown`, one thread, node 26.13, the same 500 demos, 3
+rounds. A wrapper crate (`~/dev/mvdz-bench/wasm`, `bench.mjs` there) exports decode and
+encode; release, fat LTO, `panic = "abort"`, stripped.
+
+| Measure | No SIMD | SIMD (`+simd128`) | Native, 1 thread |
+|---|---|---|---|
+| Decode | 54.3 [53.8-54.5] | 73.5 [72.9-73.5] | 84.9 |
+| Encode, self-check on | 23.7 [23.6-24.0] | 27.2 [26.7-27.5] | 36.2 |
+| Encode, self-check off | 43.9 [43.4-44.2] | 44.4 [44.3-44.4] | not measured |
+| Module, bytes | 435,890 | 442,577 | |
+| Module, gzip -9 | 160,204 | 163,522 | |
+
+- All 500 decode to the original bytes; the files the WebAssembly encoder writes are
+  identical to the native ones (341,169,945 bytes).
+- The module is the whole library: the exported functions of the C interface keep the
+  encoder in. Without the encode export it is 662 bytes smaller. A decoder-only size
+  needs the C interface behind a feature (open question 5).
+- One checksum pass as a share of a decode (speeds from "Checksum candidates"), no SIMD
+  and SIMD: CRC-32C table 2.4 % and 3.2 %, CRC-32 of zlib 2.3 % and 3.1 %, XXH64 0.32 %
+  and 0.43 %, XXH3-64 0.38 % and 0.35 %. A decode makes two passes (each chunk, the
+  whole demo): about 5 to 6 % with either CRC.
+- The first decode rounds without SIMD started with the load average at 10; their
+  spread is 1 %.
 
 ### Checksum candidates (2026-11-20)
 
@@ -599,17 +641,17 @@ estimates, not a rebuilt codec. Change in file size if the model is dropped:
 
 Not measured yet:
 
-1. Decode speed and size of the wasm build with inflate in place of ruzstd; the checksum
-   candidates as a share of a wasm decode.
+1. The size of a decoder-only wasm build (needs the C interface behind a feature).
 2. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-3. 1 and 12 threads.
-4. XXH3 without SIMD from the reference C code (a download was blocked; the WebAssembly
+3. XXH3 without SIMD from the reference C code (a download was blocked; the WebAssembly
    run without SIMD stands in for it).
-5. rayon on the final code (optional).
+4. rayon on the final code (optional).
+5. The count of bits that can be flipped unnoticed, after the fallback change (the
+   probe was lost with `/tmp/blobplan`).
 
 ## Remaining implementation
 
-After the format decisions (open questions 1 to 3):
+After the format decisions (open questions 2 and 3):
 
 1. Regenerate the vectors in `tests/vectors/`; hostile vectors for the header, checksums
    and chunk sums are already generated by `tests/vectors.rs`.

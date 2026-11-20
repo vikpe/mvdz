@@ -13,7 +13,7 @@
 //!
 //! Every integer is little-endian and of fixed width.
 //! Every header field describes the original demo: its length, its total
-//! frame time, its CRC-32C (the low 32 bits of the field; the high 32 are
+//! frame time, its CRC-32 (the low 32 bits of the field; the high 32 are
 //! 0) and its SHA-256. `models` holds the shared rANS models (`len` 0:
 //! none). A segment's raw offset and start time are the sums of `raw_len`
 //! and `dur_ms` of the segments before it. The file is complete when the
@@ -67,7 +67,7 @@ pub struct Header {
     pub size: u64,
     /// total demo time: the sum of all frame time bytes
     pub duration_ms: u64,
-    /// CRC-32C of the demo
+    /// CRC-32 of the demo (as in zlib)
     pub crc: u32,
     /// SHA-256 of the demo
     pub sha256: [u8; 32],
