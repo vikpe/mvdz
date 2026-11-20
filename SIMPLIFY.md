@@ -75,6 +75,7 @@ All implemented unless marked.
 | Fallback | One: a chunk the transform cannot code is one raw DEFLATE stream. A modelled stream is always rANS with the file's model; the per-stream back-end id, the store and DEFLATE back ends and the `stored` chunk coding are gone | Two chunk codings, one coder per stream kind; -0.056 % size |
 | Model over the decision limit (rule M2) | The encoder makes it smaller (own contexts with the fewest symbols join the fallback table) instead of dropping it | Without this a stream with no model sends every chunk of its file to DEFLATE: one demo in 500 grew 3.6 times, the output 1.9 % |
 | Thread count | The tool defaults to all logical cores, no cap, `-j` overrides; the library's default stays 1 and 0 means all logical cores (also in the C interface and `-j 0`) | The usual convention; a library should not take every core unasked; inside one file 12 threads give nothing over 4, so a cap would buy nothing |
+| Built-in profiler | Removed, with the `sampler` feature and the optional `libc` dependency | `perf` does the same; 92 lines, all of them around `unsafe` blocks |
 | Levels | One | No options |
 | Model step size | One value, 2 | Trying 4 as well was worth 77 bytes in 1.68 GB |
 | Model stored in a chunk | Removed; models only in the models block, also for one-chunk files | Costs 0.004 %; one model path |
@@ -171,7 +172,9 @@ All Viktor's to decide. Of those left, 4, 9, 12 and 13 can change the file forma
 9. Bits that can be flipped without changing the decoded demo: 784 of 30,696 in the
    probe's small file (256 are the header's SHA-256, 80 in the models block, 448 in the
    chunks); never with a different demo. Accept, or require every flip to be refused.
-10. Optional features: the built-in profiler (`sampler`, `libc`) and `mimalloc`.
+10. Optional features: the built-in profiler is removed (`sampler.rs`, the `sampler`
+    feature and the optional `libc` dependency; `perf` does its job). Left: `mimalloc`,
+    which the static musl release builds use.
 11. Compression speed further: the walk is single-threaded (17.7 % of compression before
     the speed changes; not profiled since). Peak memory rose with changes 4 and 5.
 12. `pi.ar` (-0.002 %) is low value, but it is the third axis of the angle predictor, so

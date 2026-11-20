@@ -22,8 +22,6 @@ pub mod error;
 pub mod format;
 pub mod numeric;
 pub mod proto;
-#[cfg(all(feature = "sampler", target_os = "linux", target_arch = "x86_64"))]
-pub mod sampler;
 pub mod segment;
 pub mod stream;
 pub mod streams;

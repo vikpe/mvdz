@@ -402,5 +402,4 @@ MIT, see [LICENSE](LICENSE). Dependencies (all permissive): `zstd`, `zstd-safe`,
 `zstd-sys` (MIT/Apache-2.0; bundled libzstd BSD-3-Clause), `ruzstd`
 (MIT, wasm and the `pure-zstd` feature), `sha2` and RustCrypto
 dependencies, `serde` and `serde_json` (MIT/Apache-2.0), `flate2` and
-`miniz_oxide` (MIT/Apache-2.0, pure Rust; gzip input), `libc` (only the
-optional `sampler` profiler of the command-line tool).
+`miniz_oxide` (MIT/Apache-2.0, pure Rust; gzip input).

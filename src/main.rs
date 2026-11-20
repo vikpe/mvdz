@@ -355,10 +355,6 @@ fn main() {
     if argv.is_empty() {
         usage();
     }
-    #[cfg(all(feature = "sampler", target_os = "linux", target_arch = "x86_64"))]
-    let _sampler = std::env::var("MVDZ_SAMPLE")
-        .ok()
-        .map(mvdz::sampler::Guard::start);
     let a = parse(&argv[1..]);
     match argv[0].as_str() {
         "compress" | "c" => run_jobs(&a, true),

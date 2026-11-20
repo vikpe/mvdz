@@ -149,7 +149,6 @@ version = "1.0.0-rc.4"
 dependencies = [
  "crc32fast",
  "flate2",
- "libc",
  "mimalloc",
  "serde_json",
  "sha2",

@@ -20,7 +20,6 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 sha2 = "0.10"
 # the CRC-32 of zlib; flate2 depends on it already
 crc32fast = "1"
-libc = { version = "0.2", optional = true }
 # raw DEFLATE, the format's general-purpose compressor, and gzip input (most
 # archives hand out .mvd.gz): the pure-Rust miniz_oxide back end, so no C
 # code and the same on wasm
@@ -48,8 +47,6 @@ codegen-units = 16
 debug = 0
 
 [features]
-# the SIGPROF sampling profiler of the command-line tool (x86_64 Linux)
-sampler = ["dep:libc"]
 # mimalloc as the command-line tool's allocator: musl's own allocator makes
 # the static release builds 15-40 % slower (BENCHMARKS.md)
 mimalloc = ["dep:mimalloc"]
