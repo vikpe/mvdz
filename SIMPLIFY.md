@@ -480,6 +480,39 @@ The 500 demos, `mvdz bench -r 3 -j 4`, MB/s median [min-max]; WebAssembly as und
 - `mvdz info` writes the key `crc32` (was `crc32c`). Tests: 44 pass, 9 fail, the same
   nine. README still says CRC-32C in two places (with the README rewrite).
 
+### Profile and the table search (2026-11-21, on dbc533d, not committed)
+
+`perf` on the first 120 demos of the sample (399 MB), one thread, the command-line tool.
+
+Decompress, share of CPU time before the change: numeric groups (`Group::run`, with the
+rANS decoder inlined) 41.9 %, walk (`Walker::command`) 24.5 %, the walk's closure in
+`segment::decode` 9.4 %, building the models (`IntModel::get`, `read_tables`,
+`Table::from_q`) 8.0 %, inflate 0.8 %, CRC-32 0.5 %. Compress: the self-check's decode
+31 %, `pack_body` 8.9 %, `numerics` 7.9 %, `num_syms` 6.6 %, the encode walk 6.3 %,
+DEFLATE 4.1 %, training (`train`, `Tally::add`, `Table::from_q`) 7.9 %, SHA-256 1.7 %.
+
+Found: by source line, 11.1 % of decompression was `count_ones` in the rANS decoder's
+table search (`count_le`). Plain x86-64 has no population-count instruction, so it
+compiled to bit arithmetic. Now the compare results are summed as vector lanes (SSE2
+only), with no population count. Same output.
+
+| Measure (500 demos, `bench -r 3 -j 4`) | CRC-32 build (73bd49b) | Table search without a population count |
+|---|---|---|
+| Compress 1t | 36.3 [36.1-37.1] | 38.5 [38.3-38.8] |
+| Compress 4t | 93.1 [92.3-97.0] | 97.5 [95.0-98.2] |
+| Compress batch | 140.2 [138.6-140.6] | 142.7 [141.5-144.8] |
+| Decompress 1t | 87.7 [86.5-88.0] | 99.8 [99.4-100.8] |
+| Decompress 4t | 312.2 [296.4-313.1] | 347.6 [346.5-349.3] |
+| Decompress batch | 343.0 [318.0-347.1] | 386.9 [359.2-390.2] |
+
+- Decode CPU time on the 120 demos: 4.55 s before, 3.95 s after; 3.94 s for the old code
+  built with `-C target-feature=+popcnt`, so the whole gain is had without the
+  instruction.
+- Candidates not done: `num_syms` runs twice for each numeric stream (training and
+  coding; 6.6 % of compression together); building the models is 8 to 9 % of a
+  one-thread decode, a fixed cost per file; the decode profile is otherwise flat (no
+  source line above 4.4 %).
+
 ### Checksum candidates (2026-11-20)
 
 One thread, whole demos, best of 5 passes, MB/s. Native: the first 500 demos, Rust

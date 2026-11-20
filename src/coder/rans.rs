@@ -441,17 +441,23 @@ fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
         // c[..16 * chunks]: every caller passes a search table of
         // 2 * 16 * chunks entries (read_model).
         unsafe {
+            // A compare gives -1 in every lane that is greater: the lanes
+            // are summed (no population count, which plain x86-64 has no
+            // instruction for). A lane counts at most 2 * chunks <= 255,
+            // so the byte sums of `_mm_sad_epu8` are the lane sums.
+            debug_assert!(chunks <= 127);
             let sv = _mm_set1_epi16(slot as i16);
-            let mut gt = 0u32;
+            let mut gt = _mm_setzero_si128();
             let p = c.as_ptr() as *const __m128i;
             for i in 0..chunks {
                 let a = _mm_loadu_si128(p.add(2 * i));
                 let b = _mm_loadu_si128(p.add(2 * i + 1));
-                let m = (_mm_movemask_epi8(_mm_cmpgt_epi16(a, sv)) as u32)
-                    | (_mm_movemask_epi8(_mm_cmpgt_epi16(b, sv)) as u32) << 16;
-                gt += m.count_ones();
+                gt = _mm_sub_epi16(gt, _mm_cmpgt_epi16(a, sv));
+                gt = _mm_sub_epi16(gt, _mm_cmpgt_epi16(b, sv));
             }
-            16 * chunks - (gt / 2) as usize
+            let s = _mm_sad_epu8(gt, _mm_setzero_si128());
+            let n = _mm_cvtsi128_si32(_mm_add_epi32(s, _mm_srli_si128(s, 8))) as usize;
+            16 * chunks - n
         }
     }
     #[cfg(any(not(target_arch = "x86_64"), feature = "scalar"))]
