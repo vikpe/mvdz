@@ -17,7 +17,7 @@
 
 use crate::budget::Budget;
 use crate::coder::rans::FileTables;
-use crate::coder::{self, BE_DEFLATE, BE_FILE, BE_RANS, BE_STORE, LazyDec, NumDec, rans};
+use crate::coder::{self, BE_DEFLATE, BE_RANS, BE_STORE, LazyDec, NumDec, rans};
 use crate::error::{Error, Result, bad};
 use crate::format::TABLES_MAX;
 use crate::numeric::{Buf, Group, NCtx, NumIO, WAVE1, WAVE1_PIPE, WAVE2};
@@ -324,9 +324,9 @@ enum Kind {
 
 /// Back ends the encoder tries for a structural or numeric stream,
 /// smallest output wins; if none of them can code the stream, the fallback
-/// list is tried. `file`: the file has a shared model for the stream.
+/// list is tried. `file`: the file has a model for the stream.
 fn candidates(file: bool) -> &'static [u8] {
-    if file { &[BE_FILE] } else { &[BE_RANS] }
+    if file { &[BE_RANS] } else { &[] }
 }
 
 /// The blob streams of a walked segment, in id order.
@@ -453,9 +453,9 @@ pub fn tables_body(models: &[Option<rans::Shared>], ids: &[usize]) -> Vec<u8> {
     t
 }
 
-/// Drops the models with the largest headers until their TABLES body is
-/// at most `max` bytes (the section's limit, FORMAT.md §9); those streams
-/// then code with a model in each segment (back end 2).
+/// Drops the models with the largest headers until the models block is at
+/// most `max` bytes (its limit, FORMAT.md §9); those streams are then
+/// stored or DEFLATE.
 fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
     loop {
         let ids: Vec<usize> = (0..models.len()).filter(|&i| models[i].is_some()).collect();
@@ -658,7 +658,7 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
             let be = r.uv().ok_or(te)?;
             (be, r.uz().ok_or(te)?, r.uz().ok_or(te)?)
         };
-        if be > BE_FILE as u64 {
+        if be > BE_RANS as u64 {
             return bad("stream back end");
         }
         if is_blob(id) {
@@ -706,7 +706,7 @@ pub fn decode(
     let n = h.ents.len();
     // the file's models, built for the first segment that uses them
     let fm = match tables {
-        Some(t) if h.ents.iter().any(|e| e.1 == BE_FILE) => Some(t.models(budget)?),
+        Some(t) if h.ents.iter().any(|e| e.1 == BE_RANS) => Some(t.models(budget)?),
         _ => None,
     };
     let mut bodies: Vec<&[u8]> = Vec::with_capacity(n);
@@ -774,14 +774,14 @@ pub fn decode(
         let all_rans = g
             .streams()
             .iter()
-            .all(|&sid| num_ents[sid].is_none_or(|e| e.0 == BE_RANS || e.0 == BE_FILE));
+            .all(|&sid| num_ents[sid].is_none_or(|e| e.0 == BE_RANS));
         if all_rans {
-            run_group(g, &recs, buf, &num_ents, |be, sid, b, c| {
-                rans::NumDec::new(sid, b, c, coder::file_model(be, fm, sid)?, budget)
+            run_group(g, &recs, buf, &num_ents, |_, sid, b, c| {
+                rans::NumDec::new(sid, b, c, coder::file_model(fm, sid)?)
             })
         } else {
             run_group(g, &recs, buf, &num_ents, |be, sid, b, c| {
-                NumDec::new(be, sid, b, c, fm, budget)
+                NumDec::new(be, sid, b, c, fm)
             })
         }
     };
@@ -795,12 +795,12 @@ pub fn decode(
             .ok_or(Error::Internal("walk"))?;
         if lazy_ents
             .iter()
-            .all(|e| e.is_none_or(|e| e.0 == BE_RANS || e.0 == BE_FILE))
+            .all(|e| e.is_none_or(|e| e.0 == BE_RANS))
         {
             let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
             for (id, e) in lazy_ents.iter().enumerate() {
-                if let Some((be, b, c)) = *e {
-                    lazy[id] = rans::ByteDec::new(b, c, coder::file_model(be, fm, id)?, budget)?;
+                if let Some((_, b, c)) = *e {
+                    lazy[id] = rans::ByteDec::new(b, c, coder::file_model(fm, id)?)?;
                 }
             }
             walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
@@ -808,7 +808,7 @@ pub fn decode(
             let mut lazy: [LazyDec; N_LAZY] = std::array::from_fn(|_| LazyDec::Empty);
             for (id, e) in lazy_ents.iter().enumerate() {
                 if let Some((be, b, c)) = *e {
-                    lazy[id] = LazyDec::new(be, id, b, c, fm, budget)?;
+                    lazy[id] = LazyDec::new(be, id, b, c, fm)?;
                 }
             }
             walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
@@ -992,8 +992,8 @@ mod tests {
         assert!(h.ents.iter().all(|e| e.0 != UC && e.0 != UC_A));
     }
 
-    /// Models a TABLES section over its limit would hold are dropped,
-    /// largest header first; their streams then code with back end 2, and
+    /// Models a models block over its limit would hold are dropped,
+    /// largest header first; their streams are then stored or DEFLATE, and
     /// the segment still decodes.
     #[test]
     fn tables_limit() {
@@ -1023,8 +1023,8 @@ mod tests {
         let mut st = Vec::new();
         let body = encode(&src, &wk, 1, &mut st, &models);
         let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;
-        assert_eq!(be(big), BE_RANS);
-        assert!(kept.iter().all(|&sid| be(sid) == BE_FILE));
+        assert!(be(big) < BE_RANS, "a stream without a model is stored or DEFLATE");
+        assert!(kept.iter().all(|&sid| be(sid) == BE_RANS));
         let h = parse_header(&body, src.len()).unwrap();
         assert!(decoded(&body, &h, src.len(), Some(&ft), 1) == src);
         // nothing fits: no model is kept

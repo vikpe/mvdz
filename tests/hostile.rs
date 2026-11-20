@@ -164,8 +164,8 @@ fn declared_sizes() {
 }
 
 /// The reviewer's amplifying v2 model headers (robustness 5: a 2.3 KB
-/// header took 1.3 GB and 3.6 s) inside a segment: refused at once by the
-/// model rules (tables <= symbols, decisions <= 128 per header byte + 1024).
+/// header took 1.3 GB and 3.6 s) in the models block: refused at once by
+/// the model rules (decisions <= 128 per header byte + 1024).
 #[test]
 fn model_amplification() {
     let Some(dir) = test_data("poc") else { return };
@@ -173,18 +173,27 @@ fn model_amplification() {
     let c = compress(&demo, &cfg(0)).unwrap();
     let p = parts(&c);
     for name in ["v2model_1000.bin", "v2model_16000.bin", "v2model_65535.bin"] {
-        // a rANS stream body: header length, header, rANS data
+        // a model and a rANS stream body: header length, header, rANS data
         let Ok(st) = std::fs::read(dir.join(name)) else {
             continue;
         };
-        // a segment whose only stream is a time stream with this body:
-        // fte, fte2, mvd1, tail; one entry (id 0, back end 2, count,
-        // length); no blob body
+        let mut r = mvdz::util::Rd::new(&st);
+        let hdr = r.bytes().unwrap();
+        let rest = r.rest();
+        // the models block: one model, the time stream's
+        let mut models = Vec::new();
+        for v in [1, 0, hdr.len() as u64] {
+            put_uv(&mut models, v);
+        }
+        models.extend_from_slice(hdr);
+        // a segment whose only stream is a time stream on rANS: fte, fte2,
+        // mvd1, tail; one entry (id 0, back end 2, count, length); no blob
+        // body
         let mut body = Vec::new();
-        for v in [0u64, 0, 0, 0, 1, 0, 2, demo.len() as u64, st.len() as u64, 0] {
+        for v in [0u64, 0, 0, 0, 1, 0, 2, demo.len() as u64, rest.len() as u64, 0] {
             put_uv(&mut body, v);
         }
-        body.extend_from_slice(&st);
+        body.extend_from_slice(rest);
         let mut b = seg_hdr_bytes(
             demo.len() as u64,
             p.header.duration_ms,
@@ -193,6 +202,7 @@ fn model_amplification() {
         );
         b.extend_from_slice(&body);
         let mut q = p.clone();
+        q.models = models;
         q.segs = vec![b];
         refused(&q.build(), name, |e| *e == Error::Corrupt("model"));
     }
@@ -239,8 +249,7 @@ fn wide_model(n: u32) -> Vec<u8> {
         1 + (x >> 16) % 12
     };
     im.put(&mut e, NQC, 256);
-    im.put(&mut e, NQC + 1, 2);
-    im.put(&mut e, NQC + 2, n);
+    im.put(&mut e, NQC + 1, n);
     let fb: Vec<u32> = (0..256).map(|_| q()).collect();
     let mut prev = 0;
     for &v in &fb {
@@ -248,7 +257,7 @@ fn wide_model(n: u32) -> Vec<u8> {
         prev = v;
     }
     for t in 0..n {
-        im.put(&mut e, NQC + 3, (t > 0) as u32);
+        im.put(&mut e, NQC + 2, (t > 0) as u32);
         let mut prev = 0u32;
         for &f in &fb {
             let v = q();

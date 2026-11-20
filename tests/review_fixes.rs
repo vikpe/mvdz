@@ -30,15 +30,14 @@ fn r_m2_padded_model() {
     let mut e = Enc::new();
     let mut im = IntModel::new(NQC + 8);
     im.put(&mut e, NQC, 256);
-    im.put(&mut e, NQC + 1, 2);
-    im.put(&mut e, NQC + 2, n);
+    im.put(&mut e, NQC + 1, n);
     let mut prev = 0usize;
     for _ in 0..256 {
         im.put(&mut e, 17 * 17 + prev, 0);
         prev = 0;
     }
     for i in 0..n {
-        im.put(&mut e, NQC + 3, (i > 0) as u32);
+        im.put(&mut e, NQC + 2, (i > 0) as u32);
         for _ in 0..256 {
             im.put(&mut e, 0, 0);
         }
@@ -49,14 +48,19 @@ fn r_m2_padded_model() {
         hdr.len().max((dec.saturating_sub(1024) / 128 + 1) as usize),
         0,
     );
+    // the models block: one model, the time stream's
+    let mut models = Vec::new();
+    for v in [1, 0, hdr.len() as u64] {
+        put_uv(&mut models, v);
+    }
+    models.extend_from_slice(&hdr);
+    // an empty rANS body
     let mut st = Vec::new();
-    put_uv(&mut st, hdr.len() as u64);
-    st.extend_from_slice(&hdr);
     put_uv(&mut st, 0);
     let raw_len = n as u64 + 100;
-    // a transform body whose only stream is a time stream with this model:
-    // fte, fte2, mvd1, tail; one entry (id 0, back end 2, count, length);
-    // no blob body
+    // a transform body whose only stream is a time stream on rANS: fte,
+    // fte2, mvd1, tail; one entry (id 0, back end 2, count, length); no
+    // blob body
     let mut body = Vec::new();
     for v in [0u64, 0, 0, 0, 1, 0, 2, n as u64 + 16, st.len() as u64, 0] {
         put_uv(&mut body, v);
@@ -69,7 +73,7 @@ fn r_m2_padded_model() {
             size: raw_len,
             ..Default::default()
         },
-        models: Vec::new(),
+        models,
         segs: vec![b],
     }
     .build();

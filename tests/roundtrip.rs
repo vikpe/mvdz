@@ -248,8 +248,8 @@ fn deterministic_output() {
     }
 }
 
-/// The models block (FORMAT.md §2.6): a file of several segments has
-/// shared models; a file of one segment has an empty block. Every reader
+/// The models block (FORMAT.md §2.6): every file with a segment has its
+/// rANS models there, whether it has one segment or several. Every reader
 /// handles it.
 #[test]
 fn file_tables() {
@@ -257,10 +257,10 @@ fn file_tables() {
     let has = |c: &[u8]| !parts(c).models.is_empty();
     let (seg, info) = compress_info(&src, &cfg(8192)).unwrap();
     assert!(info.segments > 2);
-    assert!(has(&seg), "shared models");
-    assert!(info.streams.iter().any(|s| s.be == 3), "back end 3 is used");
+    assert!(has(&seg), "models");
+    assert!(info.streams.iter().any(|s| s.be == 2), "rANS is used");
     assert!(readers_agree(&seg, "tables").unwrap() == src);
     let one = compress(&src, &cfg(0)).unwrap();
     assert_eq!(parts(&one).segs.len(), 1);
-    assert!(!has(&one), "a file of one segment has no shared models");
+    assert!(has(&one), "a file of one segment has its models there too");
 }

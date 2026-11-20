@@ -105,15 +105,14 @@ fn amplifying_model(n: u32) -> Vec<u8> {
     let mut e = Enc::new();
     let mut im = IntModel::new(NQC + 8);
     im.put(&mut e, NQC, 256);
-    im.put(&mut e, NQC + 1, 2);
-    im.put(&mut e, NQC + 2, n);
+    im.put(&mut e, NQC + 1, n);
     let mut prev = 0usize;
     for _ in 0..256 {
         im.put(&mut e, 17 * 17 + prev.min(16), 1);
         prev = 1;
     }
     for t in 0..n {
-        im.put(&mut e, NQC + 3, (t > 0) as u32);
+        im.put(&mut e, NQC + 2, (t > 0) as u32);
         let mut prev = 0usize;
         for _ in 0..256 {
             im.put(&mut e, 17 + prev.min(16), 1);
@@ -297,39 +296,6 @@ fn hostile(v: &mut Vec<Vector>) {
         block(&mut x, s);
     }
     add("models-missing", x, "the base file without its models block");
-    // a transform segment whose only stream has an amplifying model
-    let st = amplifying_model(2000);
-    add(
-        "model-decisions",
-        one_segment(
-            &plain,
-            &transform_body(&[(mvdz::streams::TIME, 2, plain.len() as u64, &st)], &[]),
-        ),
-        "a model of 2000 full tables in a few bytes (rule M2)",
-    );
-    // the same layout with a valid small model whose header is padded with
-    // zero bytes (more room under M2): the header must be consumed exactly
-    let am = amplifying_model(1);
-    let mut st = mvdz::util::Rd::new(&am);
-    let hl = st.uz().unwrap();
-    let mut hdr = st.take(hl).unwrap().to_vec();
-    let rest = st.rest().to_vec();
-    hdr.extend_from_slice(&[0; 64]);
-    let mut padded = Vec::new();
-    put_uv(&mut padded, hdr.len() as u64);
-    padded.extend_from_slice(&hdr);
-    padded.extend_from_slice(&rest);
-    add(
-        "model-padding",
-        one_segment(
-            &plain,
-            &transform_body(
-                &[(mvdz::streams::TIME, 2, plain.len() as u64, &padded)],
-                &[],
-            ),
-        ),
-        "a model header followed by 64 zero bytes (not consumed exactly)",
-    );
     // one usercmd block in a segment of stored streams built by hand
     let mut one = Demo(Vec::new());
     one.hidden(
@@ -386,14 +352,14 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
     add(
         "tables-no-entry",
         with(&e),
-        "the models block without the entry of a stream the segments code with back end 3",
+        "the models block without the entry of a stream the segments code with rANS",
     );
     let mut q = p.clone();
     q.models.clear();
     add(
         "tables-missing",
         q.build(),
-        "an empty models block: back end 3 without a model",
+        "an empty models block: rANS streams without a model",
     );
     let mut e = ents.clone();
     e.swap(0, 1);
@@ -464,7 +430,7 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
         const NQC: usize = 306;
         let mut enc = Enc::new();
         let mut im = IntModel::new(NQC + 8);
-        for (ctx, v) in [(NQC, 256), (NQC + 1, 2), (NQC + 2, 65536)] {
+        for (ctx, v) in [(NQC, 256), (NQC + 1, 65536)] {
             im.put(&mut enc, ctx, v);
         }
         enc.finish()

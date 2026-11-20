@@ -2,7 +2,7 @@
 //! the input (falling back per segment to DEFLATE or stored bytes).
 
 use crate::budget::{Budget, Limits};
-use crate::coder::BE_FILE;
+use crate::coder::BE_RANS;
 use crate::coder::rans::Shared;
 use crate::decode::{SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
@@ -196,9 +196,9 @@ fn compress_inner(
     } else {
         (1, threads)
     };
-    // a file of several segments: one model per rANS stream from its
-    // symbols in every segment, in the models block (FORMAT.md §12)
-    let shared = if nseg > 1 && !force_raw {
+    // one model per rANS stream from its symbols in every segment, in the
+    // models block (FORMAT.md §12)
+    let shared = if nseg > 0 && !force_raw {
         let segs: Vec<(&[u8], &Walked)> = plans
             .iter()
             .enumerate()
@@ -265,7 +265,7 @@ fn assemble(
     // the models: the shared model of every stream some segment codes with it
     let mut used = vec![false; shared.len()];
     for st in bodies.iter().flat_map(|b| &b.2) {
-        if st.be == BE_FILE {
+        if st.be == BE_RANS {
             used[st.id] = true;
         }
     }
