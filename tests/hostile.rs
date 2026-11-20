@@ -6,13 +6,13 @@ mod common;
 use common::*;
 use mvdz::format::*;
 use mvdz::util::put_uv;
-use mvdz::{Error, Level};
+use mvdz::Error;
 use std::io::Cursor;
 use std::time::Instant;
 
-fn base(level: Level, seg: usize) -> (Vec<u8>, Vec<u8>) {
+fn base(seg: usize) -> (Vec<u8>, Vec<u8>) {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let c = mvdz::compress(&demo, &cfg(level, seg)).unwrap();
+    let c = compress(&demo, &cfg(seg)).unwrap();
     (demo, c)
 }
 
@@ -35,7 +35,7 @@ fn corrupt(e: &Error) -> bool {
 
 #[test]
 fn structure_rules() {
-    let (demo, c) = base(Level::Normal, 300);
+    let (demo, c) = base(300);
     assert_eq!(readers_agree(&c, "base").unwrap(), demo);
     let p = parts(&c);
     assert!(p.segs.len() > 3);
@@ -116,7 +116,7 @@ fn structure_rules() {
 /// 12; correctness F4): each is refused by a format rule or the budget.
 #[test]
 fn declared_sizes() {
-    let (_, c) = base(Level::Fast, 0);
+    let (_, c) = base(0);
     let p = parts(&c);
     // a 30-byte segment that claims 4 GiB: DEFLATE coding, raw_len
     // 2^32 - 2^16
@@ -146,7 +146,7 @@ fn declared_sizes() {
     b.extend_from_slice(&p.segs[0]);
     refused(&b, "segment length", corrupt);
     // the caller's memory budget
-    let (demo, c) = base(Level::Normal, 0);
+    let (demo, c) = base(0);
     let small: mvdz::ReadOptions = mvdz::Limits {
         memory: demo.len() as u64 / 2,
         ..Default::default()
@@ -170,7 +170,7 @@ fn declared_sizes() {
 fn model_amplification() {
     let Some(dir) = test_data("poc") else { return };
     let demo = synthetic(&[], false);
-    let c = mvdz::compress(&demo, &cfg(Level::Normal, 0)).unwrap();
+    let c = compress(&demo, &cfg(0)).unwrap();
     let p = parts(&c);
     for name in ["v2model_1000.bin", "v2model_16000.bin", "v2model_65535.bin"] {
         // a rANS stream body: header length, header, rANS data
@@ -203,8 +203,8 @@ fn model_amplification() {
 #[test]
 fn mutations_agree() {
     let mut rng = Rng(0x5eed);
-    for (level, seg) in [(Level::Normal, 0), (Level::Normal, 300), (Level::Fast, 0)] {
-        let (_, c) = base(level, seg);
+    for seg in [0, 300] {
+        let (_, c) = base(seg);
         for _ in 0..150 {
             let mut b = c.clone();
             match rng.below(3) {
@@ -266,7 +266,7 @@ fn wide_model(n: u32) -> Vec<u8> {
 #[test]
 fn large_tables() {
     let demo = usercmd_demo();
-    let c = mvdz::compress(&demo, &cfg(Level::Normal, 8192)).unwrap();
+    let c = compress(&demo, &cfg(8192)).unwrap();
     let mut p = parts(&c);
     assert!(!p.models.is_empty());
     let m = wide_model(512);

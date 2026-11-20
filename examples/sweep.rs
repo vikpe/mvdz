@@ -1,7 +1,7 @@
-//! Round-trip sweep: every file at both levels, whole-file and segmented;
-//! decoded by the whole-file and the sequential reader and compared by
-//! SHA-256. Usage: sweep [-s size] files...
-//! (`size` takes K, M, G suffixes, binary, as the command-line tool does).
+//! Round-trip sweep: every file as the encoder writes it (256 KiB
+//! segments) and at one other segment size (-s, default 1M); decoded by
+//! the whole-file and the sequential reader and compared by SHA-256.
+//! Usage: sweep [-s size] files... (`size` takes K, M, G suffixes, binary).
 use sha2::{Digest, Sha256};
 use std::io::Read;
 
@@ -12,22 +12,19 @@ fn main() {
         seg = size(&args[1]);
         args.drain(..2);
     }
-    let configs: Vec<(mvdz::Level, usize)> = [mvdz::Level::Normal, mvdz::Level::Fast]
-        .into_iter()
-        .flat_map(|l| [(l, 0), (l, seg)])
-        .collect();
+    // None: the format's own segment size
+    let configs: Vec<Option<usize>> = vec![None, Some(seg)];
     let res = mvdz::util::par_map(4, args.len(), |i| {
         let src = std::fs::read(&args[i]).unwrap();
         let want = Sha256::digest(&src);
         let mut fails = Vec::new();
         let mut fb = 0;
-        for &(level, s) in &configs {
-            let cfg = mvdz::Config {
-                level,
-                segment: s,
-                ..Default::default()
+        for &s in &configs {
+            let cfg = mvdz::Config::default();
+            let (c, info) = match s {
+                None => mvdz::compress_info(&src, &cfg).unwrap(),
+                Some(s) => mvdz::encode::compress_segmented(&src, s, &cfg).unwrap(),
             };
-            let (c, info) = mvdz::compress_info(&src, &cfg).unwrap();
             fb += info.fallback_segments;
             let ok1 = mvdz::decompress(&c, 1)
                 .map(|d| Sha256::digest(&d) == want)
@@ -37,7 +34,7 @@ fn main() {
                 .map(|mut r| r.read_to_end(&mut d).is_ok() && Sha256::digest(&d) == want)
                 .unwrap_or(false);
             if !(ok1 && ok2) {
-                fails.push(format!("{level:?} seg {s}"));
+                fails.push(format!("segment {s:?}"));
             }
         }
         (args[i].clone(), src.len(), fails, fb)
@@ -60,7 +57,7 @@ fn main() {
     );
 }
 
-/// A size with an optional binary K, M or G suffix (as `mvdz -s`).
+/// A size with an optional binary K, M or G suffix.
 fn size(s: &str) -> usize {
     let (num, shift) = match s.as_bytes().last() {
         Some(b'k' | b'K') => (&s[..s.len() - 1], 10),

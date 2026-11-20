@@ -64,18 +64,16 @@ fn go_decoder_agrees() {
     }
     let tmp = std::env::temp_dir().join(format!("mvdz-interop-{}.mvdz", std::process::id()));
     for src in samples(2) {
-        for level in [mvdz::Level::Normal, mvdz::Level::Fast] {
-            for c in [
-                mvdz::compress(&src, &cfg(level, 0)).unwrap(),
-                mvdz::compress(&src, &cfg(level, 300_000)).unwrap(),
-            ] {
-                std::fs::write(&tmp, &c).unwrap();
-                let sha: String = <sha2::Sha256 as sha2::Digest>::digest(&src)
-                    .iter()
-                    .map(|x| format!("{x:02x}"))
-                    .collect();
-                assert_eq!(run(&bin, &tmp), Some(sha));
-            }
+        for c in [
+            compress(&src, &cfg(0)).unwrap(),
+            compress(&src, &cfg(300_000)).unwrap(),
+        ] {
+            std::fs::write(&tmp, &c).unwrap();
+            let sha: String = <sha2::Sha256 as sha2::Digest>::digest(&src)
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect();
+            assert_eq!(run(&bin, &tmp), Some(sha));
         }
     }
     let _ = std::fs::remove_file(&tmp);

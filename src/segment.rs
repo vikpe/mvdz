@@ -28,34 +28,13 @@ use crate::walk::{Recs, SymIO, Walker};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Compression level: which back ends the encoder may use per stream.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Level {
-    /// Static rANS with per-context tables for structural and numeric
-    /// streams.
-    #[default]
-    Normal,
-    /// Structural and numeric streams stored or DEFLATE.
-    Fast,
-}
+/// Raw bytes per segment: a segment is cut at the first frame boundary at
+/// or after this many bytes.
+pub const SEGMENT: usize = 256 * 1024;
 
-/// DEFLATE level of the normal level's blob body, DEFLATE streams,
-/// untransformed segments and META.
-pub const DEFLATE_NORMAL: u32 = 9;
-/// DEFLATE level of the fast level's blob body, streams, untransformed
-/// segments and META.
-pub const DEFLATE_FAST: u32 = 6;
-
-impl Level {
-    /// The DEFLATE level of this level's blob body, streams, untransformed
-    /// segments and META.
-    pub fn deflate(self) -> u32 {
-        match self {
-            Level::Normal => DEFLATE_NORMAL,
-            Level::Fast => DEFLATE_FAST,
-        }
-    }
-}
+/// DEFLATE level of the blob body, of streams and segments that fall back
+/// to DEFLATE.
+pub const DEFLATE_LEVEL: u32 = 9;
 
 /// Per-stream statistics for reporting. The blob streams of a segment
 /// share one body: each has `packed` 0, and the body is reported once
@@ -346,12 +325,8 @@ enum Kind {
 /// Back ends the encoder tries for a structural or numeric stream,
 /// smallest output wins; if none of them can code the stream, the fallback
 /// list is tried. `file`: the file has a shared model for the stream.
-fn candidates(level: Level, file: bool) -> &'static [u8] {
-    match level {
-        Level::Normal if file => &[BE_FILE],
-        Level::Normal => &[BE_RANS],
-        Level::Fast => &[BE_STORE, BE_DEFLATE],
-    }
+fn candidates(file: bool) -> &'static [u8] {
+    if file { &[BE_FILE] } else { &[BE_RANS] }
 }
 
 /// The blob streams of a walked segment, in id order.
@@ -365,12 +340,11 @@ fn pack_one(
     kind: Kind,
     be: u8,
     sid: usize,
-    level: Level,
     wk: &Walked,
     num: &[(NCtx, i32)],
     file: Option<&rans::Shared>,
 ) -> Option<Vec<u8>> {
-    let z = level.deflate();
+    let z = DEFLATE_LEVEL;
     match kind {
         Kind::Lazy => coder::encode_lazy(be, &wk.io.syms[sid], &wk.io.ctxs[sid], z, file),
         Kind::Num => coder::encode_num(be, sid, num, z, file),
@@ -388,19 +362,18 @@ fn pack_one(
 fn pack_best(
     kind: Kind,
     sid: usize,
-    level: Level,
     wk: &Walked,
     num: &[(NCtx, i32)],
     file: Option<&rans::Shared>,
 ) -> (u8, Vec<u8>) {
     if matches!(kind, Kind::Blobs) {
-        let body = pack_one(kind, BE_DEFLATE, sid, level, wk, num, file);
+        let body = pack_one(kind, BE_DEFLATE, sid, wk, num, file);
         return (BE_DEFLATE, body.expect("the blob body"));
     }
-    for list in [candidates(level, file.is_some()), &[BE_STORE, BE_DEFLATE]] {
+    for list in [candidates(file.is_some()), &[BE_STORE, BE_DEFLATE]] {
         let mut best: Option<(u8, Vec<u8>)> = None;
         for &be in list {
-            if let Some(c) = pack_one(kind, be, sid, level, wk, num, file) {
+            if let Some(c) = pack_one(kind, be, sid, wk, num, file) {
                 if best.as_ref().is_none_or(|b| c.len() < b.1.len()) {
                     best = Some((be, c));
                 }
@@ -502,7 +475,6 @@ fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
 pub fn encode(
     src: &[u8],
     wk: &Walked,
-    level: Level,
     threads: usize,
     stats: &mut Vec<StreamStat>,
     shared: &[Option<rans::Shared>],
@@ -545,7 +517,7 @@ pub fn encode(
             &[]
         };
         let file = shared.get(sid).and_then(|m| m.as_ref());
-        pack_best(kind, sid, level, wk, num, file)
+        pack_best(kind, sid, wk, num, file)
     });
     let mut packed: Vec<Option<(u8, Vec<u8>)>> = (0..jobs.len()).map(|_| None).collect();
     for (k, p) in packed_sorted.into_iter().enumerate() {
@@ -955,15 +927,13 @@ mod tests {
     #[test]
     fn segment_round_trip() {
         let src = demo();
-        for level in [Level::Normal, Level::Fast] {
-            for threads in [1, 3] {
-                let (wk, _) = walk(&src, Proto::default()).unwrap();
-                let mut st = Vec::new();
-                let body = encode(&src, &wk, level, 1, &mut st, &[]);
-                let h = parse_header(&body, src.len()).unwrap();
-                let dst = decoded(&body, &h, src.len(), None, threads);
-                assert!(dst == src, "{level:?} {threads}");
-            }
+        for threads in [1, 3] {
+            let (wk, _) = walk(&src, Proto::default()).unwrap();
+            let mut st = Vec::new();
+            let body = encode(&src, &wk, 1, &mut st, &[]);
+            let h = parse_header(&body, src.len()).unwrap();
+            let dst = decoded(&body, &h, src.len(), None, threads);
+            assert!(dst == src, "{threads}");
         }
     }
     /// usercmd hidden blocks (type 1): on and off the grid, other lengths,
@@ -1005,21 +975,19 @@ mod tests {
             src.extend_from_slice(&p);
         }
         src.extend(demo());
-        for level in [Level::Normal, Level::Fast] {
-            for threads in [1, 3] {
-                let (wk, _) = walk(&src, Proto::default()).unwrap();
-                let body = encode(&src, &wk, level, 1, &mut Vec::new(), &[]);
-                let h = parse_header(&body, src.len()).unwrap();
-                let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().2;
-                assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
-                let dst = decoded(&body, &h, src.len(), None, threads);
-                assert!(dst == src, "{level:?} {threads}");
-            }
+        for threads in [1, 3] {
+            let (wk, _) = walk(&src, Proto::default()).unwrap();
+            let body = encode(&src, &wk, 1, &mut Vec::new(), &[]);
+            let h = parse_header(&body, src.len()).unwrap();
+            let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().2;
+            assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
+            let dst = decoded(&body, &h, src.len(), None, threads);
+            assert!(dst == src, "{threads}");
         }
         // without usercmd blocks neither stream is in the table
         let plain = demo();
         let (wk, _) = walk(&plain, Proto::default()).unwrap();
-        let body = encode(&plain, &wk, Level::Normal, 1, &mut Vec::new(), &[]);
+        let body = encode(&plain, &wk, 1, &mut Vec::new(), &[]);
         let h = parse_header(&body, plain.len()).unwrap();
         assert!(h.ents.iter().all(|e| e.0 != UC && e.0 != UC_A));
     }
@@ -1053,7 +1021,7 @@ mod tests {
         );
         let ft = FileTables::new(tables_body(&models, &kept), &Budget::unlimited()).unwrap();
         let mut st = Vec::new();
-        let body = encode(&src, &wk, Level::Normal, 1, &mut st, &models);
+        let body = encode(&src, &wk, 1, &mut st, &models);
         let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;
         assert_eq!(be(big), BE_RANS);
         assert!(kept.iter().all(|&sid| be(sid) == BE_FILE));

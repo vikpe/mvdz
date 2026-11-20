@@ -12,7 +12,6 @@ mod common;
 use common::*;
 use mvdz::format::*;
 use mvdz::util::put_uv;
-use mvdz::{Config, Level};
 use sha2::{Digest, Sha256};
 
 fn dir() -> std::path::PathBuf {
@@ -60,10 +59,6 @@ fn vectors_decode() {
 
 /// (file, bytes, decoded demo or None for a hostile file, how it was made)
 type Vector = (String, Vec<u8>, Option<Vec<u8>>, String);
-
-fn c(level: Level, seg: usize) -> Config {
-    cfg(level, seg)
-}
 
 /// A demo with escapes: unknown commands, a command that does not fit, and
 /// hidden blocks with lying lengths.
@@ -192,7 +187,7 @@ fn hostile(v: &mut Vec<Vector>) {
         v.push((format!("hostile-{name}.mvdz"), b, None, how.to_string()))
     };
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let base = mvdz::compress(&demo, &c(Level::Normal, 300)).unwrap();
+    let base = compress(&demo, &cfg(300)).unwrap();
     let p = parts(&base);
     assert!(p.segs.len() > 3);
     add(
@@ -377,7 +372,7 @@ fn hostile(v: &mut Vec<Vector>) {
 /// -s 8K.
 fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
     let uc = usercmd_demo();
-    let tc = mvdz::compress(&uc, &c(Level::Normal, 8192)).unwrap();
+    let tc = compress(&uc, &cfg(8192)).unwrap();
     let p = parts(&tc);
     assert!(!p.models.is_empty(), "a segmented normal file has models");
     let ents = tables_entries(&p.models);
@@ -532,33 +527,21 @@ fn all_vectors() -> Option<Vec<Vector>> {
         v.push((name.to_string(), b, Some(d.to_vec()), how.to_string()))
     };
     // without the input check: some vectors hold non-demo input
-    let one = |d: &[u8], c: Config| mvdz::encode::compress(d, &c).unwrap().0;
+    let one = |d: &[u8], c: Cfg| unchecked(d, &c).unwrap().0;
     let src = "duel = sample 3ff1f82b...8d92";
     add(
         "duel.normal.mvdz",
-        one(&duel, c(Level::Normal, 0)),
+        one(&duel, cfg(0)),
         &duel,
         &format!("{src}; compress"),
     );
     add(
-        "duel.fast.mvdz",
-        one(&duel, c(Level::Fast, 0)),
-        &duel,
-        &format!("{src}; compress --fast"),
-    );
-    add(
         "duel.normal.seg64k.mvdz",
-        one(&duel, c(Level::Normal, 65536)),
+        one(&duel, cfg(65536)),
         &duel,
         &format!("{src}; compress -s 64K"),
     );
-    add(
-        "duel.fast.seg64k.mvdz",
-        one(&duel, c(Level::Fast, 65536)),
-        &duel,
-        &format!("{src}; compress --fast -s 64K"),
-    );
-    let (fb, _) = mvdz::encode::compress_untransformed(&duel, &c(Level::Normal, 65536)).unwrap();
+    let fb = untransformed(&duel, &cfg(65536));
     add(
         "duel.untransformed.mvdz",
         fb,
@@ -567,7 +550,7 @@ fn all_vectors() -> Option<Vec<Vector>> {
     );
     add(
         "duel-truncated.normal.mvdz",
-        one(&duel[..150_000], c(Level::Normal, 0)),
+        one(&duel[..150_000], cfg(0)),
         &duel[..150_000],
         "the first 150000 bytes of duel (ends inside a frame)",
     );
@@ -575,49 +558,37 @@ fn all_vectors() -> Option<Vec<Vector>> {
     let random: Vec<u8> = (0..3000).map(|_| rng.next() as u8).collect();
     add(
         "float-mvd1.normal.mvdz",
-        one(&mvd1, c(Level::Normal, 0)),
+        one(&mvd1, cfg(0)),
         &mvd1,
         "rev-correct gen1/float_mvd1.mvd (MVD1 float coordinates, 3 escapes)",
     );
     add(
-        "float-mvd1.fast.mvdz",
-        one(&mvd1, c(Level::Fast, 0)),
-        &mvd1,
-        "the same, --fast",
-    );
-    add(
         "float-fte.normal.mvdz",
-        one(&fte, c(Level::Normal, 0)),
+        one(&fte, cfg(0)),
         &fte,
         "the first 300000 bytes of sample 3fdd8018 (FTE float coordinates)",
     );
     let esc = escapes();
     add(
         "escapes.normal.mvdz",
-        one(&esc, c(Level::Normal, 0)),
+        one(&esc, cfg(0)),
         &esc,
         "synthetic demo with unknown commands and lying hidden blocks",
-    );
-    add(
-        "escapes.fast.mvdz",
-        one(&esc, c(Level::Fast, 0)),
-        &esc,
-        "the same, --fast",
     );
     let md = multi_demoinfo();
     add(
         "demoinfo-multi.normal.mvdz",
-        one(&md, c(Level::Normal, 1000)),
+        one(&md, cfg(1000)),
         &md,
         "synthetic demo carrying a 3-block KTX demoinfo twice; segment 1000",
     );
     add(
         "random.normal.mvdz",
-        one(&random, c(Level::Normal, 0)),
+        one(&random, cfg(0)),
         &random,
         "3000 random bytes (no frame: all tail)",
     );
-    let (rs, _) = mvdz::encode::compress_untransformed(&random, &c(Level::Normal, 0)).unwrap();
+    let rs = untransformed(&random, &cfg(0));
     add(
         "random.stored.mvdz",
         rs,
@@ -626,26 +597,20 @@ fn all_vectors() -> Option<Vec<Vector>> {
     );
     add(
         "empty.normal.mvdz",
-        one(b"", c(Level::Normal, 0)),
+        one(b"", cfg(0)),
         b"",
         "an empty demo",
     );
     let uc = usercmd_demo();
     add(
         "usercmd.normal.mvdz",
-        one(&uc, c(Level::Normal, 0)),
+        one(&uc, cfg(0)),
         &uc,
         "synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)",
     );
     add(
-        "usercmd.fast.mvdz",
-        one(&uc, c(Level::Fast, 0)),
-        &uc,
-        "the same, --fast",
-    );
-    add(
         "usercmd.normal.seg8k.mvdz",
-        one(&uc, c(Level::Normal, 8192)),
+        one(&uc, cfg(8192)),
         &uc,
         "the same, -s 8K",
     );

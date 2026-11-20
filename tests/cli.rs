@@ -116,8 +116,6 @@ fn non_demos_are_refused() {
             mvdz::capi::mvdz_compress(
                 bytes.as_ptr() as *const _,
                 bytes.len(),
-                0,
-                0,
                 1,
                 &mut out,
                 &mut n,
@@ -136,7 +134,7 @@ fn c_compress_gzip() {
     let c = |b: &[u8]| unsafe {
         let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
         let rc =
-            mvdz::capi::mvdz_compress(b.as_ptr() as *const _, b.len(), 1, 0, 1, &mut out, &mut n);
+            mvdz::capi::mvdz_compress(b.as_ptr() as *const _, b.len(), 1, &mut out, &mut n);
         assert_eq!(rc, 0);
         let v = std::slice::from_raw_parts(out, n).to_vec();
         mvdz::capi::mvdz_free(out as *mut _, n);

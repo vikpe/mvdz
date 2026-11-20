@@ -1,33 +1,23 @@
-//! Round trips through every reader: both levels, whole-file and
-//! segmented; seeking; odd and non-MVD input; determinism.
+//! Round trips through every reader, at the format's segment size and at
+//! smaller ones; seeking; odd and non-MVD input; determinism.
 
 mod common;
 use common::*;
-use mvdz::{Config, Level};
 use std::io::{Cursor, Read};
 
-const LEVELS: [Level; 2] = [Level::Normal, Level::Fast];
-
-/// The one-shot encoder without the input check (any bytes round-trip).
-fn unchecked(src: &[u8], c: &Config) -> (Vec<u8>, mvdz::Info) {
-    mvdz::encode::compress(src, c).unwrap()
-}
-
 fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) {
-    for level in LEVELS {
-        for seg in [0usize, 65536] {
-            let c = cfg(level, seg);
-            let (one, info) = unchecked(src, &c);
-            if expect_transform {
-                assert_eq!(
-                    info.fallback_segments, 0,
-                    "{what}: {level:?} seg {seg} fell back"
-                );
-            }
-            let back = readers_agree(&one, what)
-                .unwrap_or_else(|| panic!("{what}: {level:?} seg {seg} refused"));
-            assert!(back == src, "{what}: {level:?} seg {seg}");
+    for seg in [0usize, 65536] {
+        let c = cfg(seg);
+        let (one, info) = unchecked(src, &c).unwrap();
+        if expect_transform {
+            assert_eq!(
+                info.fallback_segments, 0,
+                "{what}: seg {seg} fell back"
+            );
         }
+        let back = readers_agree(&one, what)
+            .unwrap_or_else(|| panic!("{what}: seg {seg} refused"));
+        assert!(back == src, "{what}: seg {seg}");
     }
 }
 
@@ -65,10 +55,8 @@ fn empty_and_tiny_inputs() {
         &text,
     ];
     for src in inputs {
-        for level in LEVELS {
-            let e = mvdz::compress(src, &cfg(level, 0)).unwrap_err();
-            assert!(matches!(e, mvdz::Error::NotMvd(_)), "{e}");
-        }
+        let e = compress(src, &cfg(0)).unwrap_err();
+        assert!(matches!(e, mvdz::Error::NotMvd(_)), "{e}");
         // the unchecked encoder still round-trips any bytes
         check_all_ways(src, &format!("{src:?}"), false);
     }
@@ -93,18 +81,16 @@ fn non_mvd_input_streams() {
     for (i, src) in inputs.iter().enumerate() {
         // the encoder refuses what is not a demo
         if mvdz::check_demo(src).is_err() {
-            let r = mvdz::compress(src, &cfg(Level::Fast, 1000));
+            let r = compress(src, &cfg(1000));
             assert!(matches!(r, Err(mvdz::Error::NotMvd(_))), "input {i}");
             continue;
         }
-        for level in LEVELS {
-            for seg in [1000usize, 1 << 20] {
-                let c = mvdz::compress(src, &cfg(level, seg)).unwrap();
-                assert!(
-                    readers_agree(&c, "non-mvd").unwrap() == *src,
-                    "input {i} {level:?} seg {seg}"
-                );
-            }
+        for seg in [1000usize, 1 << 20] {
+            let c = compress(src, &cfg(seg)).unwrap();
+            assert!(
+                readers_agree(&c, "non-mvd").unwrap() == *src,
+                "input {i} seg {seg}"
+            );
         }
     }
 }
@@ -118,45 +104,41 @@ fn ratio_limit_fallback() {
         d.frame(0, 1, &[1u8; 10_000]);
     }
     let src = d.0;
-    for level in LEVELS {
-        for seg in [0usize, 1 << 20] {
-            let (c, info) = mvdz::compress_info(&src, &cfg(level, seg)).unwrap();
-            assert!(info.fallback_segments > 0);
-            assert!(readers_agree(&c, "nop").unwrap() == src);
-        }
+    for seg in [0usize, 1 << 20] {
+        let (c, info) = compress_info(&src, &cfg(seg)).unwrap();
+        assert!(info.fallback_segments > 0);
+        assert!(readers_agree(&c, "nop").unwrap() == src);
     }
 }
 
 #[test]
 fn seeking() {
     let Some(src) = duel() else { return };
-    for level in LEVELS {
-        for c in [
-            mvdz::compress(&src, &cfg(level, 40_000)).unwrap(),
-            mvdz::compress(&src, &cfg(level, 50_000)).unwrap(),
-        ] {
-            let mut r = mvdz::Reader::open(Cursor::new(&c), 2, &Default::default()).unwrap();
-            let ix = r.index().unwrap().clone();
-            assert!(ix.segs.len() > 3);
-            for (i, s) in ix.segs.iter().enumerate() {
-                assert_eq!(r.seek_segment(i).unwrap(), s.raw_off);
-                let mut tail = Vec::new();
-                r.read_to_end(&mut tail).unwrap();
-                assert!(tail == src[s.raw_off as usize..], "segment {i}");
-            }
-            assert!(matches!(
-                r.seek_segment(ix.segs.len()),
-                Err(mvdz::Error::Invalid(_))
-            ));
-            let dur = ix.duration_ms;
-            for ms in [0, 1, 1000, dur / 2, dur, dur + 1] {
-                let (i, t, off) = r.seek_time(ms).unwrap();
-                assert!(i == 0 || t < ms, "segment {i} starts before {ms}");
-                assert!(i + 1 == ix.segs.len() || ix.segs[i + 1].t_start >= ms);
-                let mut tail = Vec::new();
-                r.read_to_end(&mut tail).unwrap();
-                assert!(tail == src[off as usize..]);
-            }
+    for c in [
+        compress(&src, &cfg(40_000)).unwrap(),
+        compress(&src, &cfg(50_000)).unwrap(),
+    ] {
+        let mut r = mvdz::Reader::open(Cursor::new(&c), 2, &Default::default()).unwrap();
+        let ix = r.index().unwrap().clone();
+        assert!(ix.segs.len() > 3);
+        for (i, s) in ix.segs.iter().enumerate() {
+            assert_eq!(r.seek_segment(i).unwrap(), s.raw_off);
+            let mut tail = Vec::new();
+            r.read_to_end(&mut tail).unwrap();
+            assert!(tail == src[s.raw_off as usize..], "segment {i}");
+        }
+        assert!(matches!(
+            r.seek_segment(ix.segs.len()),
+            Err(mvdz::Error::Invalid(_))
+        ));
+        let dur = ix.duration_ms;
+        for ms in [0, 1, 1000, dur / 2, dur, dur + 1] {
+            let (i, t, off) = r.seek_time(ms).unwrap();
+            assert!(i == 0 || t < ms, "segment {i} starts before {ms}");
+            assert!(i + 1 == ix.segs.len() || ix.segs[i + 1].t_start >= ms);
+            let mut tail = Vec::new();
+            r.read_to_end(&mut tail).unwrap();
+            assert!(tail == src[off as usize..]);
         }
     }
 }
@@ -192,14 +174,13 @@ fn edited_demos_round_trip() {
                 _ => d.truncate(i),
             }
         }
-        let level = LEVELS[case % 2];
         let seg = [0, 4096, 65536][case % 3];
         // an edit that destroys the first frame makes it a non-demo
         if mvdz::check_demo(&d).is_err() {
             refused += 1;
             continue;
         }
-        let c = mvdz::compress(&d, &cfg(level, seg)).unwrap();
+        let c = compress(&d, &cfg(seg)).unwrap();
         assert!(mvdz::decompress(&c, 1).unwrap() == d, "case {case}");
         assert!(mvdz::decompress(&c, 2).unwrap() == d, "case {case}, 2 threads");
     }
@@ -229,27 +210,23 @@ fn constructed_demos() {
         // encoder
         if mvdz::check_demo(&src).is_err() {
             assert!(matches!(
-                mvdz::compress(&src, &cfg(Level::Fast, 0)),
+                compress(&src, &cfg(0)),
                 Err(mvdz::Error::NotMvd(_))
             ));
-            for level in LEVELS {
-                let (c, _) = mvdz::encode::compress(&src, &cfg(level, 50_000)).unwrap();
-                assert!(mvdz::decompress(&c, 2).unwrap() == src, "{name}");
-            }
+            let (c, _) = unchecked(&src, &cfg(50_000)).unwrap();
+            assert!(mvdz::decompress(&c, 2).unwrap() == src, "{name}");
             continue;
         }
-        for level in LEVELS {
-            for seg in [0usize, 50_000] {
-                let c = mvdz::compress(&src, &cfg(level, seg)).unwrap();
-                assert!(
-                    mvdz::decompress(&c, 2).unwrap() == src,
-                    "{name} {level:?} {seg}"
-                );
-                assert!(
-                    mvdz::decompress(&c, 1).unwrap() == src,
-                    "{name} {level:?} {seg}, 1 thread"
-                );
-            }
+        for seg in [0usize, 50_000] {
+            let c = compress(&src, &cfg(seg)).unwrap();
+            assert!(
+                mvdz::decompress(&c, 2).unwrap() == src,
+                "{name} seg {seg}"
+            );
+            assert!(
+                mvdz::decompress(&c, 1).unwrap() == src,
+                "{name} seg {seg}, 1 thread"
+            );
         }
     }
 }
@@ -257,38 +234,33 @@ fn constructed_demos() {
 #[test]
 fn deterministic_output() {
     let src = duel().unwrap_or_else(|| synthetic(&[(0, "{}")], false));
-    for level in LEVELS {
-        for seg in [0usize, 30_000] {
-            let a = mvdz::compress(&src, &cfg(level, seg)).unwrap();
-            let b = mvdz::compress(
-                &src,
-                &Config {
-                    threads: 3,
-                    ..cfg(level, seg)
-                },
-            )
-            .unwrap();
-            assert!(a == b, "{level:?} {seg}: threads change the output");
-        }
+    for seg in [0usize, 30_000] {
+        let a = compress(&src, &cfg(seg)).unwrap();
+        let b = compress(
+            &src,
+            &Cfg {
+                threads: 3,
+                ..cfg(seg)
+            },
+        )
+        .unwrap();
+        assert!(a == b, "seg {seg}: threads change the output");
     }
 }
 
-/// The models block (FORMAT.md §2.6): segmented files at the normal level
-/// have shared models; whole and fast files have an empty block. Every
-/// reader handles it.
+/// The models block (FORMAT.md §2.6): a file of several segments has
+/// shared models; a file of one segment has an empty block. Every reader
+/// handles it.
 #[test]
 fn file_tables() {
     let src = usercmd_demo();
     let has = |c: &[u8]| !parts(c).models.is_empty();
-    let (seg, info) = mvdz::compress_info(&src, &cfg(Level::Normal, 8192)).unwrap();
+    let (seg, info) = compress_info(&src, &cfg(8192)).unwrap();
     assert!(info.segments > 2);
     assert!(has(&seg), "shared models");
     assert!(info.streams.iter().any(|s| s.be == 3), "back end 3 is used");
     assert!(readers_agree(&seg, "tables").unwrap() == src);
-    for c in [
-        mvdz::compress(&src, &cfg(Level::Normal, 0)).unwrap(),
-        mvdz::compress(&src, &cfg(Level::Fast, 8192)).unwrap(),
-    ] {
-        assert!(!has(&c), "whole and fast files have no shared models");
-    }
+    let one = compress(&src, &cfg(0)).unwrap();
+    assert_eq!(parts(&one).segs.len(), 1);
+    assert!(!has(&one), "a file of one segment has no shared models");
 }

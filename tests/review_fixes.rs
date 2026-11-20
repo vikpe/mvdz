@@ -8,14 +8,14 @@ use mvdz::budget::{Limits, ReadOptions};
 use mvdz::capi::*;
 use mvdz::format::*;
 use mvdz::util::put_uv;
-use mvdz::{Error, Level};
+use mvdz::Error;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 /// A small demo and its file.
 fn base() -> (Vec<u8>, Vec<u8>) {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let c = mvdz::compress(&demo, &cfg(Level::Normal, 0)).unwrap();
+    let c = compress(&demo, &cfg(0)).unwrap();
     (demo, c)
 }
 
@@ -110,7 +110,7 @@ fn r_m3_json_limit() {
 fn r_m4_section_bookkeeping() {
     // one segment per frame
     let demo = sets(60_000);
-    let f = mvdz::compress(&demo, &cfg(Level::Fast, 1)).unwrap();
+    let f = compress(&demo, &cfg(1)).unwrap();
     assert!(parts(&f).segs.len() > 60_000);
     assert_eq!(mvdz::decompress(&f, 1).unwrap(), demo);
     let l: ReadOptions = Limits {
@@ -205,15 +205,15 @@ fn sets(n: usize) -> Vec<u8> {
 fn c_m1_segment_limit() {
     let demo = sets(MAX_SEGMENTS + 10);
     let t = Instant::now();
-    let e = mvdz::compress(&demo, &cfg(Level::Fast, 1)).unwrap_err();
+    let e = compress(&demo, &cfg(1)).unwrap_err();
     assert_eq!(
         e,
-        Error::Invalid("too many segments: use a larger segment size")
+        Error::Invalid("too many segments")
     );
     assert!(t.elapsed() < Duration::from_secs(5));
     // at the limit itself, the file is written and decodes
     let demo = sets(2000);
-    let c = mvdz::compress(&demo, &cfg(Level::Fast, 1)).unwrap();
+    let c = compress(&demo, &cfg(1)).unwrap();
     assert_eq!(mvdz::decompress(&c, 1).unwrap(), demo);
 }
 
@@ -258,11 +258,7 @@ fn trusted_mode() {
     unsafe { mvdz_free(out as *mut _, n) };
     // one byte of a stored segment changed: the segment CRC catches it
     let demo = synthetic(&[], false);
-    let (c, _) = mvdz::encode::compress_untransformed(
-        &[demo.clone(), vec![0; 5000]].concat(),
-        &cfg(Level::Normal, 0),
-    )
-    .unwrap();
+    let c = untransformed(&[demo.clone(), vec![0; 5000]].concat(), &cfg(0));
     let ok = mvdz::decompress_with(&c, 1, &t).unwrap();
     let mut bad = c.clone();
     let i = (0..bad.len())

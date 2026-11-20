@@ -4,16 +4,64 @@
 
 use mvdz::capi::*;
 use mvdz::format::*;
-use mvdz::{Config, Level};
+use mvdz::Config;
 use std::io::{Cursor, Read};
 
-pub fn cfg(level: Level, seg: usize) -> Config {
-    Config {
-        level,
-        segment: seg,
-        threads: 1,
-        verify: true,
+/// How a test compresses: the segment size (0: the format's own, 256 KiB;
+/// other sizes give small demos several segments, through the encoder's
+/// test entry point) and the worker threads.
+#[derive(Clone, Copy, Debug)]
+pub struct Cfg {
+    pub seg: usize,
+    pub threads: usize,
+}
+
+pub fn cfg(seg: usize) -> Cfg {
+    Cfg { seg, threads: 1 }
+}
+
+impl Cfg {
+    fn config(&self) -> Config {
+        Config {
+            threads: self.threads,
+            verify: true,
+        }
     }
+}
+
+/// Compresses a demo as the library does (input that is not a demo is
+/// refused), at the test's segment size.
+pub fn compress(src: &[u8], c: &Cfg) -> mvdz::Result<Vec<u8>> {
+    compress_info(src, c).map(|x| x.0)
+}
+
+pub fn compress_info(src: &[u8], c: &Cfg) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
+    if c.seg == 0 {
+        return mvdz::compress_info(src, &c.config());
+    }
+    mvdz::check_demo(src)?;
+    unchecked(src, c)
+}
+
+/// The encoder without the input check (any bytes round-trip).
+pub fn unchecked(src: &[u8], c: &Cfg) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
+    if c.seg == 0 {
+        mvdz::encode::compress(src, &c.config())
+    } else {
+        mvdz::encode::compress_segmented(src, c.seg, &c.config())
+    }
+}
+
+/// Every segment stored without the transform.
+pub fn untransformed(src: &[u8], c: &Cfg) -> Vec<u8> {
+    let seg = if c.seg == 0 {
+        mvdz::segment::SEGMENT
+    } else {
+        c.seg
+    };
+    mvdz::encode::compress_untransformed(src, seg, &c.config())
+        .unwrap()
+        .0
 }
 
 pub struct Rng(pub u64);

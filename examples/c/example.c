@@ -35,11 +35,11 @@ int main(int argc, char **argv) {
     fclose(f);
     printf("mvdz %s\n", mvdz_version());
 
-    /* 1. compress the demo (256 KiB segments, so the file can seek) */
+    /* 1. compress the demo */
     const char *packed = "example_out.mvdz";
     unsigned char *c; size_t c_n;
     int err = 0;
-    int rc = mvdz_compress(demo, (size_t)n, MVDZ_LEVEL_NORMAL, 256 * 1024, 1, &c, &c_n);
+    int rc = mvdz_compress(demo, (size_t)n, 1, &c, &c_n);
     if (rc) return fail("compress", rc);
     FILE *o = fopen(packed, "wb");
     if (!o || fwrite(c, 1, c_n, o) != c_n) { perror(packed); return 1; }
@@ -95,14 +95,14 @@ int main(int argc, char **argv) {
     /* 6. whole-buffer API (.mvd or .mvd.gz input); input that is not a
      * demo is refused */
     unsigned char *z; size_t z_n;
-    rc = mvdz_compress(demo, (size_t)n, MVDZ_LEVEL_FAST, 0, 1, &z, &z_n);
+    rc = mvdz_compress(demo, (size_t)n, 4, &z, &z_n);
     if (rc) return fail("compress", rc);
     unsigned char *e; size_t e_n;
     rc = mvdz_decompress(z, z_n, 1, 0, 0, &e, &e_n);
     if (rc || e_n != (size_t)n || memcmp(e, demo, n) != 0) return fail("decompress", rc);
     mvdz_free(z, z_n);
     mvdz_free(e, e_n);
-    rc = mvdz_compress("hello world", 11, MVDZ_LEVEL_NORMAL, 0, 1, &z, &z_n);
+    rc = mvdz_compress("hello world", 11, 1, &z, &z_n);
     if (rc != MVDZ_E_NOTMVD) return fail("compress of a non-demo", rc);
     printf("non-demo: %s\n", mvdz_strerror(rc));
     free(back);

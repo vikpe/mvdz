@@ -75,10 +75,6 @@ extern "C" {
  * verifies the SHA-256: use the default for files from anywhere else. */
 #define MVDZ_TRUSTED 1u
 
-/* Compression levels. */
-#define MVDZ_LEVEL_NORMAL 0  /* static rANS (default) */
-#define MVDZ_LEVEL_FAST   1  /* per-stream zstd: larger, faster to compress and decode */
-
 /* Callbacks for reading through the engine's own VFS.
  * read: fill buf with up to n bytes; return the count, 0 at end of file,
  *       negative on error.
@@ -104,13 +100,11 @@ int mvdz_is_mvdz(const void *buf, size_t n);
  * file holds the raw demo (its identity is the raw demo's SHA-256, and
  * decoding gives the raw .mvd). Input that is not an MVD demo (empty, or
  * no whole first frame that parses; see check_demo in the Rust API), and
- * corrupt gzip, give MVDZ_E_NOTMVD. level: MVDZ_LEVEL_*. segment: raw bytes per
- * independently decodable segment, 0 = one segment (the default). A file holds at most 65536
- * segments: a smaller segment size than that allows is MVDZ_E_INVALID. */
+ * corrupt gzip, give MVDZ_E_NOTMVD. Compression has no settings: the demo
+ * is cut into independently decodable segments of 256 KiB. */
 int mvdz_decompress(const void *in, size_t n, int threads, uint64_t max_memory, unsigned flags,
                     unsigned char **out, size_t *out_n);
-int mvdz_compress(const void *in, size_t n, int level, size_t segment, int threads,
-                  unsigned char **out, size_t *out_n);
+int mvdz_compress(const void *in, size_t n, int threads, unsigned char **out, size_t *out_n);
 
 /* Incremental decoding. mvdz_open_memory copies the buffer.
  * mvdz_open_callbacks: with seek == NULL the file is read strictly

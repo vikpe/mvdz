@@ -3,7 +3,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use mvdz::api::{self, Config};
-use mvdz::{Level, Limits, ReadOptions};
+use mvdz::{Limits, ReadOptions};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -20,14 +20,14 @@ macro_rules! out {
 fn usage() -> ! {
     eprintln!(
         "usage:
-  mvdz compress   [--fast] [-s size] [-j threads] [--allow-non-demo]
+  mvdz compress   [-j threads] [--allow-non-demo]
                   [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
                   game.mvd or game.mvd.gz -> game.mvdz beside it
   mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
                   game.mvdz -> game.mvd (game.mvd.gz with --gzip) beside it
   mvdz info       file.mvdz...                     header and segments as JSON
-  mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--no-verify]
+  mvdz bench      [-r reps] [-j threads] [--no-verify]
                   [--skip-compress] [--trusted] [--files out.tsv] [--streams out.tsv] files...
 '-' as a file name is standard input or output. compress and decompress name
 each output after its input, keep the inputs (--rm deletes each one after its
@@ -38,10 +38,8 @@ output, as is -o. compress takes gzip input (.mvd.gz), decompressed first;
 input that is not an MVD demo is refused (--allow-non-demo stores it anyway).
 decompress --gzip writes the demo gzip-compressed (the default for an output
 named *.gz; --no-gzip writes it raw). Sizes take K, M, G suffixes
-(binary: 1M = 1048576). --fast selects per-stream DEFLATE: faster to compress
-and decode, larger (default: normal).
--s cuts the demo into independently decodable segments (default: one,
-which cannot seek; -s 1M for files that will be played or served).
+(binary: 1M = 1048576). Compression has no settings: the demo is cut into
+independently decodable segments of 256 KiB.
 --trusted skips the SHA-256 identity check (CRC-32C checks only): only for
 files whose SHA-256 was verified before."
     );
@@ -49,8 +47,6 @@ files whose SHA-256 was verified before."
 }
 
 struct Args {
-    levels: Vec<Level>,
-    seg: usize,
     threads: usize,
     reps: usize,
     max_memory: Option<u64>,
@@ -80,17 +76,8 @@ fn size(s: &str) -> u64 {
         .unwrap_or_else(|| usage())
 }
 
-fn level_name(l: Level) -> &'static str {
-    match l {
-        Level::Normal => "normal",
-        Level::Fast => "fast",
-    }
-}
-
 fn parse(args: &[String]) -> Args {
     let mut a = Args {
-        levels: vec![Level::Normal],
-        seg: 0,
         threads: std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1),
@@ -116,18 +103,6 @@ fn parse(args: &[String]) -> Args {
             args.get(i).cloned().unwrap_or_else(|| usage())
         };
         match s.as_str() {
-            "--fast" => a.levels = vec![Level::Fast],
-            "--levels" => {
-                a.levels = val()
-                    .split(',')
-                    .map(|l| match l {
-                        "normal" => Level::Normal,
-                        "fast" => Level::Fast,
-                        _ => usage(),
-                    })
-                    .collect()
-            }
-            "-s" | "--segment" => a.seg = usize::try_from(size(&val())).unwrap_or_else(|_| usage()),
             "-j" | "--threads" => a.threads = val().parse().unwrap_or_else(|_| usage()),
             "-r" | "--reps" => a.reps = val().parse().unwrap_or_else(|_| usage()),
             "--max-memory" => a.max_memory = Some(size(&val())),
@@ -332,8 +307,6 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
     // gzip input is decompressed and non-demos refused by the library
     let src = try_read_input(i)?;
     let cfg = Config {
-        level: a.levels[0],
-        segment: a.seg,
         threads,
         verify: !a.no_verify,
     };
@@ -438,11 +411,10 @@ fn bench(a: &Args) {
     let lim = read_options(a);
     let dec = |c: &[u8], t: usize| api::decompress_with(c, t, &lim);
     out!(
-        "files {}  raw {:.2} MB (10^6 bytes)  reps {}  segment {}  threads {}  verify {}  trusted {}  loadavg {}",
+        "files {}  raw {:.2} MB (10^6 bytes)  reps {}  threads {}  verify {}  trusted {}  loadavg {}",
         files.len(),
         mb,
         reps,
-        a.seg,
         nt,
         !a.no_verify,
         a.trusted,
@@ -451,122 +423,115 @@ fn bench(a: &Args) {
     out!(
         "MB/s of raw demo: median [min-max] over {reps} runs; 'batch' = files in parallel on {nt} threads, 1 thread each"
     );
-    let mut stream_rows: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
+    let mut stream_rows: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut perfile =
-        String::from("level\tfile\traw\tpacked\tsha_ok\tfallback_segments\tescaped\n");
-    for &level in &a.levels {
-        let ln = level_name(level);
-        let cfg = |threads: usize| Config {
-            level,
-            segment: a.seg,
-            threads,
-            verify: !a.no_verify,
-        };
-        let c1 = cfg(1);
-        let comp: Vec<(Vec<u8>, api::Info)> = mvdz::util::par_map(nt, files.len(), |i| {
-            api::compress_info(&files[i].1, &c1).unwrap_or_else(|e| die(e))
+        String::from("file\traw\tpacked\tsha_ok\tfallback_segments\tescaped\n");
+    let cfg = |threads: usize| Config {
+        threads,
+        verify: !a.no_verify,
+    };
+    let c1 = cfg(1);
+    let comp: Vec<(Vec<u8>, api::Info)> = mvdz::util::par_map(nt, files.len(), |i| {
+        api::compress_info(&files[i].1, &c1).unwrap_or_else(|e| die(e))
+    });
+    let bytes: usize = comp.iter().map(|c| c.0.len()).sum();
+    let fb: usize = comp.iter().map(|c| c.1.fallback_segments).sum();
+    let oks: Vec<bool> =
+        mvdz::util::par_map(nt, files.len(), |i| match api::decompress(&comp[i].0, 1) {
+            Ok(back) => Sha256::digest(&back) == Sha256::digest(&files[i].1),
+            Err(_) => false,
         });
-        let bytes: usize = comp.iter().map(|c| c.0.len()).sum();
-        let fb: usize = comp.iter().map(|c| c.1.fallback_segments).sum();
-        let oks: Vec<bool> =
-            mvdz::util::par_map(nt, files.len(), |i| match api::decompress(&comp[i].0, 1) {
-                Ok(back) => Sha256::digest(&back) == Sha256::digest(&files[i].1),
-                Err(_) => false,
+    let ok = oks.iter().filter(|&&x| x).count();
+    for (i, f) in files.iter().enumerate() {
+        let base = std::path::Path::new(&f.0)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        perfile += &format!(
+            "{base}\t{}\t{}\t{}\t{}\t{}\n",
+            f.1.len(),
+            comp[i].0.len(),
+            oks[i],
+            comp[i].1.fallback_segments,
+            comp[i].1.escaped
+        );
+        if !oks[i] {
+            eprintln!("ROUND TRIP FAILED: file {}", f.0);
+        }
+    }
+    for (_, info) in &comp {
+        for s in &info.streams {
+            let e = stream_rows.entry(mvdz::streams::name(s.id)).or_default();
+            e.0 += s.count;
+            e.1 += s.packed;
+        }
+    }
+    let (mut tc1, mut td1, mut tcn, mut tdn, mut tcb, mut tdb) =
+        (vec![], vec![], vec![], vec![], vec![], vec![]);
+    let cn = cfg(nt);
+    for _ in 0..reps {
+        if !a.skip_compress {
+            let t = Instant::now();
+            for f in &files {
+                std::hint::black_box(api::compress(&f.1, &c1).ok());
+            }
+            tc1.push(mb / t.elapsed().as_secs_f64());
+        }
+        let t = Instant::now();
+        for c in &comp {
+            std::hint::black_box(dec(&c.0, 1).ok());
+        }
+        td1.push(mb / t.elapsed().as_secs_f64());
+        if nt > 1 && !a.skip_compress {
+            let t = Instant::now();
+            for f in &files {
+                std::hint::black_box(api::compress(&f.1, &cn).ok());
+            }
+            tcn.push(mb / t.elapsed().as_secs_f64());
+            let t = Instant::now();
+            mvdz::util::par_map(nt, files.len(), |i| {
+                std::hint::black_box(api::compress(&files[i].1, &c1).map(|v| v.len()).ok())
             });
-        let ok = oks.iter().filter(|&&x| x).count();
-        for (i, f) in files.iter().enumerate() {
-            let base = std::path::Path::new(&f.0)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            perfile += &format!(
-                "{ln}\t{base}\t{}\t{}\t{}\t{}\t{}\n",
-                f.1.len(),
-                comp[i].0.len(),
-                oks[i],
-                comp[i].1.fallback_segments,
-                comp[i].1.escaped
-            );
-            if !oks[i] {
-                eprintln!("ROUND TRIP FAILED: level {ln} file {}", f.0);
-            }
+            tcb.push(mb / t.elapsed().as_secs_f64());
         }
-        for (_, info) in &comp {
-            for s in &info.streams {
-                let e = stream_rows
-                    .entry((ln.to_string(), mvdz::streams::name(s.id)))
-                    .or_default();
-                e.0 += s.count;
-                e.1 += s.packed;
-            }
-        }
-        let (mut tc1, mut td1, mut tcn, mut tdn, mut tcb, mut tdb) =
-            (vec![], vec![], vec![], vec![], vec![], vec![]);
-        let cn = cfg(nt);
-        for _ in 0..reps {
-            if !a.skip_compress {
-                let t = Instant::now();
-                for f in &files {
-                    std::hint::black_box(api::compress(&f.1, &c1).ok());
-                }
-                tc1.push(mb / t.elapsed().as_secs_f64());
-            }
+        if nt > 1 {
             let t = Instant::now();
             for c in &comp {
-                std::hint::black_box(dec(&c.0, 1).ok());
+                std::hint::black_box(dec(&c.0, nt).ok());
             }
-            td1.push(mb / t.elapsed().as_secs_f64());
-            if nt > 1 && !a.skip_compress {
-                let t = Instant::now();
-                for f in &files {
-                    std::hint::black_box(api::compress(&f.1, &cn).ok());
-                }
-                tcn.push(mb / t.elapsed().as_secs_f64());
-                let t = Instant::now();
-                mvdz::util::par_map(nt, files.len(), |i| {
-                    std::hint::black_box(api::compress(&files[i].1, &c1).map(|v| v.len()).ok())
-                });
-                tcb.push(mb / t.elapsed().as_secs_f64());
-            }
-            if nt > 1 {
-                let t = Instant::now();
-                for c in &comp {
-                    std::hint::black_box(dec(&c.0, nt).ok());
-                }
-                tdn.push(mb / t.elapsed().as_secs_f64());
-                let t = Instant::now();
-                mvdz::util::par_map(nt, comp.len(), |i| {
-                    std::hint::black_box(dec(&comp[i].0, 1).map(|v| v.len()).ok())
-                });
-                tdb.push(mb / t.elapsed().as_secs_f64());
-            }
+            tdn.push(mb / t.elapsed().as_secs_f64());
+            let t = Instant::now();
+            mvdz::util::par_map(nt, comp.len(), |i| {
+                std::hint::black_box(dec(&comp[i].0, 1).map(|v| v.len()).ok())
+            });
+            tdb.push(mb / t.elapsed().as_secs_f64());
         }
-        out!(
-            "{ln:<7} bytes {bytes}  ratio {:.4}  sha ok {ok}/{}  fallback segments {fb}",
-            bytes as f64 / raw as f64,
-            files.len()
-        );
-        out!(
-            "  compress   1t {}   {nt}t {}   batch {}",
-            fmt(stats(&mut tc1)),
-            fmt(stats(&mut tcn)),
-            fmt(stats(&mut tcb))
-        );
-        out!(
-            "  decompress 1t {}   {nt}t {}   batch {}",
-            fmt(stats(&mut td1)),
-            fmt(stats(&mut tdn)),
-            fmt(stats(&mut tdb))
-        );
     }
+    out!(
+        "bytes {bytes}  ratio {:.4}  sha ok {ok}/{}  fallback segments {fb}",
+        bytes as f64 / raw as f64,
+        files.len()
+    );
+    out!(
+        "  compress   1t {}   {nt}t {}   batch {}",
+        fmt(stats(&mut tc1)),
+        fmt(stats(&mut tcn)),
+        fmt(stats(&mut tcb))
+    );
+    out!(
+        "  decompress 1t {}   {nt}t {}   batch {}",
+        fmt(stats(&mut td1)),
+        fmt(stats(&mut tdn)),
+        fmt(stats(&mut tdb))
+    );
     out!("loadavg after: {}", loadavg());
     if let Some(path) = &a.perfile {
         std::fs::write(path, &perfile).unwrap_or_else(|e| die(e));
     }
     if let Some(path) = &a.streams {
-        let mut s = String::from("level\tstream\tcount\tpacked\n");
-        for ((l, name), (count, packed)) in &stream_rows {
-            s += &format!("{l}\t{name}\t{count}\t{packed}\n");
+        let mut s = String::from("stream\tcount\tpacked\n");
+        for (name, (count, packed)) in &stream_rows {
+            s += &format!("{name}\t{count}\t{packed}\n");
         }
         std::fs::write(path, s).unwrap_or_else(|e| die(e));
     }

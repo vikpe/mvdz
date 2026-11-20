@@ -8,17 +8,13 @@ use crate::decode::{SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
 use crate::proto::{Proto, frame_len};
-use crate::segment::{self, Level, StreamStat, Walked, cut_points, frame_scan};
+use crate::segment::{self, DEFLATE_LEVEL, SEGMENT, StreamStat, Walked, cut_points, frame_scan};
 use crate::util::{crc32, par_map};
 use sha2::{Digest, Sha256};
 
-/// Compression settings.
+/// How the encoder runs. Nothing here changes the file it writes.
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub level: Level,
-    /// Independent, seekable segments of about this many raw bytes (0 =
-    /// the whole demo is one segment).
-    pub segment: usize,
     /// Worker threads.
     pub threads: usize,
     /// Decode the result and compare (falling back per segment on a
@@ -29,8 +25,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            level: Level::Normal,
-            segment: 0,
             threads: 1,
             verify: true,
         }
@@ -116,9 +110,9 @@ pub fn walk_one(s: &[u8], proto: &mut Proto) -> Option<Walked> {
 
 /// The body of a segment stored without the transform: DEFLATE when the
 /// ratio limit allows it and it is smaller, else stored.
-pub fn raw_body(s: &[u8], level: Level, dur_ms: u64) -> Vec<u8> {
+pub fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
     let crc = crc32(s);
-    let z = crate::deflate::compress(s, level.deflate());
+    let z = crate::deflate::compress(s, DEFLATE_LEVEL);
     let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc, C_DEFLATE);
     if z.len() < s.len() && seg_ratio_ok(s.len() as u64, (b.len() + z.len()) as u64) {
         b.extend_from_slice(&z);
@@ -134,47 +128,60 @@ pub fn raw_body(s: &[u8], level: Level, dur_ms: u64) -> Vec<u8> {
 pub fn transform_body(
     s: &[u8],
     wk: &Walked,
-    level: Level,
     dur_ms: u64,
     threads: usize,
     st: &mut Vec<StreamStat>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
     let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc32(s), C_TRANSFORM);
-    b.extend_from_slice(&segment::encode(s, wk, level, threads, st, shared));
+    b.extend_from_slice(&segment::encode(s, wk, threads, st, shared));
     seg_ratio_ok(s.len() as u64, b.len() as u64).then_some(b)
 }
 
-/// Compresses a demo.
+/// Compresses a demo into segments of [`SEGMENT`] raw bytes.
 pub fn compress(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    compress_inner(src, cfg, false)
+    compress_inner(src, SEGMENT, cfg, false)
+}
+
+/// Compresses a demo into segments of about `segment` raw bytes (0: one
+/// segment). Every reader decodes such files, but the format's encoder
+/// writes [`SEGMENT`] only: this is for tests and test vectors, which need
+/// files of several segments from small demos.
+#[doc(hidden)]
+pub fn compress_segmented(src: &[u8], segment: usize, cfg: &Config) -> Result<(Vec<u8>, Info)> {
+    compress_inner(src, segment, cfg, false)
 }
 
 /// Compresses a demo with every segment stored without the transform
 /// (DEFLATE or raw): the layout the encoder falls back to. For test vectors.
 #[doc(hidden)]
-pub fn compress_untransformed(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    compress_inner(src, cfg, true)
+pub fn compress_untransformed(
+    src: &[u8],
+    segment: usize,
+    cfg: &Config,
+) -> Result<(Vec<u8>, Info)> {
+    compress_inner(src, segment, cfg, true)
 }
 
-fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>, Info)> {
+fn compress_inner(
+    src: &[u8],
+    segment: usize,
+    cfg: &Config,
+    force_raw: bool,
+) -> Result<(Vec<u8>, Info)> {
     let threads = cfg.threads.max(1);
     // an empty demo has no segment
     let cuts = if src.is_empty() {
         vec![0]
     } else {
-        cut_points(src, cfg.segment)
+        cut_points(src, segment)
     };
     let nseg = cuts.len() - 1;
     if nseg > MAX_SEGMENTS {
-        return Err(Error::Invalid(
-            "too many segments: use a larger segment size",
-        ));
+        return Err(Error::Invalid("too many segments"));
     }
     if cuts.windows(2).any(|w| (w[1] - w[0]) as u64 > MAX_SEG_RAW) {
-        return Err(Error::Invalid(
-            "segment over 4 GiB: use a smaller segment size",
-        ));
+        return Err(Error::Invalid("segment over 4 GiB"));
     }
     let mut proto = Proto::default();
     let plans = plan(src, &cuts, &mut proto);
@@ -189,9 +196,9 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
     } else {
         (1, threads)
     };
-    // a segmented file at the normal level: one model per rANS stream from
-    // its symbols in every segment, in the models block (FORMAT.md §12)
-    let shared = if cfg.level == Level::Normal && nseg > 1 && !force_raw {
+    // a file of several segments: one model per rANS stream from its
+    // symbols in every segment, in the models block (FORMAT.md §12)
+    let shared = if nseg > 1 && !force_raw {
         let segs: Vec<(&[u8], &Walked)> = plans
             .iter()
             .enumerate()
@@ -208,7 +215,7 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
         .collect();
     for _round in 0..2 {
         let (out, info) = assemble(
-            src, &cuts, &plans, &raw, &header, cfg.level, &shared, outer, inner,
+            src, &cuts, &plans, &raw, &header, &shared, outer, inner,
         );
         if !cfg.verify {
             return Ok((out, info));
@@ -239,7 +246,6 @@ fn assemble(
     plans: &[Planned],
     raw: &[bool],
     header: &Header,
-    level: Level,
     shared: &[Option<Shared>],
     outer: usize,
     inner: usize,
@@ -249,13 +255,11 @@ fn assemble(
         let s = &src[cuts[i]..cuts[i + 1]];
         let mut st = Vec::new();
         if let (Some(wk), false) = (&plans[i].walked, raw[i]) {
-            if let Some(b) =
-                transform_body(s, wk, level, plans[i].dur_ms, inner, &mut st, shared)
-            {
+            if let Some(b) = transform_body(s, wk, plans[i].dur_ms, inner, &mut st, shared) {
                 return (b, false, st);
             }
         }
-        (raw_body(s, level, plans[i].dur_ms), true, Vec::new())
+        (raw_body(s, plans[i].dur_ms), true, Vec::new())
     });
     let mut out = header.bytes().to_vec();
     // the models: the shared model of every stream some segment codes with it

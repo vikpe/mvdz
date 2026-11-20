@@ -18,7 +18,6 @@
 use crate::api::{self, Config};
 use crate::budget::{Limits, ReadOptions};
 use crate::error::Error;
-use crate::segment::Level;
 use crate::stream::{Reader, Seekable, Seq};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_longlong, c_void};
@@ -198,21 +197,10 @@ pub unsafe extern "C" fn mvdz_decompress(
     })
 }
 
-fn level(l: c_int) -> Option<Level> {
-    match l {
-        0 => Some(Level::Normal),
-        1 => Some(Level::Fast),
-        _ => None,
-    }
-}
-
-/// `level`: 0 normal, 1 fast. `segment`: raw bytes per segment, 0 = one.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_compress(
     buf: *const c_void,
     n: usize,
-    lvl: c_int,
-    segment: usize,
     threads: c_int,
     out: *mut *mut u8,
     out_n: *mut usize,
@@ -221,12 +209,7 @@ pub unsafe extern "C" fn mvdz_compress(
         let Some(b) = (unsafe { slice(buf, n) }) else {
             return MVDZ_E_INVALID;
         };
-        let Some(level) = level(lvl) else {
-            return MVDZ_E_INVALID;
-        };
         let cfg = Config {
-            level,
-            segment,
             threads: threads.max(1) as usize,
             ..Default::default()
         };

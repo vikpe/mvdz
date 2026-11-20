@@ -1,8 +1,8 @@
 //! mvdz: lossless, format-aware compression of QuakeWorld MVD demos.
 //!
 //! One file format (FORMAT.md): a fixed header, the shared models and
-//! segments that hold the demo coded by a structural transform (static
-//! rANS at the normal level, per-stream DEFLATE at the fast level).
+//! segments of 256 KiB that hold the demo coded by a structural transform
+//! (static rANS; raw DEFLATE for what the transform does not model).
 //!
 //! ```no_run
 //! let demo = std::fs::read("game.mvd").unwrap();
@@ -39,5 +39,4 @@ pub use api::{
 pub use budget::{Limits, ReadOptions};
 pub use error::{Error, Result};
 pub use format::{Header, Index, IndexSeg};
-pub use segment::Level;
 pub use stream::{Reader, Seekable, Seq};

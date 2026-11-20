@@ -4,13 +4,12 @@
 
 mod common;
 use common::*;
-use mvdz::Level;
 use mvdz::capi::*;
 
 #[test]
 fn c_handles() {
     let src = synthetic(&[], false);
-    let c = mvdz::compress(&src, &cfg(Level::Normal, 300)).unwrap();
+    let c = compress(&src, &cfg(300)).unwrap();
     unsafe {
         let mut err = 0;
         let r = mvdz_open_memory(c.as_ptr() as *const _, c.len(), 1, 0, 0, &mut err);
@@ -73,7 +72,7 @@ fn c_handles() {
         }
         // empty results are NULL
         let (mut out, mut on) = (std::ptr::null_mut(), 1usize);
-        let empty = mvdz::encode::compress(b"", &cfg(Level::Normal, 0))
+        let empty = unchecked(b"", &cfg(0))
             .unwrap()
             .0;
         assert_eq!(
