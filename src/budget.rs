@@ -45,29 +45,7 @@ impl Limits {
     }
 }
 
-/// Options of a decode: the resource limits, and what to verify.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReadOptions {
-    pub limits: Limits,
-    /// Trusted input: skip the SHA-256 identity check of a full decode and
-    /// rely on the CRC-32C checks alone (every segment's, and the whole
-    /// demo's). For caches that verified the SHA-256 once, at ingest. Off
-    /// by default: a file from elsewhere may carry a forged identity
-    /// (FORMAT.md §14).
-    pub trusted: bool,
-}
-
-impl From<Limits> for ReadOptions {
-    fn from(limits: Limits) -> ReadOptions {
-        ReadOptions {
-            limits,
-            trusted: false,
-        }
-    }
-}
-
 struct Inner {
-    trusted: bool,
     mem: u64,
     used: AtomicU64,
     work_per_byte: u64,
@@ -81,14 +59,7 @@ pub struct Budget(Arc<Inner>);
 
 impl Budget {
     pub fn new(l: &Limits) -> Budget {
-        Budget::reading(&ReadOptions::from(*l))
-    }
-
-    /// The budget of a decode with options `o`.
-    pub fn reading(o: &ReadOptions) -> Budget {
-        let l = &o.limits;
         Budget(Arc::new(Inner {
-            trusted: o.trusted,
             mem: l.memory,
             used: AtomicU64::new(0),
             work_per_byte: l.work_per_byte,
@@ -99,11 +70,6 @@ impl Budget {
 
     pub fn unlimited() -> Budget {
         Budget::new(&Limits::unlimited())
-    }
-
-    /// The caller trusts the input (see [`ReadOptions::trusted`]).
-    pub fn trusted(&self) -> bool {
-        self.0.trusted
     }
 
     /// Records `n` more bytes of input (raises the work limit).

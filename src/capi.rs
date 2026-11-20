@@ -16,7 +16,7 @@
 //!   returned as NULL with length 0.
 
 use crate::api::{self, Config};
-use crate::budget::{Limits, ReadOptions};
+use crate::budget::Limits;
 use crate::error::Error;
 use crate::stream::{Reader, Seekable, Seq};
 use std::collections::HashMap;
@@ -34,10 +34,6 @@ pub const MVDZ_E_IO: c_int = -4;
 pub const MVDZ_E_PANIC: c_int = -6;
 pub const MVDZ_E_LIMIT: c_int = -7;
 pub const MVDZ_E_NOTMVD: c_int = -8;
-
-/// Decode flag: trusted input, skip the SHA-256 identity check (the
-/// CRC-32C checks still run).
-pub const MVDZ_TRUSTED: u32 = 1;
 
 fn code(e: &Error) -> c_int {
     match e {
@@ -155,15 +151,6 @@ fn limits(max_memory: u64) -> Limits {
     l
 }
 
-/// The decode options of a C call; None (MVDZ_E_INVALID) for a flag bit
-/// this version does not define, so future flags are safe to add.
-fn read_options(max_memory: u64, flags: u32) -> Option<ReadOptions> {
-    (flags & !MVDZ_TRUSTED == 0).then(|| ReadOptions {
-        limits: limits(max_memory),
-        trusted: flags & MVDZ_TRUSTED != 0,
-    })
-}
-
 /// 1 if the buffer starts like an MVDZ file this library reads (5 bytes).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_is_mvdz(buf: *const c_void, n: usize) -> c_int {
@@ -179,7 +166,6 @@ pub unsafe extern "C" fn mvdz_decompress(
     n: usize,
     threads: c_int,
     max_memory: u64,
-    flags: u32,
     out: *mut *mut u8,
     out_n: *mut usize,
 ) -> c_int {
@@ -187,10 +173,7 @@ pub unsafe extern "C" fn mvdz_decompress(
         let Some(b) = (unsafe { slice(buf, n) }) else {
             return MVDZ_E_INVALID;
         };
-        let Some(o) = read_options(max_memory, flags) else {
-            return MVDZ_E_INVALID;
-        };
-        match api::decompress_with(b, threads.max(1) as usize, &o) {
+        match api::decompress_with(b, threads.max(1) as usize, &limits(max_memory)) {
             Ok(v) => unsafe { give(v, out, out_n) },
             Err(e) => code(&e),
         }
@@ -396,7 +379,6 @@ pub unsafe extern "C" fn mvdz_open_memory(
     n: usize,
     threads: c_int,
     max_memory: u64,
-    flags: u32,
     err: *mut c_int,
 ) -> *mut MvdzReader {
     guard(std::ptr::null_mut(), || {
@@ -404,14 +386,10 @@ pub unsafe extern "C" fn mvdz_open_memory(
             unsafe { set(err, MVDZ_E_INVALID) };
             return std::ptr::null_mut();
         };
-        let Some(o) = read_options(max_memory, flags) else {
-            unsafe { set(err, MVDZ_E_INVALID) };
-            return std::ptr::null_mut();
-        };
         let r = Reader::open(
             std::io::Cursor::new(b.to_vec()),
             threads.max(1) as usize,
-            &o,
+            &limits(max_memory),
         )
         .map(|r| RHandle {
             raw_size: r.header().size as i64,
@@ -430,14 +408,14 @@ pub unsafe extern "C" fn mvdz_open_callbacks(
     user: *mut c_void,
     threads: c_int,
     max_memory: u64,
-    flags: u32,
     err: *mut c_int,
 ) -> *mut MvdzReader {
     guard(std::ptr::null_mut(), || {
-        let (true, Some(l)) = (read.is_some(), read_options(max_memory, flags)) else {
+        if read.is_none() {
             unsafe { set(err, MVDZ_E_INVALID) };
             return std::ptr::null_mut();
-        };
+        }
+        let l = limits(max_memory);
         let cb = Cb {
             rd: read,
             sk: seek,

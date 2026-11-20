@@ -3,7 +3,7 @@
 //! [`Reader`] decodes sequentially from any `io::Read` (pipe, socket, VFS
 //! callback), or with `io::Seek` by segment and demo time.
 
-use crate::budget::{Budget, Charge, ReadOptions, zeroed};
+use crate::budget::{Budget, Charge, Limits, zeroed};
 use crate::coder::rans::FileTables;
 use crate::decode::{DemoCheck, SeekSrc, decode_segment, read_full, scan_layout};
 use crate::error::{Error, Result, bad};
@@ -80,7 +80,7 @@ pub struct Reader<S: Source> {
 
 impl<R: Read> Reader<Seq<R>> {
     /// Sequential decoding from any reader.
-    pub fn new(r: R, threads: usize, opts: &ReadOptions) -> Result<Self> {
+    pub fn new(r: R, threads: usize, limits: &Limits) -> Result<Self> {
         let mut r = Seq(r);
         let mut p = [0u8; HEADER_LEN];
         let mut n = 0;
@@ -92,10 +92,10 @@ impl<R: Read> Reader<Seq<R>> {
                 Err(e) => return Err(e.into()),
             }
         }
-        let budget = Budget::reading(opts);
+        let budget = Budget::new(limits);
         let lay = Layout::new(&p[..n], &budget)?;
         budget.input(HEADER_LEN as u64);
-        let check = Some(DemoCheck::new(&budget));
+        let check = Some(DemoCheck::default());
         Ok(Reader {
             r,
             lay,
@@ -119,13 +119,13 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
     /// Opens a complete file for random access: checks its whole
     /// structure (the same rules as every other reader) and positions at
     /// the first segment.
-    pub fn open(r: R, threads: usize, opts: &ReadOptions) -> Result<Self> {
-        let budget = Budget::reading(opts);
+    pub fn open(r: R, threads: usize, limits: &Limits) -> Result<Self> {
+        let budget = Budget::new(limits);
         let mut src = SeekSrc(r);
         let len = crate::decode::Src::len(&mut src)?;
         budget.input(len);
         let lay = scan_layout(&mut src, &budget)?;
-        let check = Some(DemoCheck::new(&budget));
+        let check = Some(DemoCheck::default());
         Ok(Reader {
             r: Seekable(src.0),
             index: Some(lay.index()),
@@ -156,7 +156,7 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
         self.at = 0;
         self.done = false;
         // whole-demo checks apply when reading from the start
-        self.check = (i == 0).then(|| DemoCheck::new(&self.budget));
+        self.check = (i == 0).then(DemoCheck::default);
         Ok(raw_off)
     }
 

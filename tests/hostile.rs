@@ -41,17 +41,15 @@ fn structure_rules() {
     assert!(p.segs.len() > 3);
     // rebuilt unchanged: the same file
     assert_eq!(p.build(), c);
-    // a forged identity: the structure is fine, the identity check of a
-    // full decode fails
+    // another SHA-256 in the header: the SHA-256 names the demo and
+    // decoding does not recompute it, so the file decodes
     let mut q = p.clone();
     q.header.sha256 = [0xff; 32];
     let b = q.build();
-    refused(&b, "forged identity", |e| {
-        *e == Error::Corrupt("identity mismatch")
-    });
-    assert!(
-        mvdz::read_info(Cursor::new(&b)).is_ok(),
-        "read_info does not decode the demo"
+    assert_eq!(readers_agree(&b, "another SHA-256").unwrap(), demo);
+    assert_eq!(
+        mvdz::read_info(Cursor::new(&b)).unwrap().header.sha256,
+        [0xff; 32]
     );
     // a segment dropped
     let mut q = p.clone();
@@ -147,11 +145,10 @@ fn declared_sizes() {
     refused(&b, "segment length", corrupt);
     // the caller's memory budget
     let (demo, c) = base(0);
-    let small: mvdz::ReadOptions = mvdz::Limits {
+    let small = mvdz::Limits {
         memory: demo.len() as u64 / 2,
         ..Default::default()
-    }
-    .into();
+    };
     assert!(matches!(
         mvdz::decompress_with(&c, 1, &small),
         Err(Error::Limit(_))
@@ -298,7 +295,7 @@ fn large_tables() {
     };
     let e = mvdz::read_info_with(Cursor::new(&b), &lim).err();
     assert_eq!(e, Some(Error::Limit("memory")));
-    let e = mvdz::decompress_with(&b, 1, &lim.into()).unwrap_err();
+    let e = mvdz::decompress_with(&b, 1, &lim).unwrap_err();
     assert_eq!(e, Error::Limit("memory"));
     let t0 = Instant::now();
     mvdz::read_info_with(Cursor::new(&b), &mvdz::Limits::default()).unwrap();

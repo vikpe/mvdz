@@ -15,11 +15,10 @@ impl Read for Dribble<'_> {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let l: mvdz::ReadOptions = mvdz::Limits {
+    let l = mvdz::Limits {
         memory: 256 << 20,
         ..Default::default()
-    }
-    .into();
+    };
     let whole = mvdz::decompress_with(data, 1, &l).ok();
     let mut out = Vec::new();
     let seq = mvdz::Reader::new(Dribble(data, 0), 1, &l)

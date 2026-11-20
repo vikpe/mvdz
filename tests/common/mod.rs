@@ -397,7 +397,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
         });
     v.push(("seekable", r));
     let mut err = 0;
-    let r = unsafe { mvdz_open_memory(b.as_ptr() as *const _, b.len(), 1, 0, 0, &mut err) };
+    let r = unsafe { mvdz_open_memory(b.as_ptr() as *const _, b.len(), 1, 0, &mut err) };
     v.push((
         "c memory",
         if r.is_null() {
@@ -408,7 +408,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     ));
     let mut cur = Cursor::new(b);
     let u = &mut cur as *mut Cursor<&[u8]> as *mut std::ffi::c_void;
-    let r = unsafe { mvdz_open_callbacks(Some(cb_read), None, u, 1, 0, 0, &mut err) };
+    let r = unsafe { mvdz_open_callbacks(Some(cb_read), None, u, 1, 0, &mut err) };
     v.push((
         "c sequential",
         if r.is_null() {
@@ -419,7 +419,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     ));
     let mut cur = Cursor::new(b);
     let u = &mut cur as *mut Cursor<&[u8]> as *mut std::ffi::c_void;
-    let r = unsafe { mvdz_open_callbacks(Some(cb_read), Some(cb_seek), u, 2, 0, 0, &mut err) };
+    let r = unsafe { mvdz_open_callbacks(Some(cb_read), Some(cb_seek), u, 2, 0, &mut err) };
     v.push((
         "c seekable",
         if r.is_null() {
@@ -429,7 +429,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
         },
     ));
     let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
-    let rc = unsafe { mvdz_decompress(b.as_ptr() as *const _, b.len(), 2, 0, 0, &mut out, &mut n) };
+    let rc = unsafe { mvdz_decompress(b.as_ptr() as *const _, b.len(), 2, 0, &mut out, &mut n) };
     v.push((
         "c decompress",
         if rc != 0 {

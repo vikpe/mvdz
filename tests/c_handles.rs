@@ -12,7 +12,7 @@ fn c_handles() {
     let c = compress(&src, &cfg(300)).unwrap();
     unsafe {
         let mut err = 0;
-        let r = mvdz_open_memory(c.as_ptr() as *const _, c.len(), 1, 0, 0, &mut err);
+        let r = mvdz_open_memory(c.as_ptr() as *const _, c.len(), 1, 0, &mut err);
         assert!(!r.is_null() && err == 0);
         let n = mvdz_segment_count(r);
         assert!(n > 1);
@@ -51,7 +51,7 @@ fn c_handles() {
         let mut bad = c.clone();
         let k = bad.len() / 2;
         bad[k] ^= 0x40;
-        let r = mvdz_open_memory(bad.as_ptr() as *const _, bad.len(), 1, 0, 0, &mut err);
+        let r = mvdz_open_memory(bad.as_ptr() as *const _, bad.len(), 1, 0, &mut err);
         if !r.is_null() {
             let mut big = vec![0u8; 1 << 20];
             let mut first = 0;
@@ -80,7 +80,6 @@ fn c_handles() {
                 empty.as_ptr() as *const _,
                 empty.len(),
                 1,
-                0,
                 0,
                 &mut out,
                 &mut on

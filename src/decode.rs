@@ -1,13 +1,12 @@
 //! Decoding: the layout scan every random-access reader runs, the decode
 //! of one segment, and whole-file decompression.
 
-use crate::budget::{Budget, Charge, ReadOptions, zeroed};
+use crate::budget::{Budget, Charge, Limits, zeroed};
 use crate::coder::rans::FileTables;
 use crate::error::{Error, Result, bad};
 use crate::format::*;
 use crate::segment::{self, frame_scan};
 use crate::util::{Crc, crc32, par_map, usz};
-use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 
 /// Random access to a file's bytes.
@@ -179,10 +178,10 @@ pub fn decode_segment(
 }
 
 /// Whole-demo checks over the segments' timings (all of them, in order).
+/// The header's SHA-256 names the demo; decoding does not recompute it.
+#[derive(Default)]
 pub struct DemoCheck {
     crc: Crc,
-    /// None for a trusted decode (no identity check)
-    sha: Option<Sha256>,
     size: u64,
     t: u64,
     /// the previous segment ended inside a frame
@@ -190,32 +189,18 @@ pub struct DemoCheck {
 }
 
 impl DemoCheck {
-    /// Checks for a decode under `budget` (trusted: no SHA-256).
-    pub fn new(budget: &Budget) -> DemoCheck {
-        DemoCheck {
-            crc: Crc::default(),
-            sha: (!budget.trusted()).then(Sha256::new),
-            size: 0,
-            t: 0,
-            open: false,
-        }
-    }
-
     /// The next segment, decoded.
     pub fn segment(&mut self, out: &[u8], tm: SegTiming) -> Result<()> {
         if self.open {
             return bad("segment ends inside a frame");
         }
         self.crc.update(out);
-        if let Some(s) = self.sha.as_mut() {
-            s.update(out);
-        }
         self.size += out.len() as u64;
         self.t += tm.1;
         self.open = tm.2 != out.len();
         Ok(())
     }
-    /// After the last segment: the header's size, duration and hashes.
+    /// After the last segment: the header's size, duration and CRC-32C.
     pub fn finish(self, lay: &Layout) -> Result<()> {
         let h = &lay.header;
         if self.crc.finish() != h.crc || self.size != h.size {
@@ -224,19 +209,13 @@ impl DemoCheck {
         if self.t != h.duration_ms {
             return bad("demo timing");
         }
-        if self
-            .sha
-            .is_some_and(|s| <[u8; 32]>::from(s.finalize()) != h.sha256)
-        {
-            return bad("identity mismatch");
-        }
         Ok(())
     }
 }
 
 /// Decompresses a whole file in memory.
-pub fn decompress(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<Vec<u8>> {
-    let budget = Budget::reading(opts);
+pub fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
+    let budget = Budget::new(limits);
     budget.input(b.len() as u64);
     let lay = scan_layout(&mut SliceSrc(b), &budget)?;
     let size = lay.header.size;
@@ -264,7 +243,7 @@ pub fn decompress(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<Vec<u8
         decode_segment(&lay, body, h, &mut dst, inner, &budget)
     });
     drop(slices);
-    let mut chk = DemoCheck::new(&budget);
+    let mut chk = DemoCheck::default();
     let mut at = 0usize;
     for (r, (_, h)) in res.into_iter().zip(&lay.segs) {
         let tm = r?;

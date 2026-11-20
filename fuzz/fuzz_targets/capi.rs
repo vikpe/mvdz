@@ -1,8 +1,8 @@
 #![no_main]
 //! The C ABI driven by an operation script: readers over memory and over
 //! callbacks (sequential and seekable), reads of varying size, seeks,
-//! double closes, use after close, metadata JSON (must be NUL-terminated
-//! valid JSON), the streaming writer with double finish/abort.
+//! double closes, use after close, the file information JSON (must be
+//! NUL-terminated valid JSON).
 use libfuzzer_sys::fuzz_target;
 use mvdz::capi::*;
 use std::ffi::{c_int, c_longlong, c_void};
@@ -67,7 +67,6 @@ fuzz_target!(|data: &[u8]| {
                     file.len(),
                     1 + (op as c_int >> 6),
                     64 << 20,
-                    (op >> 5) as u32 & 1,
                     &mut err,
                 )
             }),
@@ -80,7 +79,6 @@ fuzz_target!(|data: &[u8]| {
                         &mut *mem as *mut Mem as *mut c_void,
                         2,
                         64 << 20,
-                        0,
                         &mut err,
                     )
                 })
@@ -94,7 +92,6 @@ fuzz_target!(|data: &[u8]| {
                         &mut *mem as *mut Mem as *mut c_void,
                         1,
                         64 << 20,
-                        MVDZ_TRUSTED,
                         &mut err,
                     )
                 })
@@ -178,7 +175,6 @@ fuzz_target!(|data: &[u8]| {
                         file.len(),
                         2,
                         64 << 20,
-                        0,
                         &mut p,
                         &mut n,
                     )

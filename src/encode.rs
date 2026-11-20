@@ -304,7 +304,7 @@ pub fn failing_segments(
     cuts: &[usize],
     threads: usize,
 ) -> Option<Vec<bool>> {
-    if let Ok(back) = crate::decode::decompress(file, threads, &Limits::unlimited().into()) {
+    if let Ok(back) = crate::decode::decompress(file, threads, &Limits::unlimited()) {
         if back == src {
             return Some(vec![false; cuts.len() - 1]);
         }

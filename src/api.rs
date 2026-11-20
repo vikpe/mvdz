@@ -1,6 +1,6 @@
 //! The library interface.
 
-use crate::budget::{Budget, Limits, ReadOptions};
+use crate::budget::{Budget, Limits};
 use crate::decode::{SeekSrc, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
@@ -83,12 +83,12 @@ pub fn gunzip(b: &[u8], max: u64) -> Result<Vec<u8>> {
 /// Decompresses a whole file with up to `threads` threads and the default
 /// limits.
 pub fn decompress(b: &[u8], threads: usize) -> Result<Vec<u8>> {
-    crate::decode::decompress(b, threads, &ReadOptions::default())
+    crate::decode::decompress(b, threads, &Limits::default())
 }
 
-/// Decompresses a whole file under the caller's options (limits, trusted).
-pub fn decompress_with(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<Vec<u8>> {
-    crate::decode::decompress(b, threads, opts)
+/// Decompresses a whole file under the caller's limits.
+pub fn decompress_with(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
+    crate::decode::decompress(b, threads, limits)
 }
 
 /// Decompresses from `r` into `w` segment by segment (sequential reading;
@@ -98,9 +98,9 @@ pub fn decompress_stream<R: Read, W: Write>(
     r: R,
     mut w: W,
     threads: usize,
-    opts: &ReadOptions,
+    limits: &Limits,
 ) -> Result<u64> {
-    let mut rd = Reader::new(r, threads, opts)?;
+    let mut rd = Reader::new(r, threads, limits)?;
     let mut buf = vec![0u8; 1 << 16];
     let mut n = 0u64;
     loop {
@@ -322,5 +322,5 @@ pub fn write_gzip<W: Write>(data: &[u8], w: W) -> std::io::Result<W> {
 
 /// The original demo, read sequentially (any reader).
 pub fn reader<R: Read>(r: R, threads: usize) -> Result<Reader<Seq<R>>> {
-    Reader::new(r, threads, &ReadOptions::default())
+    Reader::new(r, threads, &Limits::default())
 }

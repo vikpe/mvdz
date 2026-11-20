@@ -36,7 +36,7 @@ pub use api::{
     decompress_stream, decompress_with, gunzip, is_gzip, is_mvdz, read_info, read_info_with,
     write_file_atomic, write_file_atomic_with, write_gzip,
 };
-pub use budget::{Limits, ReadOptions};
+pub use budget::Limits;
 pub use error::{Error, Result};
 pub use format::{Header, Index, IndexSeg};
 pub use stream::{Reader, Seekable, Seq};

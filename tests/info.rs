@@ -63,19 +63,22 @@ fn wrong_header_fields_are_refused() {
     let c = compress(&demo, &cfg(300)).unwrap();
     let p = parts(&c);
     assert_eq!(p.build(), c);
-    let cases: [(&str, fn(&mut Header)); 6] = [
+    let cases: [(&str, fn(&mut Header)); 5] = [
         ("size + 1", |h| h.size += 1),
         ("size - 1", |h| h.size -= 1),
         ("duration + 1", |h| h.duration_ms += 1),
         ("duration - 1", |h| h.duration_ms -= 1),
         ("crc", |h| h.crc ^= 1),
-        ("sha256", |h| h.sha256[31] ^= 1),
     ];
     for (what, f) in cases {
         let mut q = p.clone();
         f(&mut q.header);
         assert!(readers_agree(&q.build(), what).is_none(), "{what}");
     }
+    // the SHA-256 names the demo: decoding does not recompute it
+    let mut q = p.clone();
+    q.header.sha256[31] ^= 1;
+    assert_eq!(readers_agree(&q.build(), "sha256").unwrap(), demo);
     // a byte after the last segment
     let mut more = c.clone();
     more.push(0);

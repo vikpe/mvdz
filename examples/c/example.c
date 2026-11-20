@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
 
     /* 3. decode through callbacks and compare */
     fseek(p, 0, SEEK_SET);
-    mvdz_reader *r = mvdz_open_callbacks(f_read, f_seek, p, 2, 0, 0, &err);
+    mvdz_reader *r = mvdz_open_callbacks(f_read, f_seek, p, 2, 0, &err);
     if (!r) return fail("open_callbacks", err);
     printf("raw size %lld, segments %lld\n", mvdz_raw_size(r), mvdz_segment_count(r));
     unsigned char *back = malloc(n + 1);
@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
 
     /* 5. corrupt input never crashes */
     unsigned char junk[64] = "MVDZ\x01";
-    r = mvdz_open_memory(junk, sizeof junk, 1, 0, 0, &err);
+    r = mvdz_open_memory(junk, sizeof junk, 1, 0, &err);
     printf("garbage: %s\n", r ? "opened?!" : mvdz_strerror(err));
     if (r) mvdz_close(r);
 
@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
     rc = mvdz_compress(demo, (size_t)n, 4, &z, &z_n);
     if (rc) return fail("compress", rc);
     unsigned char *e; size_t e_n;
-    rc = mvdz_decompress(z, z_n, 1, 0, 0, &e, &e_n);
+    rc = mvdz_decompress(z, z_n, 1, 0, &e, &e_n);
     if (rc || e_n != (size_t)n || memcmp(e, demo, n) != 0) return fail("decompress", rc);
     mvdz_free(z, z_n);
     mvdz_free(e, e_n);

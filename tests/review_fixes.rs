@@ -4,7 +4,7 @@
 
 mod common;
 use common::*;
-use mvdz::budget::{Limits, ReadOptions};
+use mvdz::budget::Limits;
 use mvdz::capi::*;
 use mvdz::format::*;
 use mvdz::util::put_uv;
@@ -78,11 +78,10 @@ fn r_m2_padded_model() {
     }
     .build();
     let t = Instant::now();
-    let l: ReadOptions = Limits {
+    let l = Limits {
         memory: 64 << 20,
         ..Default::default()
-    }
-    .into();
+    };
     assert_eq!(
         mvdz::decompress_with(&f, 1, &l).unwrap_err(),
         Error::Corrupt("model")
@@ -120,11 +119,10 @@ fn r_m4_section_bookkeeping() {
     // the demo is 0.6 MB and a sequential reader holds one segment at a
     // time: only the record kept per segment (64 bytes each, 3.8 MB) can
     // exceed this
-    let l: ReadOptions = Limits {
+    let l = Limits {
         memory: 3 << 20,
         ..Default::default()
-    }
-    .into();
+    };
     assert_eq!(
         mvdz::decompress_with(&f, 1, &l).unwrap_err(),
         Error::Limit("memory")
@@ -169,7 +167,7 @@ fn r_m6_reentrant_callbacks() {
         });
         let up = &mut *u as *mut Reent as *mut std::ffi::c_void;
         let mut err = 0;
-        let r = unsafe { mvdz_open_callbacks(Some(re_read), None, up, 1, 0, 0, &mut err) };
+        let r = unsafe { mvdz_open_callbacks(Some(re_read), None, up, 1, 0, &mut err) };
         assert!(!r.is_null());
         u.handle = r;
         let mut out = Vec::new();
@@ -224,41 +222,23 @@ fn c_m1_segment_limit() {
     assert_eq!(mvdz::decompress(&c, 1).unwrap(), demo);
 }
 
-/// Trusted decoding skips the SHA-256 only: a forged identity passes, a
-/// damaged segment does not, in every reader.
+/// Decoding does not recompute the SHA-256: a file whose header carries
+/// another one decodes in every reader; a damaged segment does not.
 #[test]
-fn trusted_mode() {
-    // a file whose header claims another SHA-256
-    let (_, f) = base();
+fn sha256_is_not_checked_on_decode() {
+    let (demo, f) = base();
     let mut p = parts(&f);
     p.header.sha256 = [0xff; 32];
-    let forged = p.build();
-    let t = ReadOptions {
-        trusted: true,
-        ..Default::default()
-    };
-    assert_eq!(
-        mvdz::decompress(&forged, 1).unwrap_err(),
-        Error::Corrupt("identity mismatch")
-    );
-    let d = mvdz::decompress_with(&forged, 1, &t).unwrap();
-    let mut r = mvdz::Reader::new(Cursor::new(&forged), 1, &t).unwrap();
+    let other = p.build();
+    let d = mvdz::decompress(&other, 1).unwrap();
+    assert_eq!(d, demo);
+    let mut r = mvdz::Reader::new(Cursor::new(&other), 1, &Limits::default()).unwrap();
     let mut o = Vec::new();
     std::io::Read::read_to_end(&mut r, &mut o).unwrap();
     assert_eq!(o, d);
     let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
     assert_eq!(
-        unsafe {
-            mvdz_decompress(
-                forged.as_ptr() as *const _,
-                forged.len(),
-                1,
-                0,
-                MVDZ_TRUSTED,
-                &mut out,
-                &mut n,
-            )
-        },
+        unsafe { mvdz_decompress(other.as_ptr() as *const _, other.len(), 1, 0, &mut out, &mut n) },
         MVDZ_OK
     );
     assert_eq!(unsafe { std::slice::from_raw_parts(out, n) }, &d[..]);
@@ -266,45 +246,13 @@ fn trusted_mode() {
     // one byte of a stored segment changed: the segment CRC catches it
     let demo = synthetic(&[], false);
     let c = untransformed(&[demo.clone(), vec![0; 5000]].concat(), &cfg(0));
-    let ok = mvdz::decompress_with(&c, 1, &t).unwrap();
+    let ok = mvdz::decompress(&c, 1).unwrap();
     let mut bad = c.clone();
     let i = (0..bad.len())
         .rev()
         .find(|&i| bad[i] != 0 && i > 200)
         .unwrap();
     bad[i - 100] ^= 0x40;
-    assert!(mvdz::decompress_with(&bad, 1, &t).is_err());
+    assert!(mvdz::decompress(&bad, 1).is_err());
     assert!(!ok.is_empty());
-}
-
-/// C decode calls refuse flag bits they do not define.
-#[test]
-fn c_unknown_flags() {
-    let (_, f) = base();
-    let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
-    assert_eq!(
-        unsafe { mvdz_decompress(f.as_ptr() as *const _, f.len(), 1, 0, 2, &mut out, &mut n) },
-        MVDZ_E_INVALID
-    );
-    assert_eq!(
-        unsafe {
-            mvdz_decompress(
-                f.as_ptr() as *const _,
-                f.len(),
-                1,
-                0,
-                MVDZ_TRUSTED,
-                &mut out,
-                &mut n,
-            )
-        },
-        MVDZ_OK
-    );
-    unsafe { mvdz_free(out as *mut _, n) };
-    let mut err = 0;
-    assert!(
-        unsafe { mvdz_open_memory(f.as_ptr() as *const _, f.len(), 1, 0, 1 << 31, &mut err) }
-            .is_null()
-    );
-    assert_eq!(err, MVDZ_E_INVALID);
 }

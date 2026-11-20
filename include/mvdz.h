@@ -35,9 +35,10 @@
  *  - `max_memory` arguments cap the memory one call or reader may hold, in
  *    bytes (0 = the default, 1 GiB on 64-bit targets). Exceeding it gives
  *    MVDZ_E_LIMIT.
- *  - `flags` arguments of the decoding calls: 0, or MVDZ_TRUSTED. A bit
- *    this version does not define gives MVDZ_E_INVALID (so a later flag is
- *    never silently ignored by an older library).
+ *  - Decoding checks the CRC-32C of every segment and of the whole demo.
+ *    The SHA-256 in the header names the demo (it is what mvdz_info_json
+ *    reports); decoding does not recompute it. A caller that must know a
+ *    file holds the demo its header names hashes the decoded demo itself.
  *  - Errors are sticky: after a reader call fails, every later call on
  *    that handle returns the same error.
  *  - Shared library: a source build makes libmvdz.so without a SONAME;
@@ -66,15 +67,6 @@ extern "C" {
 #define MVDZ_E_LIMIT    -7  /* memory or work limit exceeded */
 #define MVDZ_E_NOTMVD   -8  /* input to compress is not an MVD demo, or corrupt gzip */
 
-/* Decoding flags.
- * MVDZ_TRUSTED: the input is trusted (a cache that checked the demo's
- * SHA-256 once, at ingest): skip the SHA-256 identity check of a full
- * decode. The CRC-32C of every segment and of the whole demo are still
- * checked, so damage is still detected, but a file built to carry another
- * demo's identity is not. Without it (the default) a full decode also
- * verifies the SHA-256: use the default for files from anywhere else. */
-#define MVDZ_TRUSTED 1u
-
 /* Callbacks for reading through the engine's own VFS.
  * read: fill buf with up to n bytes; return the count, 0 at end of file,
  *       negative on error.
@@ -102,8 +94,8 @@ int mvdz_is_mvdz(const void *buf, size_t n);
  * no whole first frame that parses; see check_demo in the Rust API), and
  * corrupt gzip, give MVDZ_E_NOTMVD. Compression has no settings: the demo
  * is cut into independently decodable segments of 256 KiB. */
-int mvdz_decompress(const void *in, size_t n, int threads, uint64_t max_memory, unsigned flags,
-                    unsigned char **out, size_t *out_n);
+int mvdz_decompress(const void *in, size_t n, int threads, uint64_t max_memory, unsigned char **out,
+                    size_t *out_n);
 int mvdz_compress(const void *in, size_t n, int threads, unsigned char **out, size_t *out_n);
 
 /* Incremental decoding. mvdz_open_memory copies the buffer.
@@ -112,16 +104,14 @@ int mvdz_compress(const void *in, size_t n, int threads, unsigned char **out, si
  * MVDZ_E_INVALID; with seek, the file must be complete: its whole
  * structure is checked when it is opened. *err (may be NULL) receives the
  * error code on failure. */
-mvdz_reader *mvdz_open_memory(const void *buf, size_t n, int threads, uint64_t max_memory, unsigned flags,
-                              int *err);
+mvdz_reader *mvdz_open_memory(const void *buf, size_t n, int threads, uint64_t max_memory, int *err);
 mvdz_reader *mvdz_open_callbacks(mvdz_read_fn read, mvdz_seek_fn seek, void *user, int threads,
-                                 uint64_t max_memory, unsigned flags, int *err);
+                                 uint64_t max_memory, int *err);
 /* Reads up to n bytes of the original demo: returns the count, 0 at the
  * end, or a negative MVDZ_E_* code. Every segment's CRC-32C is checked
  * before its bytes are returned; reading from the start, the end is
- * reported only after the whole-demo checks (CRC-32C, size, timing and,
- * without MVDZ_TRUSTED, the SHA-256 identity) have passed. Reading after a
- * seek checks each segment only. */
+ * reported only after the whole-demo checks (CRC-32C, size and timing)
+ * have passed. Reading after a seek checks each segment only. */
 long long mvdz_read(mvdz_reader *r, void *out, size_t n);
 /* Size of the original demo in bytes (from the file's header). */
 long long mvdz_raw_size(const mvdz_reader *r);

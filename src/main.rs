@@ -3,7 +3,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use mvdz::api::{self, Config};
-use mvdz::{Limits, ReadOptions};
+use mvdz::Limits;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -23,12 +23,12 @@ fn usage() -> ! {
   mvdz compress   [-j threads] [--allow-non-demo]
                   [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
                   game.mvd or game.mvd.gz -> game.mvdz beside it
-  mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
+  mvdz decompress [-j threads] [--max-memory size] [--gzip | --no-gzip]
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
                   game.mvdz -> game.mvd (game.mvd.gz with --gzip) beside it
   mvdz info       file.mvdz...                     header and segments as JSON
   mvdz bench      [-r reps] [-j threads] [--no-verify]
-                  [--skip-compress] [--trusted] [--files out.tsv] [--streams out.tsv] files...
+                  [--skip-compress] [--files out.tsv] [--streams out.tsv] files...
 '-' as a file name is standard input or output. compress and decompress name
 each output after its input, keep the inputs (--rm deletes each one after its
 output is written), refuse to overwrite an existing file (-f overwrites), and
@@ -39,9 +39,7 @@ input that is not an MVD demo is refused (--allow-non-demo stores it anyway).
 decompress --gzip writes the demo gzip-compressed (the default for an output
 named *.gz; --no-gzip writes it raw). Sizes take K, M, G suffixes
 (binary: 1M = 1048576). Compression has no settings: the demo is cut into
-independently decodable segments of 256 KiB.
---trusted skips the SHA-256 identity check (CRC-32C checks only): only for
-files whose SHA-256 was verified before."
+independently decodable segments of 256 KiB."
     );
     std::process::exit(2)
 }
@@ -55,7 +53,6 @@ struct Args {
     files: Vec<String>,
     no_verify: bool,
     skip_compress: bool,
-    trusted: bool,
     gzip: Option<bool>,
     any_input: bool,
     output: Option<String>,
@@ -88,7 +85,6 @@ fn parse(args: &[String]) -> Args {
         files: Vec::new(),
         no_verify: false,
         skip_compress: false,
-        trusted: false,
         gzip: None,
         any_input: false,
         output: None,
@@ -110,7 +106,6 @@ fn parse(args: &[String]) -> Args {
             "--files" => a.perfile = Some(val()),
             "--no-verify" => a.no_verify = true,
             "--skip-compress" => a.skip_compress = true,
-            "--trusted" => a.trusted = true,
             "--gzip" => a.gzip = Some(true),
             "--no-gzip" => a.gzip = Some(false),
             "--allow-non-demo" => a.any_input = true,
@@ -338,22 +333,19 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
 
 fn decompress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
     let src = try_read_input(i)?;
-    let out = api::decompress_with(&src, threads, &read_options(a)).map_err(|e| e.to_string())?;
+    let out = api::decompress_with(&src, threads, &read_limits(a)).map_err(|e| e.to_string())?;
     drop(src);
     // gzip output when asked, or by default for an output named .gz
     let gzip = a.gzip.unwrap_or(has_suffix(o, ".gz"));
     try_write_output(o, &out, gzip).map_err(|e| format!("{o}: {e}"))
 }
 
-fn read_options(a: &Args) -> ReadOptions {
+fn read_limits(a: &Args) -> Limits {
     let mut l = Limits::default();
     if let Some(m) = a.max_memory {
         l.memory = m;
     }
-    ReadOptions {
-        limits: l,
-        trusted: a.trusted,
-    }
+    l
 }
 
 fn main() {
@@ -408,16 +400,15 @@ fn bench(a: &Args) {
     let mb = raw as f64 / 1e6;
     let nt = a.threads.max(1);
     let reps = a.reps.max(3);
-    let lim = read_options(a);
+    let lim = read_limits(a);
     let dec = |c: &[u8], t: usize| api::decompress_with(c, t, &lim);
     out!(
-        "files {}  raw {:.2} MB (10^6 bytes)  reps {}  threads {}  verify {}  trusted {}  loadavg {}",
+        "files {}  raw {:.2} MB (10^6 bytes)  reps {}  threads {}  verify {}  loadavg {}",
         files.len(),
         mb,
         reps,
         nt,
         !a.no_verify,
-        a.trusted,
         loadavg()
     );
     out!(

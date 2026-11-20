@@ -198,13 +198,6 @@ fn hostile(v: &mut Vec<Vector>) {
     x.push(0);
     add("trailing-byte", x, "one byte after the last segment");
     let mut q = p.clone();
-    q.header.sha256 = [0xff; 32];
-    add(
-        "forged-identity",
-        q.build(),
-        "the header's SHA-256 replaced by ff..ff",
-    );
-    let mut q = p.clone();
     q.header.size += 1;
     add("header-size", q.build(), "the header's size + 1");
     let mut q = p.clone();
