@@ -134,184 +134,182 @@ fn amplifying_model(n: u32) -> Vec<u8> {
     b
 }
 
+/// A transform body made by hand: the structural streams `lazy` (id, back
+/// end, count, body) and the blob streams `blobs` (id, bytes), in that
+/// order.
+fn transform_body(lazy: &[(usize, u64, u64, &[u8])], blobs: &[(usize, &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    // fte, fte2, mvd1, tail; the number of streams
+    for x in [0, 0, 0, 0, (lazy.len() + blobs.len()) as u64] {
+        put_uv(&mut body, x);
+    }
+    for (id, be, count, b) in lazy {
+        for x in [*id as u64, *be, *count, b.len() as u64] {
+            put_uv(&mut body, x);
+        }
+    }
+    let mut all = Vec::new();
+    for (id, b) in blobs {
+        put_uv(&mut body, *id as u64);
+        put_uv(&mut body, b.len() as u64);
+        all.extend_from_slice(b);
+    }
+    let z = if all.is_empty() {
+        Vec::new()
+    } else {
+        mvdz::deflate::compress(&all, 9)
+    };
+    put_uv(&mut body, z.len() as u64);
+    for (_, _, _, b) in lazy {
+        body.extend_from_slice(b);
+    }
+    body.extend_from_slice(&z);
+    body
+}
+
+/// The file of `demo` as one transform segment with this body.
+fn one_segment(demo: &[u8], body: &[u8]) -> Vec<u8> {
+    let (_, ms, _) = mvdz::segment::frame_scan(demo);
+    let crc = mvdz::util::crc32(demo);
+    let mut b = seg_hdr_bytes(demo.len() as u64, ms, crc, C_TRANSFORM);
+    b.extend_from_slice(body);
+    Parts {
+        header: Header {
+            size: demo.len() as u64,
+            duration_ms: ms,
+            crc,
+            sha256: Sha256::digest(demo).into(),
+        },
+        models: Vec::new(),
+        segs: vec![b],
+    }
+    .build()
+}
+
+/// Hostile files: refused by every reader.
 fn hostile(v: &mut Vec<Vector>) {
-    let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let base = mvdz::compress(&demo, &c(Level::Normal, 300)).unwrap();
-    let secs = sections(&base);
-    let iix = secs.iter().position(|s| s.0 == K_INDEX).unwrap();
-    let iseg = secs.iter().position(|s| s.0 == K_SEGMENT).unwrap();
-    let b0 = mvdz::budget::Budget::unlimited();
-    let meta = Metadata::decode(&secs[0].1, &b0).unwrap();
     let mut add = |name: &str, b: Vec<u8>, how: &str| {
         v.push((format!("hostile-{name}.mvdz"), b, None, how.to_string()))
     };
+    let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
+    let base = mvdz::compress(&demo, &c(Level::Normal, 300)).unwrap();
+    let p = parts(&base);
+    assert!(p.segs.len() > 3);
     add(
         "base-cut",
-        base[..base.len() / 2].to_vec(),
-        "a small valid file cut in half (no trailer)",
-    );
-    add(
-        "no-trailer",
-        build(0, true, &secs, false),
-        "complete sections, INDEX included, but no trailer",
+        base[..base.len() - 10].to_vec(),
+        "the base file (a synthetic demo, -s 300) without its last 10 bytes",
     );
     let mut x = base.clone();
     x.push(0);
-    add("after-trailer", x, "one byte after the trailer");
-    let mut s2 = secs.clone();
-    let mut forged = meta.clone();
-    forged.sha256 = [0xff; 32];
-    s2.insert(iix, (K_META, forged.encode().unwrap()));
-    add(
-        "dup-meta",
-        build(0, true, &s2, true),
-        "a second META with another identity, prefix and trailer pointing at the first",
-    );
-    let mut s3 = secs.clone();
-    s3[0] = (K_META, forged.encode().unwrap());
+    add("trailing-byte", x, "one byte after the last segment");
+    let mut q = p.clone();
+    q.header.sha256 = [0xff; 32];
     add(
         "forged-identity",
-        build(0, true, &s3, true),
-        "the META's sha256 replaced (CRC recomputed): only a full decode notices",
+        q.build(),
+        "the header's SHA-256 replaced by ff..ff",
     );
-    let mut s4 = secs.clone();
-    s4.insert(1, (0x99, b"x".to_vec()));
+    let mut q = p.clone();
+    q.header.size += 1;
+    add("header-size", q.build(), "the header's size + 1");
+    let mut q = p.clone();
+    q.header.duration_ms += 1;
+    add("header-duration", q.build(), "the header's duration_ms + 1");
+    let mut q = p.clone();
+    q.header.crc ^= 1;
+    add("header-crc", q.build(), "one bit of the header's CRC-32C flipped");
+    let mut x = base.clone();
+    x[30] = 1;
     add(
-        "unknown-critical",
-        build(0, true, &s4, true),
-        "an unknown critical section (kind 0x99)",
+        "header-checksum-field",
+        x,
+        "the high half of the header's checksum field set",
     );
-    let mut s5 = secs.clone();
-    s5[iseg + 1].0 = 0x08;
-    add(
-        "dropped-segment",
-        build(0, true, &s5, true),
-        "a segment's kind changed to an unknown non-critical kind",
-    );
-    let mut s6 = secs.clone();
-    s6.swap(iseg, iseg + 1);
+    let mut x = base.clone();
+    x[4] = 3;
+    add("version", x, "version 3");
+    let mut q = p.clone();
+    q.segs.remove(2);
+    add("dropped-segment", q.build(), "the third segment removed");
+    let mut q = p.clone();
+    q.segs.swap(1, 2);
     add(
         "swapped-segments",
-        build(0, true, &s6, true),
-        "two segments swapped (index offsets fixed)",
+        q.build(),
+        "the second and third segments swapped",
     );
-    // META stored raw (codec 0) with one bit of a field flipped
-    let enc = meta.encode().unwrap();
-    let mut r = mvdz::util::Rd::new(&enc);
-    let (_, codec, n, crc) = (
-        r.u8().unwrap(),
-        r.u8().unwrap(),
-        r.uz().unwrap(),
-        r.u32le().unwrap(),
-    );
-    let mut p = if codec == 1 {
-        mvdz::deflate::decompress(r.rest(), n).unwrap()
-    } else {
-        r.rest().to_vec()
-    };
-    let k = p.len() - 3;
-    p[k] ^= 1;
-    let mut mb = vec![1, 0];
-    put_uv(&mut mb, p.len() as u64);
-    mb.extend_from_slice(&crc.to_le_bytes());
-    mb.extend_from_slice(&p);
-    let mut s7 = secs.clone();
-    s7[0].1 = mb;
+    let mut q = p.clone();
+    q.segs.insert(1, p.segs[1].clone());
+    add("repeated-segment", q.build(), "the second segment twice");
+    let h = parse_seg_hdr(&p.segs[1]).unwrap();
+    let mut q = p.clone();
+    q.segs[1][h.body_off - 2] ^= 0x10;
     add(
-        "meta-crc",
-        build(0, true, &s7, true),
-        "META stored raw with one bit of its fields flipped (CRC not updated)",
+        "segment-crc",
+        q.build(),
+        "one bit of the second segment's CRC-32C flipped",
     );
-    let mut s8 = secs.clone();
-    let mut big = vec![1u8, 1];
-    put_uv(&mut big, 256 << 20);
-    big.extend_from_slice(&[0; 4]);
-    big.extend_from_slice(&mvdz::deflate::compress(&[0u8; 1000], 9));
-    s8[0] = (K_META, big);
-    add(
-        "meta-256m",
-        build(0, true, &s8, true),
-        "META declaring 256 MiB of fields",
-    );
-    let mut s9 = secs.clone();
-    let mut b = seg_hdr_bytes(0, MAX_SEG_RAW, 0, 0, C_DEFLATE);
+    let mut q = p.clone();
+    q.segs[1][h.body_off - 1] = 3;
+    add("segment-coding", q.build(), "a segment with coding 3");
+    let mut q = p.clone();
+    q.segs
+        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_STORE));
+    add("segment-empty", q.build(), "an empty stored segment");
+    let mut q = p.clone();
+    let mut b = seg_hdr_bytes(MAX_SEG_RAW, 0, 0, C_DEFLATE);
     b.extend_from_slice(&mvdz::deflate::compress(&[0u8; 10], 9));
-    s9[iseg] = (K_SEGMENT, b);
+    q.header.size = MAX_SEG_RAW;
+    q.segs = vec![b];
     add(
         "segment-ratio",
-        build(0, true, &s9, true),
-        "a few-byte zstd segment declaring 4 GiB",
+        q.build(),
+        "a few-byte DEFLATE segment declaring 4 GiB",
     );
-    let mut s10 = secs.clone();
-    let mut ix = Index::decode(&s10[iix].1).unwrap();
-    ix.size += 60 << 30;
-    ix.segs[0].raw_len += 60 << 30;
-    s10[iix].1 = ix.encode();
-    add(
-        "index-size",
-        build(0, true, &s10, true),
-        "INDEX claiming 60 GB more than the segments",
-    );
-    let mut s11 = secs.clone();
-    let mut nodi = meta.clone();
-    nodi.demoinfo.clear();
-    s11[0] = (K_META, nodi.encode().unwrap());
-    add(
-        "share-missing",
-        build(0, true, &s11, true),
-        "segments share demoinfo the META does not have",
-    );
-    let h = parse_seg_hdr(&secs[iseg].1).unwrap();
-    let mut s12 = secs.clone();
-    s12[iseg].1[h.body_off - 1] = 3;
-    add(
-        "segment-coding",
-        build(0, true, &s12, true),
-        "a segment with coding 3",
-    );
-    let mut s13 = secs.clone();
-    s13[iseg].1[h.body_off] |= 2;
-    add(
-        "segment-flags",
-        build(0, true, &s13, true),
-        "a transform segment with flag bit 1 set",
-    );
-    // a transform segment whose only stream has an amplifying model
+    // a stored segment whose header claims 1 ms more than its frames hold
+    // (the header's duration raised with it)
     let plain = synthetic(&[], false);
-    let pc = mvdz::compress(&plain, &c(Level::Normal, 0)).unwrap();
-    let mut ps = sections(&pc);
-    let pi = ps.iter().position(|s| s.0 == K_SEGMENT).unwrap();
-    let st = amplifying_model(2000);
-    let mut body = Vec::new();
-    for x in [
-        0u64,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        2,
-        plain.len() as u64,
-        st.len() as u64,
-    ] {
-        put_uv(&mut body, x);
-    }
-    body.extend_from_slice(&st);
-    let mut b = seg_hdr_bytes(
-        0,
-        plain.len() as u64,
-        0,
-        mvdz::util::crc32(&plain),
-        C_TRANSFORM,
+    let (_, ms, _) = mvdz::segment::frame_scan(&plain);
+    let crc = mvdz::util::crc32(&plain);
+    let mut b = seg_hdr_bytes(plain.len() as u64, ms + 1, crc, C_STORE);
+    b.extend_from_slice(&plain);
+    add(
+        "segment-duration",
+        Parts {
+            header: Header {
+                size: plain.len() as u64,
+                duration_ms: ms + 1,
+                crc,
+                sha256: Sha256::digest(&plain).into(),
+            },
+            models: Vec::new(),
+            segs: vec![b],
+        }
+        .build(),
+        "a stored segment whose dur_ms is 1 more than its frame times",
     );
-    b.extend_from_slice(&body);
-    ps[pi] = (K_SEGMENT, b);
+    let mut x = base[..HEADER_LEN].to_vec();
+    put_uv(&mut x, 256 << 20);
+    x.extend_from_slice(&[0; 100]);
+    add(
+        "models-size",
+        x,
+        "a models block of 256 MiB declared in a few bytes",
+    );
+    let mut x = base[..HEADER_LEN].to_vec();
+    for s in &p.segs {
+        block(&mut x, s);
+    }
+    add("models-missing", x, "the base file without its models block");
+    // a transform segment whose only stream has an amplifying model
+    let st = amplifying_model(2000);
     add(
         "model-decisions",
-        build(0, true, &ps, true),
+        one_segment(
+            &plain,
+            &transform_body(&[(mvdz::streams::TIME, 2, plain.len() as u64, &st)], &[]),
+        ),
         "a model of 2000 full tables in a few bytes (rule M2)",
     );
     // the same layout with a valid small model whose header is padded with
@@ -326,121 +324,16 @@ fn hostile(v: &mut Vec<Vector>) {
     put_uv(&mut padded, hdr.len() as u64);
     padded.extend_from_slice(&hdr);
     padded.extend_from_slice(&rest);
-    let mut body = Vec::new();
-    for x in [
-        0u64,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        2,
-        plain.len() as u64,
-        padded.len() as u64,
-    ] {
-        put_uv(&mut body, x);
-    }
-    body.extend_from_slice(&padded);
-    let mut b = seg_hdr_bytes(
-        0,
-        plain.len() as u64,
-        0,
-        mvdz::util::crc32(&plain),
-        C_TRANSFORM,
-    );
-    b.extend_from_slice(&body);
-    let mut pp = sections(&pc);
-    pp[pi] = (K_SEGMENT, b);
     add(
         "model-padding",
-        build(0, true, &pp, true),
+        one_segment(
+            &plain,
+            &transform_body(
+                &[(mvdz::streams::TIME, 2, plain.len() as u64, &padded)],
+                &[],
+            ),
+        ),
         "a model header followed by 64 zero bytes (not consumed exactly)",
-    );
-    // META fields as a zstd bomb: 16 MiB of serverinfo in a few KB (the
-    // ratio limit)
-    let mut bomb = meta.clone();
-    bomb.serverinfo = vec![1u8; (1 << 24) - (1 << 16)];
-    let mut sb = secs.clone();
-    sb[0] = (K_META, meta_body(&meta_fields(&bomb), true));
-    add(
-        "meta-ratio",
-        build(0, true, &sb, true),
-        "META fields of 16 MiB stored as zstd in a few KB (ratio limit)",
-    );
-    // META as one legacy zstd v0.7 frame (raw blocks)
-    let mut sl = secs.clone();
-    sl[0] = (K_META, {
-        let p = meta_fields(&meta);
-        let mut f = vec![0x27, 0xB5, 0x2F, 0xFD, 0x80, 17 << 3];
-        f.extend_from_slice(&(p.len() as u32).to_le_bytes());
-        for c in p.chunks(1 << 16) {
-            f.extend_from_slice(&[
-                0x40 | (c.len() >> 16) as u8,
-                (c.len() >> 8) as u8,
-                c.len() as u8,
-            ]);
-            f.extend_from_slice(c);
-        }
-        f.extend_from_slice(&[0xC0, 0, 0]);
-        let mut mb = vec![1, 1];
-        put_uv(&mut mb, p.len() as u64);
-        mb.extend_from_slice(&mvdz::util::crc32(&p).to_le_bytes());
-        mb.extend_from_slice(&f);
-        mb
-    });
-    add(
-        "zstd-legacy",
-        build(0, true, &sl, true),
-        "META as a legacy (v0.7) zstd frame",
-    );
-    // a zstd segment whose frame declares a 2^40-byte window
-    let seg0 = &demo[..h.raw_len as usize];
-    let mut zb = seg_hdr_bytes(0, seg0.len() as u64, 0, mvdz::util::crc32(seg0), C_DEFLATE);
-    zb.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD, 0x00, 0xF0]);
-    let blk = (seg0.len() as u32) << 3 | 1;
-    zb.extend_from_slice(&blk.to_le_bytes()[..3]);
-    zb.extend_from_slice(seg0);
-    let mut sw = secs.clone();
-    sw[iseg] = (K_SEGMENT, zb);
-    add(
-        "zstd-window",
-        build(0, true, &sw, true),
-        "a zstd segment whose frame declares a 2^40-byte window",
-    );
-    // a segment flagged as sharing demoinfo with an empty share, and no
-    // demoinfo in the META
-    let plain_c = mvdz::compress(&plain, &c(Level::Normal, 0)).unwrap();
-    let mut se = sections(&plain_c);
-    let ie = se.iter().position(|s| s.0 == K_SEGMENT).unwrap();
-    let he = parse_seg_hdr(&se[ie].1).unwrap();
-    assert_eq!(se[ie].1[he.body_off], 0);
-    se[ie].1[he.body_off] = 1;
-    add(
-        "share-empty",
-        build(0, true, &se, true),
-        "a segment flagged as sharing demoinfo with an empty share",
-    );
-    // META without its timing tag
-    let mut st8 = secs.clone();
-    let f = meta_fields(&meta);
-    let mut r = mvdz::util::Rd::new(&f);
-    let mut nf = Vec::new();
-    while !r.done() {
-        let (t, v) = (r.uv().unwrap(), r.bytes().unwrap());
-        if t != T_TIMING {
-            put_uv(&mut nf, t);
-            put_uv(&mut nf, v.len() as u64);
-            nf.extend_from_slice(v);
-        }
-    }
-    st8[0] = (K_META, meta_body(&nf, false));
-    add(
-        "meta-no-timing",
-        build(0, true, &st8, true),
-        "META without tag 8 (timing)",
     );
     // one usercmd block in a segment of stored streams built by hand
     let mut one = Demo(Vec::new());
@@ -449,117 +342,77 @@ fn hostile(v: &mut Vec<Vector>) {
         &[(1, &usercmd_block(0, 0, 13, [0.0; 3], [0; 3], [0, 0]))],
     );
     let one = one.0;
-    let oc = mvdz::encode::compress(&one, &c(Level::Normal, 0))
-        .unwrap()
-        .0;
-    let so = sections(&oc);
-    let io = so.iter().position(|s| s.0 == K_SEGMENT).unwrap();
-    let ucmd_seg = |last: (usize, &[u8])| {
-        let streams: [(usize, &[u8]); 7] = [
-            (mvdz::streams::TIME, &[0]),
-            (mvdz::streams::TYPE, &[3]),
-            (mvdz::streams::MASK, &[0; 4]),
-            (mvdz::streams::HIDTAG, &[1, 2]),
-            (mvdz::streams::HIDLEN, &[23, 0, 0, 0]),
-            (mvdz::streams::HIDTYPE, &[1, 0]),
-            last,
+    let ucmd_seg = |uc: Option<&[u8]>, misc: Option<&[u8]>| {
+        use mvdz::streams::*;
+        let mut lazy: Vec<(usize, u64, u64, &[u8])> = vec![(TIME, 0, 1, &[0]), (TYPE, 0, 1, &[3])];
+        if let Some(u) = uc {
+            lazy.push((UC, 0, u.len() as u64, u));
+        }
+        let mut blobs: Vec<(usize, &[u8])> = vec![
+            (MASK, &[0; 4]),
+            (HIDTAG, &[1, 2]),
+            (HIDLEN, &[23, 0, 0, 0]),
+            (HIDTYPE, &[1, 0]),
         ];
-        let mut body = Vec::new();
-        for x in [0, 0, 0, 0, 0, 0, 0, streams.len() as u64] {
-            put_uv(&mut body, x);
+        if let Some(m) = misc {
+            blobs.push((HIDMISC, m));
         }
-        for (id, b) in &streams {
-            for x in [*id as u64, 0, b.len() as u64, b.len() as u64] {
-                put_uv(&mut body, x);
-            }
-        }
-        for (_, b) in &streams {
-            body.extend_from_slice(b);
-        }
-        let mut b = seg_hdr_bytes(0, one.len() as u64, 0, mvdz::util::crc32(&one), C_TRANSFORM);
-        b.extend_from_slice(&body);
-        let mut so = so.clone();
-        so[io] = (K_SEGMENT, b);
-        build(0, true, &so, true)
+        one_segment(&one, &transform_body(&lazy, &blobs))
     };
     add(
         "ucmd-grid",
-        ucmd_seg((mvdz::streams::UC, &[0, 0, 13, 9])),
+        ucmd_seg(Some(&[0, 0, 13, 9]), None),
         "a usercmd block whose grid flags symbol is 9 (stored streams)",
     );
     let misc = usercmd_block(0, 0, 13, [0.0; 3], [0; 3], [0, 0]);
     add(
         "ucmd-misc",
-        ucmd_seg((mvdz::streams::HIDMISC, &misc)),
+        ucmd_seg(None, Some(&misc)),
         "a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream",
     );
     tables(&mut add);
 }
 
-/// Hostile TABLES files (FORMAT.md §2.6, §8.4), from the usercmd demo at
-/// -s 8K: META, TABLES, SEGMENT..., INDEX.
+/// Hostile models blocks (FORMAT.md §2.6, §8.4), from the usercmd demo at
+/// -s 8K.
 fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
     let uc = usercmd_demo();
     let tc = mvdz::compress(&uc, &c(Level::Normal, 8192)).unwrap();
-    let st = sections(&tc);
-    assert_eq!(st[1].0, K_TABLES, "a segmented normal file has TABLES");
-    let ents = tables_entries(&st[1].1);
+    let p = parts(&tc);
+    assert!(!p.models.is_empty(), "a segmented normal file has models");
+    let ents = tables_entries(&p.models);
     let with = |e: &[(usize, Vec<u8>)]| {
-        let mut s = st.clone();
-        s[1].1 = tables_body(e);
-        build(0, true, &s, true)
+        let mut q = p.clone();
+        q.models = tables_body(e);
+        q.build()
     };
     let mut e = ents.clone();
     e.remove(0);
     add(
         "tables-no-entry",
         with(&e),
-        "TABLES without the entry of a stream the segments code with back end 3",
+        "the models block without the entry of a stream the segments code with back end 3",
     );
-    let mut s = st.clone();
-    s[1].0 = 0x06;
+    let mut q = p.clone();
+    q.models.clear();
     add(
         "tables-missing",
-        build(0, true, &s, true),
-        "the TABLES section's kind changed to an unknown non-critical kind: back end 3 without TABLES",
-    );
-    let mut s = st.clone();
-    let t = s.remove(1);
-    s.insert(2, t);
-    add(
-        "tables-after-segment",
-        build(0, true, &s, true),
-        "the TABLES section after the first SEGMENT",
-    );
-    let empty = mvdz::encode::compress(b"", &c(Level::Normal, 0)).unwrap().0;
-    let mut s = sections(&empty);
-    assert_eq!(s.last().unwrap().0, K_INDEX);
-    s.push(st[1].clone());
-    add(
-        "tables-after-index",
-        build(0, true, &s, true),
-        "an empty demo (no segment) with a TABLES section after the INDEX",
-    );
-    let mut s = st.clone();
-    s.insert(2, st[1].clone());
-    add(
-        "tables-dup",
-        build(0, true, &s, true),
-        "a second TABLES section after the first",
+        q.build(),
+        "an empty models block: back end 3 without a model",
     );
     let mut e = ents.clone();
     e.swap(0, 1);
     add(
         "tables-order",
         with(&e),
-        "two TABLES entries swapped (stream ids not increasing)",
+        "two entries of the models block swapped (stream ids not increasing)",
     );
     let mut e = ents.clone();
     e.insert(1, e[0].clone());
     add(
         "tables-dup-id",
         with(&e),
-        "a TABLES entry repeated (the same stream id twice)",
+        "an entry of the models block repeated (the same stream id twice)",
     );
     let lazy = ents.iter().find(|e| mvdz::streams::is_lazy(e.0)).unwrap();
     let num = ents
@@ -571,36 +424,44 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
     add(
         "tables-blob-id",
         with(&e),
-        "a TABLES entry for a blob stream (text)",
+        "a model for a blob stream (text)",
+    );
+    let mut e = ents.clone();
+    let at = e.iter().position(|x| x.0 > mvdz::streams::PI_NUM).unwrap();
+    e.insert(at, (mvdz::streams::PI_NUM, lazy.1.clone()));
+    add(
+        "tables-plain-id",
+        with(&e),
+        "a model for a stream that has none (pi.num)",
     );
     let mut e = ents.clone();
     e.insert(num, (40, lazy.1.clone()));
     add(
         "tables-unassigned-id",
         with(&e),
-        "a TABLES entry for stream id 40 (unassigned)",
+        "a model for stream id 40 (unassigned)",
     );
-    add("tables-empty", with(&[]), "a TABLES section with n = 0");
-    let mut s = st.clone();
-    s[1].1.push(0);
+    add("tables-empty", with(&[]), "a models block with n = 0");
+    let mut q = p.clone();
+    q.models.push(0);
     add(
         "tables-trailing",
-        build(0, true, &s, true),
-        "a TABLES section with one byte after its last entry",
+        q.build(),
+        "a models block with one byte after its last entry",
     );
     let mut e = ents.clone();
     e[0].1.push(0);
     add(
         "tables-padding",
         with(&e),
-        "a TABLES model with one byte of padding (not consumed exactly)",
+        "a model with one byte of padding (not consumed exactly)",
     );
     let mut e = ents.clone();
     e[num].1 = lazy.1.clone();
     add(
         "tables-alphabet",
         with(&e),
-        "a numeric stream's TABLES entry holding a structural model (alphabet 256)",
+        "a numeric stream's entry holding a structural model (alphabet 256)",
     );
     let mut e = ents.clone();
     e[0].1 = {
@@ -616,7 +477,7 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
     add(
         "tables-m1",
         with(&e),
-        "a TABLES model declaring 65536 own tables (rule M1)",
+        "a model declaring 65536 own tables (rule M1)",
     );
     let amp = amplifying_model(2000);
     let mut e = ents.clone();
@@ -624,43 +485,11 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
     add(
         "tables-decisions",
         with(&e),
-        "a TABLES model breaking the decision limit (rule M2)",
-    );
-    // a blob stream's entry in a segment's stream table set to back end 3
-    let mut s = st.clone();
-    let blob = (2..s.len()).find_map(|i| {
-        let b = &s[i].1;
-        if s[i].0 != K_SEGMENT {
-            return None;
-        }
-        let h = parse_seg_hdr(b).unwrap();
-        let mut r = mvdz::util::Rd::new(&b[h.body_off..]);
-        for _ in 0..7 {
-            r.uv().unwrap();
-        }
-        for _ in 0..r.uv().unwrap() {
-            let id = r.uz().unwrap();
-            let at = h.body_off + r.i;
-            r.uv().unwrap();
-            r.uv().unwrap();
-            r.uv().unwrap();
-            if mvdz::streams::is_blob(id) {
-                return Some((i, at));
-            }
-        }
-        None
-    });
-    let (i, at) = blob.expect("a segment with a blob stream");
-    assert!(s[i].1[at] <= 1);
-    s[i].1[at] = 3;
-    add(
-        "tables-blob-backend",
-        build(0, true, &s, true),
-        "a blob stream (back end 0 or 1) relabelled as back end 3",
+        "a model breaking the decision limit (rule M2)",
     );
 }
 
-/// The entries (stream id, model) of a TABLES body.
+/// The entries (stream id, model) of a models block.
 fn tables_entries(b: &[u8]) -> Vec<(usize, Vec<u8>)> {
     let mut r = mvdz::util::Rd::new(b);
     let n = r.uz().unwrap();
@@ -669,7 +498,7 @@ fn tables_entries(b: &[u8]) -> Vec<(usize, Vec<u8>)> {
         .collect()
 }
 
-/// A TABLES body from its entries.
+/// A models block from its entries.
 fn tables_body(e: &[(usize, Vec<u8>)]) -> Vec<u8> {
     let mut b = Vec::new();
     put_uv(&mut b, e.len() as u64);
@@ -681,43 +510,16 @@ fn tables_body(e: &[(usize, Vec<u8>)]) -> Vec<u8> {
     b
 }
 
-/// The raw fields of a META.
-fn meta_fields(m: &Metadata) -> Vec<u8> {
-    let enc = m.encode().unwrap();
-    let mut r = mvdz::util::Rd::new(&enc);
-    let (_, codec, n, _) = (
-        r.u8().unwrap(),
-        r.u8().unwrap(),
-        r.uz().unwrap(),
-        r.u32le().unwrap(),
-    );
-    if codec == 1 {
-        mvdz::deflate::decompress(r.rest(), n).unwrap()
-    } else {
-        r.rest().to_vec()
+/// Every hostile vector is refused by every reader (they are built from
+/// synthetic demos, so this runs without the demo cache).
+#[test]
+fn hostile_vectors_are_refused() {
+    let mut v = Vec::new();
+    hostile(&mut v);
+    assert!(v.len() > 30);
+    for (name, b, _, _) in &v {
+        assert!(readers_agree(b, name).is_none(), "{name}: accepted");
     }
-}
-
-/// A META section body holding `p`, raw or as zstd.
-fn meta_body(p: &[u8], zstd: bool) -> Vec<u8> {
-    let mut mb = vec![1, zstd as u8];
-    put_uv(&mut mb, p.len() as u64);
-    mb.extend_from_slice(&mvdz::util::crc32(p).to_le_bytes());
-    if zstd {
-        mb.extend_from_slice(&mvdz::deflate::compress(p, 9));
-    } else {
-        mb.extend_from_slice(p);
-    }
-    mb
-}
-
-/// A synthetic demo carrying the 0x000B start timestamp in the 8-byte u64le
-/// form of older mvdsv builds (FORMAT.md §3 tag 11).
-fn start_u64() -> Vec<u8> {
-    let mut d = Demo(Vec::new());
-    d.hidden(0, &[(0x0b, &1_778_675_998_090u64.to_le_bytes())]);
-    d.0.extend(synthetic(&[], false));
-    d.0
 }
 
 fn all_vectors() -> Option<Vec<Vector>> {
@@ -744,18 +546,11 @@ fn all_vectors() -> Option<Vec<Vector>> {
         &duel,
         &format!("{src}; compress --fast"),
     );
-    let ext = vec![("source".to_string(), b"hub".to_vec())];
     add(
         "duel.normal.seg64k.mvdz",
-        one(
-            &duel,
-            Config {
-                ext,
-                ..c(Level::Normal, 65536)
-            },
-        ),
+        one(&duel, c(Level::Normal, 65536)),
         &duel,
-        &format!("{src}; compress -s 64K --ext source=hub"),
+        &format!("{src}; compress -s 64K"),
     );
     add(
         "duel.fast.seg64k.mvdz",
@@ -778,42 +573,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
     );
     let mut rng = Rng(0x1234);
     let random: Vec<u8> = (0..3000).map(|_| rng.next() as u8).collect();
-    // forward compatibility: unknown flag bits and reserved bytes, an
-    // unknown section, an unknown META tag
-    let mut secs = sections(&one(&duel, c(Level::Normal, 0)));
-    let m = Metadata::decode(&secs[0].1, &mvdz::budget::Budget::unlimited()).unwrap();
-    let enc = m.encode().unwrap();
-    let mut r = mvdz::util::Rd::new(&enc);
-    let (_, codec, n, _) = (
-        r.u8().unwrap(),
-        r.u8().unwrap(),
-        r.uz().unwrap(),
-        r.u32le().unwrap(),
-    );
-    let mut p = if codec == 1 {
-        mvdz::deflate::decompress(r.rest(), n).unwrap()
-    } else {
-        r.rest().to_vec()
-    };
-    put_uv(&mut p, 4711);
-    put_uv(&mut p, 5);
-    p.extend_from_slice(b"later");
-    let mut mb = vec![1, 0];
-    put_uv(&mut mb, p.len() as u64);
-    mb.extend_from_slice(&mvdz::util::crc32(&p).to_le_bytes());
-    mb.extend_from_slice(&p);
-    secs[0].1 = mb;
-    let iix = secs.iter().position(|s| s.0 == K_INDEX).unwrap();
-    secs.insert(iix, (0x40, b"future section".to_vec()));
-    let mut fwd = build(0x80, true, &secs, true);
-    fwd[6] = 0x12;
-    fwd[7] = 0x34;
-    add(
-        "duel.forward.mvdz",
-        fwd,
-        &duel,
-        "duel.normal + prefix flag 0x80 and reserved bytes, an unknown section 0x40, an unknown META tag",
-    );
     add(
         "float-mvd1.normal.mvdz",
         one(&mvd1, c(Level::Normal, 0)),
@@ -870,16 +629,6 @@ fn all_vectors() -> Option<Vec<Vector>> {
         one(b"", c(Level::Normal, 0)),
         b"",
         "an empty demo",
-    );
-    let su = start_u64();
-    let sc = one(&su, c(Level::Normal, 0));
-    let fi = mvdz::read_metadata(std::io::Cursor::new(&sc)).unwrap();
-    assert_eq!(fi.meta.clock.start_ms.map(|x| x.1), Some(1_778_675_998_090));
-    add(
-        "start-u64.normal.mvdz",
-        sc,
-        &su,
-        "synthetic demo with a 0x000B start timestamp in the 8-byte u64le form (META tag 11 = 1778675998090)",
     );
     let uc = usercmd_demo();
     add(

@@ -1,9 +1,8 @@
 //! mvdz: lossless, format-aware compression of QuakeWorld MVD demos.
 //!
-//! One file format (FORMAT.md): a section container with metadata,
-//! attachments, a seek index and a trailer, whose segments hold the demo
-//! coded by a structural transform (static rANS at the normal level,
-//! per-stream zstd at the fast level).
+//! One file format (FORMAT.md): a fixed header, the shared models and
+//! segments that hold the demo coded by a structural transform (static
+//! rANS at the normal level, per-stream DEFLATE at the fast level).
 //!
 //! ```no_run
 //! let demo = std::fs::read("game.mvd").unwrap();
@@ -21,7 +20,6 @@ pub mod deflate;
 pub mod encode;
 pub mod error;
 pub mod format;
-pub mod meta;
 pub mod numeric;
 pub mod proto;
 #[cfg(all(feature = "sampler", target_os = "linux", target_arch = "x86_64"))]
@@ -35,11 +33,11 @@ pub mod walk;
 
 pub use api::{
     Config, FileInfo, Info, check_demo, compress, compress_info, decompress,
-    decompress_stream, decompress_with, gunzip, is_gzip, is_mvdz, read_metadata,
-    read_metadata_with, write_file_atomic, write_file_atomic_with, write_gzip,
+    decompress_stream, decompress_with, gunzip, is_gzip, is_mvdz, read_info, read_info_with,
+    write_file_atomic, write_file_atomic_with, write_gzip,
 };
 pub use budget::{Limits, ReadOptions};
 pub use error::{Error, Result};
-pub use format::{Index, IndexSeg, Metadata};
+pub use format::{Header, Index, IndexSeg};
 pub use segment::Level;
 pub use stream::{Reader, Seekable, Seq};

@@ -8,7 +8,7 @@ use crate::stream::{Reader, Seq};
 use std::io::{Read, Seek, Write};
 
 pub use crate::encode::{Config, Info};
-pub use crate::format::{Index, Metadata};
+pub use crate::format::{Header, Index};
 
 /// Compresses a demo: a raw `.mvd`, or a gzip-compressed one (`.mvd.gz`),
 /// which is decompressed first. The file holds the raw demo: its identity
@@ -45,16 +45,16 @@ pub fn check_demo(src: &[u8]) -> Result<()> {
     if is_gzip(src) {
         return Err(Error::NotMvd("gzip-compressed data"));
     }
-    if !crate::meta::starts_like_mvd(src) {
+    if !crate::encode::starts_like_mvd(src) {
         return Err(Error::NotMvd("the first frame does not parse"));
     }
     Ok(())
 }
 
 /// True if `b` starts with the MVDZ magic and a version this library
-/// reads (needs 5 bytes; the flags byte is not checked).
+/// reads (needs 8 bytes).
 pub fn is_mvdz(b: &[u8]) -> bool {
-    b.len() >= 5 && &b[..4] == MAGIC && b[4] == VERSION
+    b.len() >= 8 && &b[..4] == MAGIC && b[4..8] == VERSION.to_le_bytes()
 }
 
 /// True if `b` starts with the gzip magic (RFC 1952: `1f 8b`), as the
@@ -115,55 +115,36 @@ pub fn decompress_stream<R: Read, W: Write>(
     Ok(n)
 }
 
-// ---------------------------------------------------------------- metadata
+// ---------------------------------------------------------------- file information
 
-/// What a file says about itself, read without decoding the demo.
+/// What a file says about itself, read without decoding the demo: the
+/// header and the segments.
 #[derive(Clone, Debug, Default)]
 pub struct FileInfo {
-    pub flags: u8,
-    pub meta: Metadata,
+    pub header: Header,
     pub index: Index,
     /// compressed file size
     pub file_size: u64,
 }
 
-fn file_info(lay: crate::format::Layout, file_size: u64) -> FileInfo {
-    FileInfo {
-        flags: lay.flags,
-        meta: lay.meta.map(|m| m.1).unwrap_or_default(),
-        index: lay.index.map(|i| i.1).unwrap_or_default(),
-        file_size,
-    }
+/// Reads the header of a complete file and the header of every segment,
+/// after checking its structure (no segment is decoded). The hashes are
+/// what the file claims: only a full decode verifies them.
+pub fn read_info<R: Read + Seek>(r: R) -> Result<FileInfo> {
+    read_info_with(r, &Limits::default())
 }
 
-/// Reads the metadata and index of a complete file,
-/// after checking its section structure (one read per section header and
-/// segment header; no segment is decoded). The metadata is checked against
-/// its CRC, but its identity is verified only by a full decode.
-pub fn read_metadata<R: Read + Seek>(r: R) -> Result<FileInfo> {
-    read_metadata_with(r, &Limits::default())
-}
-
-pub fn read_metadata_with<R: Read + Seek>(r: R, limits: &Limits) -> Result<FileInfo> {
+pub fn read_info_with<R: Read + Seek>(r: R, limits: &Limits) -> Result<FileInfo> {
     let budget = Budget::new(limits);
     let mut src = SeekSrc(r);
     let len = crate::decode::Src::len(&mut src)?;
     budget.input(len);
     let lay = scan_layout(&mut src, &budget)?;
-    Ok(file_info(lay, len))
-}
-
-/// Latin-1 view of bytes: every byte is the code point of the same value,
-/// so a reader recovers the bytes exactly.
-fn latin1(b: &[u8]) -> String {
-    b.iter().map(|&c| c as char).collect()
-}
-
-#[derive(serde::Serialize)]
-struct JRoster {
-    slot: u8,
-    userid: u32,
-    userinfo: String,
+    Ok(FileInfo {
+        header: lay.header,
+        index: lay.index(),
+        file_size: len,
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -175,20 +156,12 @@ struct JSeg {
 
 #[derive(serde::Serialize)]
 struct JInfo {
-    version: u8,
+    version: u32,
     file_size: u64,
-    sha256: String,
     size: u64,
     duration_ms: u64,
-    frames: u64,
-    map: String,
-    levelname: String,
-    serverinfo: String,
-    roster: Vec<JRoster>,
-    demoinfo: Option<String>,
-    ext: serde_json::Map<String, serde_json::Value>,
-    census: Option<Box<serde_json::value::RawValue>>,
-    clock: serde_json::Value,
+    crc32c: String,
+    sha256: String,
     segments: Vec<JSeg>,
 }
 
@@ -216,51 +189,16 @@ impl FileInfo {
     }
 
     /// JSON rendering, refused with a limit error once it would exceed
-    /// `max` bytes: escaping can make it up to six times the metadata
-    /// (FORMAT.md §3.2). Byte strings (map, serverinfo, userinfo, demoinfo,
-    /// extension values) are Latin-1: each byte becomes the code point of
-    /// the same value. The census is included only if it is a JSON object.
+    /// `max` bytes.
     pub fn to_json_with(&self, max: usize) -> Result<String> {
-        let m = &self.meta;
-        let census = serde_json::from_str::<Box<serde_json::value::RawValue>>(&m.census)
-            .ok()
-            .filter(|r| r.get().trim_start().starts_with('{'));
+        let h = &self.header;
         let j = JInfo {
             version: VERSION,
             file_size: self.file_size,
-            sha256: hex(&m.sha256),
-            size: m.size,
-            duration_ms: m.duration_ms,
-            frames: m.frames,
-            map: latin1(&m.map),
-            levelname: latin1(&m.levelname),
-            serverinfo: latin1(&m.serverinfo),
-            roster: m
-                .roster
-                .iter()
-                .map(|(s, u, i)| JRoster {
-                    slot: *s,
-                    userid: *u,
-                    userinfo: latin1(i),
-                })
-                .collect(),
-            demoinfo: m.demoinfo_json().map(|d| latin1(&d)),
-            ext: m
-                .ext
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::String(latin1(v))))
-                .collect(),
-            census,
-            clock: {
-                let c = &m.clock;
-                serde_json::json!({
-                    "start_timestamp_ms": c.start_ms.map(|(t, v)| [t, v]),
-                    "epoch": c.epoch.as_ref().map(|(t, v)| serde_json::json!([t, latin1(v)])),
-                    "matchdate": c.matchdate.as_ref().map(|(t, v)| serde_json::json!([t, latin1(v)])),
-                    "pauses": c.pauses.iter().map(|p| [p.0, p.1]).collect::<Vec<_>>(),
-                    "pauses_truncated": c.pauses_truncated,
-                })
-            },
+            size: h.size,
+            duration_ms: h.duration_ms,
+            crc32c: format!("{:08x}", h.crc),
+            sha256: hex(&h.sha256),
             segments: self
                 .index
                 .segs
@@ -273,7 +211,7 @@ impl FileInfo {
                 .collect(),
         };
         let mut w = Capped(Vec::new(), max);
-        serde_json::to_writer(&mut w, &j).map_err(|_| Error::Limit("metadata rendering"))?;
+        serde_json::to_writer(&mut w, &j).map_err(|_| Error::Limit("file information rendering"))?;
         // serde_json writes UTF-8
         Ok(String::from_utf8(w.0).expect("JSON is UTF-8"))
     }

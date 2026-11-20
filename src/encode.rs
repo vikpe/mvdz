@@ -1,5 +1,5 @@
-//! One-shot compression: walk, code, assemble, and check that the file
-//! decodes to the input (falling back per segment to zstd or stored bytes).
+//! Compression: walk, code, assemble, and check that the file decodes to
+//! the input (falling back per segment to DEFLATE or stored bytes).
 
 use crate::budget::{Budget, Limits};
 use crate::coder::BE_FILE;
@@ -7,9 +7,10 @@ use crate::coder::rans::Shared;
 use crate::decode::{SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
-use crate::proto::Proto;
+use crate::proto::{Proto, frame_len};
 use crate::segment::{self, Level, StreamStat, Walked, cut_points, frame_scan};
 use crate::util::{crc32, par_map};
+use sha2::{Digest, Sha256};
 
 /// Compression settings.
 #[derive(Clone, Debug)]
@@ -23,8 +24,6 @@ pub struct Config {
     /// Decode the result and compare (falling back per segment on a
     /// mismatch). On by default; off only for experiments.
     pub verify: bool,
-    /// Extension metadata key/values (not part of the demo).
-    pub ext: Vec<(String, Vec<u8>)>,
 }
 
 impl Default for Config {
@@ -34,7 +33,6 @@ impl Default for Config {
             segment: 0,
             threads: 1,
             verify: true,
-            ext: Vec::new(),
         }
     }
 }
@@ -43,92 +41,107 @@ impl Default for Config {
 #[derive(Clone, Debug, Default)]
 pub struct Info {
     pub segments: usize,
-    /// Segments stored with zstd or raw instead of the transform.
+    /// Segments stored with DEFLATE or raw instead of the transform.
     pub fallback_segments: usize,
     /// Input bytes the transform stored raw (escapes and unframeable tail).
     pub escaped: usize,
     pub streams: Vec<StreamStat>,
 }
 
-/// Checks what can be checked of a configuration before any work: the
-/// extension metadata (FORMAT.md §3, tag 10).
-pub fn check_config(cfg: &Config) -> Result<()> {
-    check_ext(&cfg.ext)
+/// True if `b` starts like an MVD demo: a whole first frame that carries
+/// messages (a non-empty `dem_read`/`dem_all`/... payload, or hidden or
+/// multi-target data; not a bare `dem_set`), and either its messages parse
+/// without an escape or, if that first frame is damaged, the next 16
+/// frames are whole too. A frame's length field must fit the input, so
+/// other files almost never frame: text, gzip, PNG, TIFF and random bytes
+/// fail on the first frame.
+pub fn starts_like_mvd(b: &[u8]) -> bool {
+    let bad = |b: &[u8], p: usize| b.len() >= p + 2 && matches!(b[p + 1] & 7, 0 | 7);
+    if b.len() < 2 {
+        return false;
+    }
+    let head = match b[1] & 7 {
+        0 | 2 | 7 => return false,
+        3 => 10,
+        _ => 6,
+    };
+    let Some(n) = frame_len(b, 0) else {
+        return false;
+    };
+    if n <= head {
+        return false;
+    }
+    if segment::walk(&b[..n], Proto::default()).is_some_and(|(wk, _)| wk.escaped() == 0) {
+        return true;
+    }
+    let mut p = n;
+    for _ in 0..16 {
+        if bad(b, p) {
+            return false;
+        }
+        match frame_len(b, p) {
+            Some(k) => p += k,
+            None => return false,
+        }
+    }
+    true
 }
 
 /// One segment as the encoder sees it.
 pub struct Planned {
     pub walked: Option<Walked>,
-    pub t_start: u64,
+    /// its frame time: the sum of its frame time bytes
+    pub dur_ms: u64,
 }
 
-/// Walks every segment in order (the protocol state carries over). KTX
-/// demoinfo is shared through the metadata while the store stays within
-/// its limit.
-pub fn plan(
-    src: &[u8],
-    cuts: &[usize],
-    proto: &mut Proto,
-    t: &mut u64,
-    dinfo_total: &mut usize,
-) -> Vec<Planned> {
+/// Walks every segment in order (the protocol state carries over).
+pub fn plan(src: &[u8], cuts: &[usize], proto: &mut Proto) -> Vec<Planned> {
     let mut out = Vec::with_capacity(cuts.len());
     for w in cuts.windows(2) {
         let s = &src[w[0]..w[1]];
-        let wk = walk_one(s, proto, dinfo_total);
         out.push(Planned {
-            walked: wk,
-            t_start: *t,
+            walked: walk_one(s, proto),
+            dur_ms: frame_scan(s).1,
         });
-        *t += frame_scan(s).1;
     }
     out
 }
 
-/// Walks one segment; updates the protocol state and the share total.
-pub fn walk_one(s: &[u8], proto: &mut Proto, dinfo_total: &mut usize) -> Option<Walked> {
-    let (wk, pend) = match segment::walk(s, *proto, true)? {
-        (wk, pend) if *dinfo_total + wk.dinfo().len() <= DEMOINFO_MAX => (wk, pend),
-        _ => segment::walk(s, *proto, false)?,
-    };
+/// Walks one segment and updates the protocol state.
+pub fn walk_one(s: &[u8], proto: &mut Proto) -> Option<Walked> {
+    let (wk, pend) = segment::walk(s, *proto)?;
     *proto = pend;
-    *dinfo_total += wk.dinfo().len();
     Some(wk)
 }
 
-/// The SEGMENT section body of a segment stored without the transform:
-/// zstd when the ratio limit allows it and it is smaller, else stored.
-pub fn raw_body(s: &[u8], level: Level, raw_off: u64, t_start: u64) -> Vec<u8> {
+/// The body of a segment stored without the transform: DEFLATE when the
+/// ratio limit allows it and it is smaller, else stored.
+pub fn raw_body(s: &[u8], level: Level, dur_ms: u64) -> Vec<u8> {
     let crc = crc32(s);
     let z = crate::deflate::compress(s, level.deflate());
-    let mut b = seg_hdr_bytes(raw_off, s.len() as u64, t_start, crc, C_DEFLATE);
+    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc, C_DEFLATE);
     if z.len() < s.len() && seg_ratio_ok(s.len() as u64, (b.len() + z.len()) as u64) {
         b.extend_from_slice(&z);
         return b;
     }
-    let mut b = seg_hdr_bytes(raw_off, s.len() as u64, t_start, crc, C_STORE);
+    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc, C_STORE);
     b.extend_from_slice(s);
     b
 }
 
-/// The SEGMENT section body of a walked segment, or None if it breaks the
-/// ratio limit; `shared`: the file's shared models (empty: none).
-#[allow(clippy::too_many_arguments)]
+/// The body of a walked segment, or None if it breaks the ratio limit;
+/// `shared`: the file's shared models (empty: none).
 pub fn transform_body(
     s: &[u8],
     wk: &Walked,
     level: Level,
-    raw_off: u64,
-    t_start: u64,
-    dinfo_off: u64,
+    dur_ms: u64,
     threads: usize,
     st: &mut Vec<StreamStat>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
-    let mut b = seg_hdr_bytes(raw_off, s.len() as u64, t_start, crc32(s), C_TRANSFORM);
-    b.extend_from_slice(&segment::encode(
-        s, wk, level, dinfo_off, threads, st, shared,
-    ));
+    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc32(s), C_TRANSFORM);
+    b.extend_from_slice(&segment::encode(s, wk, level, threads, st, shared));
     seg_ratio_ok(s.len() as u64, b.len() as u64).then_some(b)
 }
 
@@ -138,16 +151,20 @@ pub fn compress(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
 }
 
 /// Compresses a demo with every segment stored without the transform
-/// (zstd or raw): the layout the encoder falls back to. For test vectors.
+/// (DEFLATE or raw): the layout the encoder falls back to. For test vectors.
 #[doc(hidden)]
 pub fn compress_untransformed(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
     compress_inner(src, cfg, true)
 }
 
 fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>, Info)> {
-    check_config(cfg)?;
     let threads = cfg.threads.max(1);
-    let cuts = cut_points(src, cfg.segment);
+    // an empty demo has no segment
+    let cuts = if src.is_empty() {
+        vec![0]
+    } else {
+        cut_points(src, cfg.segment)
+    };
     let nseg = cuts.len() - 1;
     if nseg > MAX_SEGMENTS {
         return Err(Error::Invalid(
@@ -159,16 +176,21 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
             "segment over 4 GiB: use a smaller segment size",
         ));
     }
-    let md0 = Metadata::from_scan(crate::meta::scan(src), cfg.ext.clone());
-    let (mut proto, mut t, mut dt) = (Proto::default(), 0u64, 0usize);
-    let plans = plan(src, &cuts, &mut proto, &mut t, &mut dt);
+    let mut proto = Proto::default();
+    let plans = plan(src, &cuts, &mut proto);
+    let header = Header {
+        size: src.len() as u64,
+        duration_ms: plans.iter().map(|p| p.dur_ms).sum(),
+        crc: crc32(src),
+        sha256: Sha256::digest(src).into(),
+    };
     let (outer, inner) = if nseg >= threads {
         (threads, 1)
     } else {
         (1, threads)
     };
     // a segmented file at the normal level: one model per rANS stream from
-    // its symbols in every segment, in the TABLES section (FORMAT.md §12)
+    // its symbols in every segment, in the models block (FORMAT.md §12)
     let shared = if cfg.level == Level::Normal && nseg > 1 && !force_raw {
         let segs: Vec<(&[u8], &Walked)> = plans
             .iter()
@@ -186,8 +208,8 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
         .collect();
     for _round in 0..2 {
         let (out, info) = assemble(
-            src, &cuts, &plans, &raw, &md0, cfg.level, &shared, outer, inner,
-        )?;
+            src, &cuts, &plans, &raw, &header, cfg.level, &shared, outer, inner,
+        );
         if !cfg.verify {
             return Ok((out, info));
         }
@@ -216,59 +238,27 @@ fn assemble(
     cuts: &[usize],
     plans: &[Planned],
     raw: &[bool],
-    md0: &Metadata,
+    header: &Header,
     level: Level,
     shared: &[Option<Shared>],
     outer: usize,
     inner: usize,
-) -> Result<(Vec<u8>, Info)> {
+) -> (Vec<u8>, Info) {
     let nseg = plans.len();
-    let mut md = md0.clone();
-    let mut doff = Vec::with_capacity(nseg);
-    for (p, &r) in plans.iter().zip(raw) {
-        doff.push(md.demoinfo.len() as u64);
-        if let (Some(wk), false) = (&p.walked, r) {
-            md.demoinfo.extend_from_slice(wk.dinfo());
-        }
-    }
     let bodies: Vec<(Vec<u8>, bool, Vec<StreamStat>)> = par_map(outer, nseg, |i| {
         let s = &src[cuts[i]..cuts[i + 1]];
         let mut st = Vec::new();
         if let (Some(wk), false) = (&plans[i].walked, raw[i]) {
-            if let Some(b) = transform_body(
-                s,
-                wk,
-                level,
-                cuts[i] as u64,
-                plans[i].t_start,
-                doff[i],
-                inner,
-                &mut st,
-                shared,
-            ) {
+            if let Some(b) =
+                transform_body(s, wk, level, plans[i].dur_ms, inner, &mut st, shared)
+            {
                 return (b, false, st);
             }
         }
-        (
-            raw_body(s, level, cuts[i] as u64, plans[i].t_start),
-            true,
-            Vec::new(),
-        )
+        (raw_body(s, level, plans[i].dur_ms), true, Vec::new())
     });
-    // a segment that fell back to raw no longer shares its demoinfo
-    let mut md_final = md0.clone();
-    for (i, p) in plans.iter().enumerate() {
-        if let (Some(wk), false) = (&p.walked, bodies[i].1) {
-            md_final.demoinfo.extend_from_slice(wk.dinfo());
-        }
-    }
-    if md_final.demoinfo != md.demoinfo {
-        let raw2: Vec<bool> = bodies.iter().map(|b| b.1).collect();
-        return assemble(src, cuts, plans, &raw2, md0, level, shared, outer, inner);
-    }
-    let mut out = prefix(0, PREFIX_LEN as u64);
-    section(&mut out, K_META, &md.encode_for(level)?);
-    // TABLES: the shared model of every stream some segment codes with it
+    let mut out = header.bytes().to_vec();
+    // the models: the shared model of every stream some segment codes with it
     let mut used = vec![false; shared.len()];
     for st in bodies.iter().flat_map(|b| &b.2) {
         if st.be == BE_FILE {
@@ -276,27 +266,17 @@ fn assemble(
         }
     }
     let ids: Vec<usize> = (0..used.len()).filter(|&sid| used[sid]).collect();
-    if !ids.is_empty() {
-        section(&mut out, K_TABLES, &segment::tables_body(shared, &ids));
+    if ids.is_empty() {
+        block(&mut out, &[]);
+    } else {
+        block(&mut out, &segment::tables_body(shared, &ids));
     }
-    let mut index = Index {
-        size: src.len() as u64,
-        crc: crc32(src),
-        duration_ms: md.duration_ms,
-        segs: Vec::new(),
-    };
     let mut info = Info {
         segments: nseg,
         ..Default::default()
     };
     for (i, (b, fb, st)) in bodies.into_iter().enumerate() {
-        index.segs.push(IndexSeg {
-            off: out.len() as u64,
-            raw_off: cuts[i] as u64,
-            raw_len: (cuts[i + 1] - cuts[i]) as u64,
-            t_start: plans[i].t_start,
-        });
-        section(&mut out, K_SEGMENT, &b);
+        block(&mut out, &b);
         info.fallback_segments += fb as usize;
         info.escaped += plans[i]
             .walked
@@ -305,16 +285,7 @@ fn assemble(
             .map_or(0, |w| w.escaped());
         info.streams.extend(st);
     }
-    let index_off = out.len() as u64;
-    section(&mut out, K_INDEX, &index.encode());
-    let t = Trailer {
-        index_off,
-        meta_off: PREFIX_LEN as u64,
-        adir_off: 0,
-        body_end: out.len() as u64,
-    };
-    out.extend_from_slice(&t.bytes());
-    Ok((out, info))
+    (out, info)
 }
 
 /// Decodes `file` and compares it with `src`: None if the container does

@@ -3,7 +3,6 @@
 
 mod common;
 use common::*;
-use mvdz::format::K_TABLES;
 use mvdz::{Config, Level};
 use std::io::{Cursor, Read};
 
@@ -274,54 +273,22 @@ fn deterministic_output() {
     }
 }
 
-#[test]
-fn extension_metadata() {
-    let src = synthetic(&[], false);
-    let c = Config {
-        ext: vec![
-            ("source".into(), b"hub".to_vec()),
-            ("hub_game_id".into(), b"123".to_vec()),
-        ],
-        ..cfg(Level::Normal, 0)
-    };
-    let f = mvdz::compress(&src, &c).unwrap();
-    let m = mvdz::read_metadata(Cursor::new(&f)).unwrap().meta;
-    assert_eq!(m.ext, c.ext);
-    // over the limit, or a duplicate key: refused at compress time
-    let big = Config {
-        ext: vec![("x".into(), vec![0; 2 << 20])],
-        ..cfg(Level::Normal, 0)
-    };
-    assert!(matches!(
-        mvdz::compress(&src, &big),
-        Err(mvdz::Error::Invalid(_))
-    ));
-    let dup = Config {
-        ext: vec![("x".into(), vec![1]), ("x".into(), vec![2])],
-        ..cfg(Level::Normal, 0)
-    };
-    assert!(matches!(
-        mvdz::compress(&src, &dup),
-        Err(mvdz::Error::Invalid(_))
-    ));
-}
-
-/// TABLES (FORMAT.md §2.6): one-shot segmented files at the normal level
-/// have it, right after META; whole and fast files do not.
-/// Every reader handles it.
+/// The models block (FORMAT.md §2.6): segmented files at the normal level
+/// have shared models; whole and fast files have an empty block. Every
+/// reader handles it.
 #[test]
 fn file_tables() {
     let src = usercmd_demo();
-    let has = |c: &[u8]| sections(c).iter().any(|s| s.0 == K_TABLES);
+    let has = |c: &[u8]| !parts(c).models.is_empty();
     let (seg, info) = mvdz::compress_info(&src, &cfg(Level::Normal, 8192)).unwrap();
     assert!(info.segments > 2);
-    assert_eq!(sections(&seg)[1].0, K_TABLES, "TABLES right after META");
+    assert!(has(&seg), "shared models");
     assert!(info.streams.iter().any(|s| s.be == 3), "back end 3 is used");
     assert!(readers_agree(&seg, "tables").unwrap() == src);
     for c in [
         mvdz::compress(&src, &cfg(Level::Normal, 0)).unwrap(),
         mvdz::compress(&src, &cfg(Level::Fast, 8192)).unwrap(),
     ] {
-        assert!(!has(&c), "whole and fast files have no TABLES");
+        assert!(!has(&c), "whole and fast files have no shared models");
     }
 }

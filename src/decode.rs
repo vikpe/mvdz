@@ -1,5 +1,5 @@
 //! Decoding: the layout scan every random-access reader runs, the decode
-//! of one SEGMENT, and whole-file decompression.
+//! of one segment, and whole-file decompression.
 
 use crate::budget::{Budget, Charge, ReadOptions, zeroed};
 use crate::coder::rans::FileTables;
@@ -72,77 +72,63 @@ fn read_vec(src: &mut impl Src, off: u64, n: u64, budget: &Budget) -> Result<(Ve
     Ok((v, c))
 }
 
-/// Section-body size limits of the sections readers hold in memory.
-pub fn body_limit(kind: u8) -> u64 {
-    match kind {
-        K_META => META_MAX + 64,
-        K_INDEX => DIR_MAX,
-        K_TABLES => TABLES_MAX,
-        K_TRAILER => 40,
-        _ => u64::MAX,
-    }
+/// The `uv` at file offset `off` of a file of `len` bytes: its value and
+/// its length in bytes (None: the file ends first, or it is not a `uv`).
+fn uv_at(src: &mut impl Src, off: u64, len: u64) -> Result<Option<(u64, usize)>> {
+    let mut b = [0u8; UV_MAX];
+    let n = (len - off).min(UV_MAX as u64) as usize;
+    src.read_at(off, &mut b[..n])?;
+    Ok(uv_prefix(&b[..n]))
 }
 
-/// Reads and checks the whole section structure of a complete file:
-/// every section header, the metadata and index,
-/// and the header of every segment (FORMAT.md, "Validation"). Segment
-/// payloads are not decoded.
+/// Reads and checks the whole structure of a complete file: the header,
+/// the models and the header of every segment (FORMAT.md, "Validation").
+/// Segment payloads are not decoded.
 pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
     let len = src.len()?;
-    let mut p = [0u8; PREFIX_LEN];
-    if len < PREFIX_LEN as u64 {
-        let mut h = vec![0u8; len as usize];
-        src.read_at(0, &mut h)?;
-        check_prefix(&h)?;
-        return bad("truncated prefix");
+    let mut h = [0u8; HEADER_LEN];
+    let n = len.min(HEADER_LEN as u64) as usize;
+    src.read_at(0, &mut h[..n])?;
+    let mut lay = Layout::new(&h[..n], budget)?;
+    let mut off = HEADER_LEN as u64;
+    // the models
+    let Some((mlen, k)) = uv_at(src, off, len)? else {
+        return bad("incomplete file");
+    };
+    off += k as u64;
+    if mlen > TABLES_MAX {
+        return bad("models too large");
     }
-    src.read_at(0, &mut p)?;
-    let mut lay = Layout::new(&p, budget)?;
-    let mut off = PREFIX_LEN as u64;
-    while off < len {
-        if len - off < SEC_HDR as u64 {
-            break;
+    if mlen > len - off {
+        return bad("incomplete file");
+    }
+    if mlen > 0 {
+        let (b, _c) = read_vec(src, off, mlen, budget)?;
+        lay.models(Some(FileTables::new(b, budget)?))?;
+    } else {
+        lay.models(None)?;
+    }
+    off += mlen;
+    // the segments, until they hold the whole demo
+    while !lay.complete() {
+        let Some((slen, k)) = uv_at(src, off, len)? else {
+            return bad("incomplete file");
+        };
+        let s = Sec {
+            off,
+            hdr: k as u8,
+            len: slen,
+        };
+        if slen > len - s.body_off() {
+            return bad("incomplete file");
         }
-        let mut h = [0u8; SEC_HDR];
-        src.read_at(off, &mut h)?;
-        let s = sec_hdr(&h, off);
-        if s.len > len - off - SEC_HDR as u64 {
-            // a truncated last section: the file is incomplete
-            break;
-        }
-        lay.section(&s)?;
-        if s.len > body_limit(s.kind) {
-            return bad("section too large");
-        }
-        match s.kind {
-            K_META => {
-                let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
-                lay.meta(&s, Metadata::decode(&b, budget)?)?;
-            }
-            K_INDEX => {
-                let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
-                lay.index(&s, Index::decode(&b)?)?;
-            }
-            K_TABLES => {
-                let (b, _c) = read_vec(src, s.body_off(), s.len, budget)?;
-                lay.tables(FileTables::new(b, budget)?)?;
-            }
-            K_SEGMENT => {
-                let mut b = vec![0u8; s.len.min(SEG_HDR_MAX as u64) as usize];
-                src.read_at(s.body_off(), &mut b)?;
-                lay.segment(&s, parse_seg_hdr(&b)?)?;
-            }
-            K_TRAILER => {
-                let mut b = [0u8; 40];
-                if s.len != 40 {
-                    return bad("trailer");
-                }
-                src.read_at(s.body_off(), &mut b)?;
-                lay.trailer(&s, Trailer::parse_body(&b)?, len)?;
-            }
-            _ => {}
-        }
+        let mut b = vec![0u8; slen.min(SEG_HDR_MAX as u64) as usize];
+        src.read_at(s.body_off(), &mut b)?;
+        lay.segment(&s, parse_seg_hdr(&b)?)?;
         off = s.end();
+    }
+    if off != len {
+        return bad("trailing bytes");
     }
     lay.finish()?;
     Ok(lay)
@@ -151,8 +137,8 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
 /// Frames, frame time and whole-frame length of one decoded segment.
 pub type SegTiming = (u64, u64, usize);
 
-/// Decodes one SEGMENT section body into `dst` (its exact raw length) and
-/// checks its CRC.
+/// Decodes one segment body into `dst` (its exact raw length) and checks
+/// its CRC and its frame time.
 pub fn decode_segment(
     lay: &Layout,
     body: &[u8],
@@ -162,20 +148,6 @@ pub fn decode_segment(
     budget: &Budget,
 ) -> Result<SegTiming> {
     let tables = lay.tables.as_ref();
-    decode_segment_share(lay.share(h), tables, body, h, dst, threads, budget)
-}
-
-/// [`decode_segment`] with the demoinfo share and the TABLES section given
-/// directly.
-pub fn decode_segment_share(
-    share: &[u8],
-    tables: Option<&FileTables>,
-    body: &[u8],
-    h: &SegHdr,
-    dst: &mut [u8],
-    threads: usize,
-    budget: &Budget,
-) -> Result<SegTiming> {
     if dst.len() as u64 != h.raw_len {
         return bad("segment length");
     }
@@ -185,7 +157,7 @@ pub fn decode_segment_share(
     match h.coding {
         C_TRANSFORM => {
             let th = segment::parse_header(coded, dst.len())?;
-            segment::decode(coded, &th, dst, share, tables, threads, budget)?;
+            segment::decode(coded, &th, dst, tables, threads, budget)?;
         }
         C_DEFLATE => {
             let _c = budget.alloc(h.raw_len)?;
@@ -198,7 +170,11 @@ pub fn decode_segment_share(
     if crc32(dst) != h.crc {
         return bad("segment checksum");
     }
-    Ok(frame_scan(dst))
+    let tm = frame_scan(dst);
+    if tm.1 != h.dur_ms {
+        return bad("segment duration");
+    }
+    Ok(tm)
 }
 
 /// Whole-demo checks over the segments' timings (all of them, in order).
@@ -208,7 +184,6 @@ pub struct DemoCheck {
     sha: Option<Sha256>,
     size: u64,
     t: u64,
-    frames: u64,
     /// the previous segment ended inside a frame
     open: bool,
 }
@@ -221,18 +196,14 @@ impl DemoCheck {
             sha: (!budget.trusted()).then(Sha256::new),
             size: 0,
             t: 0,
-            frames: 0,
             open: false,
         }
     }
 
     /// The next segment, decoded.
-    pub fn segment(&mut self, h: &SegHdr, out: &[u8], tm: SegTiming) -> Result<()> {
+    pub fn segment(&mut self, out: &[u8], tm: SegTiming) -> Result<()> {
         if self.open {
             return bad("segment ends inside a frame");
-        }
-        if h.t_start != self.t {
-            return bad("segment start time");
         }
         self.crc.update(out);
         if let Some(s) = self.sha.as_mut() {
@@ -240,25 +211,21 @@ impl DemoCheck {
         }
         self.size += out.len() as u64;
         self.t += tm.1;
-        self.frames += tm.0;
         self.open = tm.2 != out.len();
         Ok(())
     }
-    /// After the last segment: the index and the metadata's identity.
+    /// After the last segment: the header's size, duration and hashes.
     pub fn finish(self, lay: &Layout) -> Result<()> {
-        let (Some((_, ix)), Some((_, m))) = (&lay.index, &lay.meta) else {
-            return bad("incomplete file");
-        };
-        if self.crc.finish() != ix.crc || self.size != ix.size {
+        let h = &lay.header;
+        if self.crc.finish() != h.crc || self.size != h.size {
             return bad("checksum mismatch");
         }
-        if self.t != ix.duration_ms || self.t != m.duration_ms || self.frames != m.frames {
+        if self.t != h.duration_ms {
             return bad("demo timing");
         }
         if self
             .sha
-            .is_some_and(|s| <[u8; 32]>::from(s.finalize()) != m.sha256)
-            || self.size != m.size
+            .is_some_and(|s| <[u8; 32]>::from(s.finalize()) != h.sha256)
         {
             return bad("identity mismatch");
         }
@@ -271,7 +238,7 @@ pub fn decompress(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<Vec<u8
     let budget = Budget::reading(opts);
     budget.input(b.len() as u64);
     let lay = scan_layout(&mut SliceSrc(b), &budget)?;
-    let size = lay.index.as_ref().map_or(0, |i| i.1.size);
+    let size = lay.header.size;
     let _c = budget.alloc(size)?;
     budget.work(size)?;
     let mut out = zeroed(usz(size).ok_or(Error::Limit("demo size"))?)?;
@@ -301,7 +268,7 @@ pub fn decompress(b: &[u8], threads: usize, opts: &ReadOptions) -> Result<Vec<u8
     for (r, (_, h)) in res.into_iter().zip(&lay.segs) {
         let tm = r?;
         let n = h.raw_len as usize;
-        chk.segment(h, &out[at..at + n], tm)?;
+        chk.segment(&out[at..at + n], tm)?;
         at += n;
     }
     chk.finish(&lay)?;

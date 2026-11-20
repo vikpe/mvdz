@@ -13,7 +13,6 @@ pub fn cfg(level: Level, seg: usize) -> Config {
         segment: seg,
         threads: 1,
         verify: true,
-        ext: Vec::new(),
     }
 }
 
@@ -402,7 +401,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
 
 /// Every reader accepts `b` with the same bytes, or every reader refuses
 /// it. Returns the bytes if accepted. Structural refusals are also
-/// required of read_metadata (`structural`).
+/// required of read_info.
 pub fn readers_agree(b: &[u8], what: &str) -> Option<Vec<u8>> {
     let rs = all_readers(b);
     let first = &rs[0].1;
@@ -418,18 +417,18 @@ pub fn readers_agree(b: &[u8], what: &str) -> Option<Vec<u8>> {
             ),
         }
     }
-    let meta = mvdz::read_metadata(Cursor::new(b));
+    let info = mvdz::read_info(Cursor::new(b));
     if first.is_ok() {
         assert!(
-            meta.is_ok(),
-            "{what}: read_metadata refuses a file the decoders accept: {:?}",
-            meta.err()
+            info.is_ok(),
+            "{what}: read_info refuses a file the decoders accept: {:?}",
+            info.err()
         );
     }
-    if let Err(m) = &meta {
+    if let Err(m) = &info {
         assert!(
             first.is_err(),
-            "{what}: decoders accept a file read_metadata refuses ({m})"
+            "{what}: decoders accept a file read_info refuses ({m})"
         );
     }
     first.as_ref().ok().cloned()
@@ -437,82 +436,48 @@ pub fn readers_agree(b: &[u8], what: &str) -> Option<Vec<u8>> {
 
 // ---------------------------------------------------------------- file surgery
 
-/// A file as (kind, body) sections, without its trailer.
-pub fn sections(c: &[u8]) -> Vec<(u8, Vec<u8>)> {
-    let mut v = Vec::new();
-    let mut off = PREFIX_LEN;
-    while off < c.len() {
-        let s = sec_hdr(&c[off..off + SEC_HDR], off as u64);
-        let b = c[off + SEC_HDR..off + SEC_HDR + s.len as usize].to_vec();
-        if s.kind != K_TRAILER {
-            v.push((s.kind, b));
-        }
-        off = s.end() as usize;
-    }
-    v
+/// A file taken apart: its header, the body of its models block and the
+/// body of every segment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parts {
+    pub header: Header,
+    pub models: Vec<u8>,
+    pub segs: Vec<Vec<u8>>,
 }
 
-/// Assembles sections: the INDEX segment offsets and the trailer are
-/// recomputed when `fix` is set (until the re-encoded INDEX no longer
-/// changes length).
-pub fn build(flags: u8, prefix_meta: bool, secs: &[(u8, Vec<u8>)], fix: bool) -> Vec<u8> {
-    let mut secs = secs.to_vec();
-    let offsets = |secs: &[(u8, Vec<u8>)]| -> (Vec<u64>, u64) {
-        let mut offs = Vec::new();
-        let mut off = PREFIX_LEN as u64;
-        for (_, b) in secs {
-            offs.push(off);
-            off += (SEC_HDR + b.len()) as u64;
-        }
-        (offs, off)
+/// The parts of a well-formed file.
+pub fn parts(c: &[u8]) -> Parts {
+    let header = Header::parse(c).unwrap();
+    let mut off = HEADER_LEN;
+    let mut next = |c: &[u8]| -> Vec<u8> {
+        let (len, k) = uv_prefix(&c[off..]).unwrap();
+        let b = c[off + k..off + k + len as usize].to_vec();
+        off += k + len as usize;
+        b
     };
-    loop {
-        let (offs, _) = offsets(&secs);
-        if !fix {
-            break;
-        }
-        let of_kind = |k: u8| -> Vec<u64> {
-            secs.iter()
-                .zip(&offs)
-                .filter(|(s, _)| s.0 == k)
-                .map(|(_, &o)| o)
-                .collect()
-        };
-        let seg_offs = of_kind(K_SEGMENT);
-        let mut changed = false;
-        for (k, b) in secs.iter_mut() {
-            let nb = if *k == K_INDEX {
-                let mut ix = Index::decode(b).unwrap();
-                for (s, o) in ix.segs.iter_mut().zip(&seg_offs) {
-                    s.off = *o;
-                }
-                ix.encode()
-            } else {
-                continue;
-            };
-            changed |= nb != *b;
-            *b = nb;
-        }
-        if !changed {
-            break;
-        }
+    let models = next(c);
+    let mut segs = Vec::new();
+    let mut raw = 0;
+    while raw < header.size {
+        let b = next(c);
+        raw += parse_seg_hdr(&b[..b.len().min(SEG_HDR_MAX)]).unwrap().raw_len;
+        segs.push(b);
     }
-    let (offs, off) = offsets(&secs);
-    let first = |k: u8| secs.iter().position(|s| s.0 == k).map_or(0, |i| offs[i]);
-    let mut out = prefix(flags, if prefix_meta { first(K_META) } else { 0 });
-    for (k, b) in &secs {
-        section(&mut out, *k, b);
+    Parts {
+        header,
+        models,
+        segs,
     }
-    if fix {
-        out.extend_from_slice(
-            &Trailer {
-                index_off: first(K_INDEX),
-                meta_off: first(K_META),
-                adir_off: 0,
-                body_end: off,
-            }
-            .bytes(),
-        );
+}
+
+impl Parts {
+    /// The file these parts make (whatever they hold).
+    pub fn build(&self) -> Vec<u8> {
+        let mut out = self.header.bytes().to_vec();
+        block(&mut out, &self.models);
+        for s in &self.segs {
+            block(&mut out, s);
+        }
+        out
     }
-    out
 }

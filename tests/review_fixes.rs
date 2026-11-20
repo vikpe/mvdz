@@ -4,79 +4,19 @@
 
 mod common;
 use common::*;
-use mvdz::budget::{Budget, Limits, ReadOptions};
+use mvdz::budget::{Limits, ReadOptions};
 use mvdz::capi::*;
 use mvdz::format::*;
-use mvdz::util::{crc32, put_uv};
+use mvdz::util::put_uv;
 use mvdz::{Error, Level};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
-fn base() -> (Vec<u8>, Vec<(u8, Vec<u8>)>) {
+/// A small demo and its file.
+fn base() -> (Vec<u8>, Vec<u8>) {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     let c = mvdz::compress(&demo, &cfg(Level::Normal, 0)).unwrap();
-    (demo, sections(&c))
-}
-
-fn key(i: usize, w: usize) -> String {
-    const A: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let mut x = i;
-    (0..w)
-        .map(|_| {
-            let c = A[x % 62] as char;
-            x /= 62;
-            c
-        })
-        .collect()
-}
-
-fn meta_fields(body: &[u8]) -> Vec<u8> {
-    let mut r = mvdz::util::Rd::new(body);
-    let (_, codec, n, _) = (
-        r.u8().unwrap(),
-        r.u8().unwrap(),
-        r.uz().unwrap(),
-        r.u32le().unwrap(),
-    );
-    if codec == 1 {
-        mvdz::deflate::decompress(r.rest(), n).unwrap()
-    } else {
-        r.rest().to_vec()
-    }
-}
-
-fn zstd_meta(p: &[u8]) -> Vec<u8> {
-    let mut out = vec![1u8, 1];
-    put_uv(&mut out, p.len() as u64);
-    out.extend_from_slice(&crc32(p).to_le_bytes());
-    out.extend_from_slice(&mvdz::deflate::compress(p, 9));
-    out
-}
-
-/// R-H1: 300 000 extension keys in META: linear, not hours.
-#[test]
-fn r_h1_meta_ext_keys_linear() {
-    let (demo, mut s) = base();
-    let mut p = meta_fields(&s[0].1);
-    let n = 300_000;
-    let mut v = Vec::new();
-    put_uv(&mut v, n as u64);
-    for i in 0..n {
-        let k = key(i, 4);
-        put_uv(&mut v, 4);
-        v.extend_from_slice(k.as_bytes());
-        put_uv(&mut v, 0);
-    }
-    put_uv(&mut p, T_EXT);
-    put_uv(&mut p, v.len() as u64);
-    p.extend_from_slice(&v);
-    s[0].1 = zstd_meta(&p);
-    let f = build(0, true, &s, true);
-    let t = Instant::now();
-    let fi = mvdz::read_metadata(Cursor::new(&f)).unwrap();
-    assert_eq!(fi.meta.ext.len(), n);
-    assert_eq!(mvdz::decompress(&f, 1).unwrap(), demo);
-    assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    (demo, c)
 }
 
 /// R-M2: a model of 65535 tables whose header is padded to satisfy rule
@@ -114,48 +54,25 @@ fn r_m2_padded_model() {
     st.extend_from_slice(&hdr);
     put_uv(&mut st, 0);
     let raw_len = n as u64 + 100;
+    // a transform body whose only stream is a time stream with this model:
+    // fte, fte2, mvd1, tail; one entry (id 0, back end 2, count, length);
+    // no blob body
     let mut body = Vec::new();
-    for v in [
-        0u64,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        2,
-        n as u64 + 16,
-        st.len() as u64,
-    ] {
+    for v in [0u64, 0, 0, 0, 1, 0, 2, n as u64 + 16, st.len() as u64, 0] {
         put_uv(&mut body, v);
     }
     body.extend_from_slice(&st);
-    let mut b = seg_hdr_bytes(0, raw_len, 0, 0, C_TRANSFORM);
+    let mut b = seg_hdr_bytes(raw_len, 0, 0, C_TRANSFORM);
     b.extend_from_slice(&body);
-    let (_, s0) = base();
-    let mut ix = Index {
-        size: raw_len,
-        ..Default::default()
-    };
-    ix.segs.push(IndexSeg {
-        raw_len,
-        ..Default::default()
-    });
-    let mut m = Metadata::decode(&s0[0].1, &Budget::unlimited()).unwrap();
-    m.size = raw_len;
-    m.demoinfo.clear();
-    let f = build(
-        0,
-        true,
-        &[
-            (K_META, m.encode().unwrap()),
-            (K_SEGMENT, b),
-            (K_INDEX, ix.encode()),
-        ],
-        true,
-    );
+    let f = Parts {
+        header: Header {
+            size: raw_len,
+            ..Default::default()
+        },
+        models: Vec::new(),
+        segs: vec![b],
+    }
+    .build();
     let t = Instant::now();
     let l: ReadOptions = Limits {
         memory: 64 << 20,
@@ -172,14 +89,13 @@ fn r_m2_padded_model() {
 /// R-M3: the JSON rendering can be capped.
 #[test]
 fn r_m3_json_limit() {
-    let (_, s) = base();
-    let f = build(0, true, &s, true);
-    let fi = mvdz::read_metadata(Cursor::new(&f)).unwrap();
+    let (_, f) = base();
+    let fi = mvdz::read_info(Cursor::new(&f)).unwrap();
     let j = fi.to_json();
     assert_eq!(fi.to_json_with(j.len()).unwrap(), j);
     assert_eq!(
         fi.to_json_with(j.len() - 1).unwrap_err(),
-        Error::Limit("metadata rendering")
+        Error::Limit("file information rendering")
     );
     let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
     assert_eq!(
@@ -188,28 +104,14 @@ fn r_m3_json_limit() {
     );
 }
 
-/// R-M4: a long run of empty segments is charged to the budget: a
+/// R-M4: a long run of tiny segments is charged to the budget: a
 /// sequential reader stops with a limit error instead of growing.
 #[test]
 fn r_m4_section_bookkeeping() {
-    let (demo, s0) = base();
-    let n = 100_000;
-    let mut s = vec![s0[0].clone()];
-    for _ in 0..n {
-        s.push((K_SEGMENT, seg_hdr_bytes(0, 0, 0, crc32(&[]), C_STORE)));
-    }
-    for x in &s0[1..] {
-        if x.0 == K_INDEX {
-            let mut ix = Index::decode(&x.1).unwrap();
-            let mut segs = vec![IndexSeg::default(); n];
-            segs.extend(ix.segs);
-            ix.segs = segs;
-            s.push((K_INDEX, ix.encode()));
-        } else {
-            s.push(x.clone());
-        }
-    }
-    let f = build(0, true, &s, true);
+    // one segment per frame
+    let demo = sets(60_000);
+    let f = mvdz::compress(&demo, &cfg(Level::Fast, 1)).unwrap();
+    assert!(parts(&f).segs.len() > 60_000);
     assert_eq!(mvdz::decompress(&f, 1).unwrap(), demo);
     let l: ReadOptions = Limits {
         memory: 4 << 20,
@@ -250,8 +152,7 @@ unsafe extern "C" fn re_read(
 /// instead of a deadlock; closing from inside is ignored.
 #[test]
 fn r_m6_reentrant_callbacks() {
-    let (demo, s) = base();
-    let f = build(0, true, &s, true);
+    let (demo, f) = base();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut u = Box::new(Reent {
@@ -316,35 +217,15 @@ fn c_m1_segment_limit() {
     assert_eq!(mvdz::decompress(&c, 1).unwrap(), demo);
 }
 
-/// D3, D9: the transform flags are checked by every reader at open.
-#[test]
-fn d3_flags_at_open() {
-    let b = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/vectors/hostile-segment-flags.mvdz"
-    ))
-    .unwrap();
-    assert_eq!(
-        mvdz::read_metadata(Cursor::new(&b)).unwrap_err(),
-        Error::Corrupt("segment flags")
-    );
-    let b = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/vectors/hostile-share-empty.mvdz"
-    ))
-    .unwrap();
-    assert_eq!(
-        mvdz::read_metadata(Cursor::new(&b)).unwrap_err(),
-        Error::Corrupt("demoinfo share")
-    );
-}
-
 /// Trusted decoding skips the SHA-256 only: a forged identity passes, a
 /// damaged segment does not, in every reader.
 #[test]
 fn trusted_mode() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
-    let forged = std::fs::read(dir.join("hostile-forged-identity.mvdz")).unwrap();
+    // a file whose header claims another SHA-256
+    let (_, f) = base();
+    let mut p = parts(&f);
+    p.header.sha256 = [0xff; 32];
+    let forged = p.build();
     let t = ReadOptions {
         trusted: true,
         ..Default::default()
@@ -396,8 +277,7 @@ fn trusted_mode() {
 /// C decode calls refuse flag bits they do not define.
 #[test]
 fn c_unknown_flags() {
-    let (_, s) = base();
-    let f = build(0, true, &s, true);
+    let (_, f) = base();
     let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
     assert_eq!(
         unsafe { mvdz_decompress(f.as_ptr() as *const _, f.len(), 1, 0, 2, &mut out, &mut n) },

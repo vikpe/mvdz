@@ -2,7 +2,7 @@
 //! the per-stream back ends (FORMAT.md, "Transform segment body").
 //!
 //! ```text
-//! flags uv | dinfo_off uv | dinfo_len uv | fte uv | fte2 uv | mvd1 uv | tail uv
+//! fte uv | fte2 uv | mvd1 uv | tail uv
 //! nstreams uv | nstreams x entry | blob_len uv
 //! bodies of the structural and numeric streams, in table order
 //! blob body: blob_len bytes
@@ -27,9 +27,6 @@ use crate::util::{HAS_THREADS, Rd, par_map, put_uv};
 use crate::walk::{Recs, SymIO, Walker};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Segment flag: KTX demoinfo blocks come from the metadata's store.
-pub const SF_DINFO: u64 = 1;
 
 /// Compression level: which back ends the encoder may use per stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -250,7 +247,6 @@ fn walk_dec<L: LazyCoder>(
     recs: &Recs,
     proto: Proto,
     tail: usize,
-    dinfo: bool,
 ) -> Result<()> {
     let io = DecIO {
         lazy,
@@ -258,7 +254,7 @@ fn walk_dec<L: LazyCoder>(
         over: false,
     };
     let mut w: Walker<false, DecIO<L>> =
-        Walker::new(&[], dst.ptr(), dst.len(), recs, io, proto, dinfo);
+        Walker::new(&[], dst.ptr(), dst.len(), recs, io, proto);
     w.run(tail);
     if w.err || w.io.over {
         return bad("structure");
@@ -298,14 +294,9 @@ pub struct Walked {
     recs: Recs,
     tail: usize,
     proto0: Proto,
-    dinfo: bool,
 }
 
 impl Walked {
-    /// This segment's share of the demoinfo store (empty without sharing).
-    pub fn dinfo(&self) -> &[u8] {
-        &self.io.blobs[DINFO]
-    }
     /// Raw bytes the transform could not structure (escapes and tail).
     pub fn escaped(&self) -> usize {
         self.io.blobs[RAW].len() + self.io.blobs[TAIL].len()
@@ -315,7 +306,7 @@ impl Walked {
 /// Walks one segment starting in protocol state `proto`; returns the walk
 /// and the protocol state at its end, or None if the transform cannot
 /// represent the segment.
-pub fn walk(src: &[u8], proto: Proto, dinfo: bool) -> Option<(Walked, Proto)> {
+pub fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
     let recs = Recs::growable(src.len());
     let (io, tail, pend, err) = {
         let mut w: Walker<true, EncIO> = Walker::new(
@@ -325,7 +316,6 @@ pub fn walk(src: &[u8], proto: Proto, dinfo: bool) -> Option<(Walked, Proto)> {
             &recs,
             EncIO::new(),
             proto,
-            dinfo,
         );
         let tail = w.run(0);
         (w.io, tail, w.proto, w.err)
@@ -340,7 +330,6 @@ pub fn walk(src: &[u8], proto: Proto, dinfo: bool) -> Option<(Walked, Proto)> {
             recs,
             tail,
             proto0: proto,
-            dinfo,
         },
         pend,
     ))
@@ -508,14 +497,12 @@ fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
     }
 }
 
-/// The transform body of a walked segment; `dinfo_off` is the offset of its
-/// demoinfo share in the metadata store. A stream with a model in `shared`
-/// (by stream id; empty: none) uses it.
+/// The transform body of a walked segment. A stream with a model in
+/// `shared` (by stream id; empty: none) uses it.
 pub fn encode(
     src: &[u8],
     wk: &Walked,
     level: Level,
-    dinfo_off: u64,
     threads: usize,
     stats: &mut Vec<StreamStat>,
     shared: &[Option<rans::Shared>],
@@ -578,13 +565,7 @@ pub fn encode(
         Some(i) => &packed[i].as_ref().expect("packed").1,
         None => &[],
     };
-    // the flag only when the segment has demoinfo blocks: without any,
-    // the walk is the same either way and needs no metadata
-    let share = wk.dinfo && !wk.dinfo().is_empty();
     let mut out = Vec::new();
-    put_uv(&mut out, if share { SF_DINFO } else { 0 });
-    put_uv(&mut out, if share { dinfo_off } else { 0 });
-    put_uv(&mut out, wk.dinfo().len() as u64);
     put_uv(&mut out, wk.proto0.fte as u64);
     put_uv(&mut out, wk.proto0.fte2 as u64);
     put_uv(&mut out, wk.proto0.mvd1 as u64);
@@ -663,9 +644,6 @@ pub fn frame_scan(b: &[u8]) -> (u64, u64, usize) {
 
 /// The parsed header of a transform body.
 pub struct Header {
-    pub flags: u64,
-    pub dinfo_off: u64,
-    pub dinfo_len: u64,
     proto: Proto,
     tail: usize,
     /// (id, back end, count, body length); a blob stream: back end 1, 0
@@ -680,20 +658,11 @@ pub struct Header {
 pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
     let e = Error::Corrupt("segment header");
     let mut r = Rd::new(body);
-    let flags = r.uv().ok_or(e)?;
-    let dinfo_off = r.uv().ok_or(e)?;
-    let dinfo_len = r.uv().ok_or(e)?;
     let fte = r.u32v().ok_or(e)?;
     let fte2 = r.u32v().ok_or(e)?;
     let mvd1 = r.u32v().ok_or(e)?;
     let tail = r.uz().ok_or(e)?;
     let n = r.uz().ok_or(e)?;
-    if flags & !SF_DINFO != 0 {
-        return bad("segment flags");
-    }
-    if flags & SF_DINFO == 0 && (dinfo_off != 0 || dinfo_len != 0) {
-        return bad("demoinfo share");
-    }
     if tail > raw_len {
         return bad("tail length");
     }
@@ -744,9 +713,6 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         return bad("stream bodies");
     }
     Ok(Header {
-        flags,
-        dinfo_off,
-        dinfo_len,
         proto: Proto::new(fte, fte2, mvd1),
         tail,
         ents,
@@ -755,14 +721,12 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
     })
 }
 
-/// Decodes a transform body into `dst` (its exact raw length). `dinfo` is
-/// the segment's share of the demoinfo store. The CRC is checked by the
-/// caller.
+/// Decodes a transform body into `dst` (its exact raw length). The CRC is
+/// checked by the caller.
 pub fn decode(
     body: &[u8],
     h: &Header,
     dst: &mut [u8],
-    dinfo: &[u8],
     tables: Option<&FileTables>,
     threads: usize,
     budget: &Budget,
@@ -816,7 +780,6 @@ pub fn decode(
         blob_bufs[id].0 = Cow::Borrowed(&blob_bytes[at..at + count]);
         at += count;
     }
-    blob_bufs[DINFO].0 = Cow::Borrowed(dinfo);
     let mut num_ents: Vec<StreamEnt> = vec![None; N_STREAMS];
     let mut lazy_ents: Vec<StreamEnt> = vec![None; N_LAZY];
     for i in 0..n {
@@ -851,7 +814,6 @@ pub fn decode(
         }
     };
     let blob_cell = std::sync::Mutex::new(Some(blob_bufs));
-    let dinfo_on = h.flags & SF_DINFO != 0;
     // the walk; a monomorphic fast path when every structural stream is rANS
     let walk = || -> Result<()> {
         let blobs = blob_cell
@@ -869,7 +831,7 @@ pub fn decode(
                     lazy[id] = rans::ByteDec::new(b, c, coder::file_model(be, fm, id)?, budget)?;
                 }
             }
-            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail, dinfo_on)
+            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
         } else {
             let mut lazy: [LazyDec; N_LAZY] = std::array::from_fn(|_| LazyDec::Empty);
             for (id, e) in lazy_ents.iter().enumerate() {
@@ -877,7 +839,7 @@ pub fn decode(
                     lazy[id] = LazyDec::new(be, id, b, c, fm, budget)?;
                 }
             }
-            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail, dinfo_on)
+            walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
         }
     };
     if threads > 1 && HAS_THREADS {
@@ -943,7 +905,7 @@ mod tests {
     use super::*;
     use crate::budget::Budget;
 
-    /// The segment `body` decoded (without demoinfo sharing).
+    /// The segment `body` decoded.
     fn decoded(
         body: &[u8],
         h: &Header,
@@ -956,7 +918,6 @@ mod tests {
             body,
             h,
             &mut dst,
-            &[],
             tables,
             threads,
             &Budget::unlimited(),
@@ -996,9 +957,9 @@ mod tests {
         let src = demo();
         for level in [Level::Normal, Level::Fast] {
             for threads in [1, 3] {
-                let (wk, _) = walk(&src, Proto::default(), true).unwrap();
+                let (wk, _) = walk(&src, Proto::default()).unwrap();
                 let mut st = Vec::new();
-                let body = encode(&src, &wk, level, 0, 1, &mut st, &[]);
+                let body = encode(&src, &wk, level, 1, &mut st, &[]);
                 let h = parse_header(&body, src.len()).unwrap();
                 let dst = decoded(&body, &h, src.len(), None, threads);
                 assert!(dst == src, "{level:?} {threads}");
@@ -1046,8 +1007,8 @@ mod tests {
         src.extend(demo());
         for level in [Level::Normal, Level::Fast] {
             for threads in [1, 3] {
-                let (wk, _) = walk(&src, Proto::default(), true).unwrap();
-                let body = encode(&src, &wk, level, 0, 1, &mut Vec::new(), &[]);
+                let (wk, _) = walk(&src, Proto::default()).unwrap();
+                let body = encode(&src, &wk, level, 1, &mut Vec::new(), &[]);
                 let h = parse_header(&body, src.len()).unwrap();
                 let uc = h.ents.iter().find(|e| e.0 == UC).unwrap().2;
                 assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
@@ -1057,8 +1018,8 @@ mod tests {
         }
         // without usercmd blocks neither stream is in the table
         let plain = demo();
-        let (wk, _) = walk(&plain, Proto::default(), true).unwrap();
-        let body = encode(&plain, &wk, Level::Normal, 0, 1, &mut Vec::new(), &[]);
+        let (wk, _) = walk(&plain, Proto::default()).unwrap();
+        let body = encode(&plain, &wk, Level::Normal, 1, &mut Vec::new(), &[]);
         let h = parse_header(&body, plain.len()).unwrap();
         assert!(h.ents.iter().all(|e| e.0 != UC && e.0 != UC_A));
     }
@@ -1069,7 +1030,7 @@ mod tests {
     #[test]
     fn tables_limit() {
         let src = demo();
-        let (wk, _) = walk(&src, Proto::default(), true).unwrap();
+        let (wk, _) = walk(&src, Proto::default()).unwrap();
         let mut models = train(&[(&src[..], &wk), (&src[..], &wk)], 1);
         let ids = |m: &[Option<rans::Shared>]| -> Vec<usize> {
             (0..m.len()).filter(|&i| m[i].is_some()).collect()
@@ -1092,7 +1053,7 @@ mod tests {
         );
         let ft = FileTables::new(tables_body(&models, &kept), &Budget::unlimited()).unwrap();
         let mut st = Vec::new();
-        let body = encode(&src, &wk, Level::Normal, 0, 1, &mut st, &models);
+        let body = encode(&src, &wk, Level::Normal, 1, &mut st, &models);
         let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;
         assert_eq!(be(big), BE_RANS);
         assert!(kept.iter().all(|&sid| be(sid) == BE_FILE));

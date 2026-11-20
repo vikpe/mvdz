@@ -431,7 +431,7 @@ pub unsafe extern "C" fn mvdz_open_memory(
             &o,
         )
         .map(|r| RHandle {
-            raw_size: r.metadata().map_or(-1, |m| m.size as i64),
+            raw_size: r.header().size as i64,
             r: RInner::Mem(r),
         });
         open_result(r, err)
@@ -463,7 +463,7 @@ pub unsafe extern "C" fn mvdz_open_callbacks(
         let th = threads.max(1) as usize;
         let r = if seek.is_some() {
             Reader::open(cb, th, &l).map(|r| RHandle {
-                raw_size: r.metadata().map_or(-1, |m| m.size as i64),
+                raw_size: r.header().size as i64,
                 r: RInner::Seek(r),
             })
         } else {
@@ -497,7 +497,7 @@ pub unsafe extern "C" fn mvdz_read(r: *mut MvdzReader, out: *mut c_void, n: usiz
             };
             if let RInner::Seq(x) = &h.r {
                 if h.raw_size < 0 {
-                    h.raw_size = x.metadata().map_or(-1, |m| m.size as i64);
+                    h.raw_size = x.header().size as i64;
                 }
             }
             match res {
@@ -602,7 +602,7 @@ pub unsafe extern "C" fn mvdz_close(r: *mut MvdzReader) {
     }));
 }
 
-// ---------------------------------------------------------------- metadata
+// ---------------------------------------------------------------- file information
 
 fn give_json(
     fi: api::FileInfo,
@@ -625,10 +625,9 @@ fn give_json(
     rc
 }
 
-/// Metadata and index as a NUL-terminated JSON
-/// string (free with mvdz_free). Reads only section headers and the
-/// metadata, index and directory sections; the reading and the JSON are
-/// held within `max_memory`.
+/// The header and the segments as a NUL-terminated JSON string (free with
+/// mvdz_free). Reads only the header, the models and the segment headers;
+/// the reading and the JSON are held within `max_memory`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_info_json(
     read: ReadFn,
@@ -642,7 +641,7 @@ pub unsafe extern "C" fn mvdz_info_json(
         if read.is_none() || seek.is_none() {
             return MVDZ_E_INVALID;
         }
-        match api::read_metadata_with(
+        match api::read_info_with(
             Cb {
                 rd: read,
                 sk: seek,
@@ -669,7 +668,7 @@ pub unsafe extern "C" fn mvdz_info_json_memory(
         let Some(b) = (unsafe { slice(buf, n) }) else {
             return MVDZ_E_INVALID;
         };
-        match api::read_metadata_with(std::io::Cursor::new(b), &limits(max_memory)) {
+        match api::read_info_with(std::io::Cursor::new(b), &limits(max_memory)) {
             Ok(fi) => give_json(fi, max_memory, json, json_n),
             Err(e) => code(&e),
         }

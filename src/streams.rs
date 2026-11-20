@@ -76,9 +76,6 @@ pub const TEF: usize = 88;
 /// Not a stored stream: the id under which the blob body of a segment (the
 /// DEFLATE stream of all its blob streams) is reported in statistics.
 pub const BLOB_BODY: usize = 78;
-/// Not a stored stream: the segment's share of the metadata's demoinfo
-/// store, `u32le len | len bytes` per KTX demoinfo block.
-pub const DINFO: usize = 79;
 pub const GEN_BASE: usize = 128;
 pub const N_STREAMS: usize = GEN_BASE + 256;
 

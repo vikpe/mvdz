@@ -346,9 +346,6 @@ pub struct Walker<'a, const ENC: bool, IO: SymIO> {
     last_hdr: u8,
     prev_te: u8,
     pe_prev_d: u8,
-    /// KTX demoinfo blocks (hidden type 3) go to the DINFO pseudo-stream,
-    /// the segment's share of the metadata's demoinfo store
-    dinfo: bool,
     uc_prev: [u8; 2],
     ucs: Box<[UcState; 256]>,
     /// demo time at the end of the walk (ms)
@@ -366,7 +363,6 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         recs: &'a Recs,
         io: IO,
         proto: Proto,
-        dinfo: bool,
     ) -> Self {
         Walker {
             src,
@@ -398,7 +394,6 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             last_hdr: 0,
             prev_te: 0,
             pe_prev_d: 0,
-            dinfo,
             uc_prev: [0; 2],
             ucs: Box::new([UcState::default(); 256]),
             t_end: 0,
@@ -1245,17 +1240,6 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 self.copy_blob(HIDDMG, 8);
             } else if ty == 1 && bl == 23 {
                 self.ucmd();
-            } else if ty == 3 && self.dinfo {
-                // KTX demoinfo: kept once, in the metadata
-                if ENC {
-                    self.io.put_blob(DINFO, &bl.to_le_bytes());
-                    self.copy_blob(DINFO, bl as usize);
-                } else {
-                    match self.io.take_blob(DINFO, 4) {
-                        Some(b) if le32(b) == bl => self.copy_blob(DINFO, bl as usize),
-                        _ => self.err = true,
-                    }
-                }
             } else {
                 self.copy_blob(HIDMISC, bl as usize);
             }

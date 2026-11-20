@@ -48,13 +48,13 @@ int main(int argc, char **argv) {
     mvdz_free(c, c_n);
     printf("compressed %ld -> %ld bytes\n", n, packed_n);
 
-    /* 2. metadata without decoding */
+    /* 2. the header and the segments, without decoding */
     FILE *p = fopen(packed, "rb");
     char *json; size_t json_n;
     rc = mvdz_info_json(f_read, f_seek, p, 0, &json, &json_n);
     if (rc) return fail("info_json", rc);
-    if (!strstr(json, "\"source\":\"example.c\"")) { fprintf(stderr, "ext key missing\n"); return 1; }
-    printf("metadata: %.120s...\n", json);
+    if (!strstr(json, "\"sha256\":")) { fprintf(stderr, "sha256 missing\n"); return 1; }
+    printf("info: %.120s...\n", json);
     mvdz_free(json, json_n);
 
     /* 3. decode through callbacks and compare */

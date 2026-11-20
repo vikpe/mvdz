@@ -5,9 +5,7 @@
 
 use crate::budget::{Budget, Charge, ReadOptions, zeroed};
 use crate::coder::rans::FileTables;
-use crate::decode::{
-    DemoCheck, SeekSrc, body_limit, decode_segment, read_full, scan_layout,
-};
+use crate::decode::{DemoCheck, SeekSrc, decode_segment, read_full, scan_layout};
 use crate::error::{Error, Result, bad};
 use crate::format::*;
 use crate::util::usz;
@@ -55,7 +53,7 @@ impl<R: Read + Seek> Source for Seekable<R> {
 }
 
 enum Mode {
-    /// sections in file order, checked as they arrive
+    /// the file in order, checked as it arrives
     Seq { pos: u64 },
     /// a complete file whose layout was checked when it was opened
     Random { next: usize },
@@ -66,6 +64,8 @@ enum Mode {
 pub struct Reader<S: Source> {
     r: S,
     lay: Layout,
+    /// the segments of a random-access reader
+    index: Option<Index>,
     mode: Mode,
     cur: Vec<u8>,
     _cur_charge: Option<Charge>,
@@ -82,25 +82,26 @@ impl<R: Read> Reader<Seq<R>> {
     /// Sequential decoding from any reader.
     pub fn new(r: R, threads: usize, opts: &ReadOptions) -> Result<Self> {
         let mut r = Seq(r);
-        let mut p = [0u8; PREFIX_LEN];
+        let mut p = [0u8; HEADER_LEN];
         let mut n = 0;
-        while n < PREFIX_LEN {
+        while n < HEADER_LEN {
             match r.read(&mut p[n..]) {
                 Ok(0) => break,
-                Ok(k) => n += k.min(PREFIX_LEN - n),
+                Ok(k) => n += k.min(HEADER_LEN - n),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e.into()),
             }
         }
         let budget = Budget::reading(opts);
         let lay = Layout::new(&p[..n], &budget)?;
-        budget.input(PREFIX_LEN as u64);
+        budget.input(HEADER_LEN as u64);
         let check = Some(DemoCheck::new(&budget));
         Ok(Reader {
             r,
             lay,
+            index: None,
             mode: Mode::Seq {
-                pos: PREFIX_LEN as u64,
+                pos: HEADER_LEN as u64,
             },
             cur: Vec::new(),
             _cur_charge: None,
@@ -115,7 +116,7 @@ impl<R: Read> Reader<Seq<R>> {
 }
 
 impl<R: Read + Seek> Reader<Seekable<R>> {
-    /// Opens a complete file for random access: checks its whole section
+    /// Opens a complete file for random access: checks its whole
     /// structure (the same rules as every other reader) and positions at
     /// the first segment.
     pub fn open(r: R, threads: usize, opts: &ReadOptions) -> Result<Self> {
@@ -127,6 +128,7 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
         let check = Some(DemoCheck::new(&budget));
         Ok(Reader {
             r: Seekable(src.0),
+            index: Some(lay.index()),
             lay,
             mode: Mode::Random { next: 0 },
             cur: Vec::new(),
@@ -174,15 +176,15 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
 }
 
 impl<S: Source> Reader<S> {
-    /// Metadata, once its section has been read (always for a
-    /// random-access reader).
-    pub fn metadata(&self) -> Option<&Metadata> {
-        self.lay.meta.as_ref().map(|m| &m.1)
+    /// The file's header: the demo's size, duration and hashes.
+    pub fn header(&self) -> &Header {
+        &self.lay.header
     }
 
-    /// The index (random-access readers, or once read).
+    /// The segments with their offsets and start times (random-access
+    /// readers).
     pub fn index(&self) -> Option<&Index> {
-        self.lay.index.as_ref().map(|i| &i.1)
+        self.index.as_ref()
     }
 
     /// Number of segments (seek points); 0 for a sequential reader.
@@ -200,17 +202,41 @@ impl<S: Source> Reader<S> {
         }
     }
 
-    /// A section body, charged to the budget while the charge lives.
-    fn read_body(&mut self, s: &Sec) -> Result<(Vec<u8>, Charge)> {
-        let c = self.budget.alloc(s.len)?;
+    /// The next `uv` of the stream: its value and its length in bytes
+    /// (None: the stream ends before its first byte).
+    fn read_uv(&mut self) -> Result<Option<(u64, usize)>> {
+        let mut b = [0u8; UV_MAX];
+        let mut n = 0;
+        loop {
+            match self.r.read(&mut b[n..n + 1]) {
+                Ok(0) if n == 0 => return Ok(None),
+                Ok(0) => return bad("incomplete file"),
+                Ok(_) => n += 1,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+            if b[n - 1] < 0x80 || n == UV_MAX {
+                break;
+            }
+        }
+        match uv_prefix(&b[..n]) {
+            Some((v, k)) if k == n => Ok(Some((v, n))),
+            _ => bad("length field"),
+        }
+    }
+
+    /// The `len` bytes of a block, charged to the budget while the charge
+    /// lives.
+    fn read_body(&mut self, len: u64) -> Result<(Vec<u8>, Charge)> {
+        let c = self.budget.alloc(len)?;
         // the data arrives before the buffer grows: a lying length on a
         // short stream allocates nothing
         let mut v = Vec::new();
-        (&mut self.r).take(s.len).read_to_end(&mut v)?;
-        if v.len() as u64 != s.len {
-            return bad("truncated");
+        (&mut self.r).take(len).read_to_end(&mut v)?;
+        if v.len() as u64 != len {
+            return bad("incomplete file");
         }
-        self.budget.input(s.len);
+        self.budget.input(len);
         Ok((v, c))
     }
 
@@ -223,7 +249,7 @@ impl<S: Source> Reader<S> {
         let mut out = zeroed(n)?;
         let tm = decode_segment(&self.lay, body, h, &mut out, self.threads, &self.budget)?;
         if let Some(c) = self.check.as_mut() {
-            c.segment(h, &out, tm)?;
+            c.segment(&out, tm)?;
         }
         self.cur = out;
         self._cur_charge = Some(charge);
@@ -231,78 +257,59 @@ impl<S: Source> Reader<S> {
         Ok(())
     }
 
-    /// Reads sections until a segment's bytes are available or the file
-    /// ends; returns the offset of the next section.
+    /// Reads on until a segment's bytes are available or the file ends;
+    /// returns the offset of what follows.
     fn advance_seq(&mut self, mut pos: u64) -> Result<u64> {
         while !self.done && self.at == self.cur.len() {
-            let mut h = [0u8; SEC_HDR];
-            let mut got = 0;
-            while got < SEC_HDR {
-                match self.r.read(&mut h[got..]) {
-                    Ok(0) => break,
-                    Ok(k) => got += k.min(SEC_HDR - got),
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(e) => return Err(e.into()),
+            if !self.lay.has_models() {
+                let Some((len, k)) = self.read_uv()? else {
+                    return bad("incomplete file");
+                };
+                if len > TABLES_MAX {
+                    return bad("models too large");
                 }
+                let t = if len > 0 {
+                    let (b, _c) = self.read_body(len)?;
+                    Some(FileTables::new(b, &self.budget)?)
+                } else {
+                    None
+                };
+                self.lay.models(t)?;
+                pos += k as u64 + len;
+                continue;
             }
-            if got < SEC_HDR {
-                // the stream ends without its trailer: every complete
-                // segment has been delivered
-                return bad("incomplete file (no trailer)");
-            }
-            let s = sec_hdr(&h, pos);
-            self.lay.section(&s)?;
-            if s.len > body_limit(s.kind) {
-                return bad("section too large");
-            }
-            match s.kind {
-                K_META => {
-                    let (b, _c) = self.read_body(&s)?;
-                    let m = Metadata::decode(&b, &self.budget)?;
-                    self.lay.meta(&s, m)?;
-                }
-                K_INDEX => {
-                    let (b, _c) = self.read_body(&s)?;
-                    self.lay.index(&s, Index::decode(&b)?)?;
-                }
-                K_TABLES => {
-                    let (b, _c) = self.read_body(&s)?;
-                    self.lay.tables(FileTables::new(b, &self.budget)?)?;
-                }
-                K_SEGMENT => {
-                    let (b, _c) = self.read_body(&s)?;
-                    let sh = parse_seg_hdr(&b[..b.len().min(SEG_HDR_MAX)])?;
-                    self.lay.segment(&s, sh)?;
-                    self.deliver(&sh, &b)?;
-                }
-                K_TRAILER => {
-                    let (b, _c) = self.read_body(&s)?;
-                    let t = Trailer::parse_body(&b)?;
-                    // the trailer ends the file
-                    let mut one = [0u8; 1];
-                    loop {
-                        match self.r.read(&mut one) {
-                            Ok(0) => break,
-                            Ok(_) => return bad("trailer not at the end"),
-                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                            Err(e) => return Err(e.into()),
-                        }
-                    }
-                    self.lay.trailer(&s, t, s.end())?;
-                    self.lay.finish()?;
-                    if let Some(c) = self.check.take() {
-                        c.finish(&self.lay)?;
-                    }
-                    self.done = true;
-                }
-                _ => {
-                    // unknown sections are skipped unread
-                    let n = io::copy(&mut (&mut self.r).take(s.len), &mut io::sink())?;
-                    if n != s.len {
-                        return bad("truncated");
+            if self.lay.complete() {
+                // the segments hold the whole demo: the file ends here
+                let mut one = [0u8; 1];
+                loop {
+                    match self.r.read(&mut one) {
+                        Ok(0) => break,
+                        Ok(_) => return bad("trailing bytes"),
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e.into()),
                     }
                 }
+                self.lay.finish()?;
+                if let Some(c) = self.check.take() {
+                    c.finish(&self.lay)?;
+                }
+                self.done = true;
+                break;
             }
+            // the stream may end here, short of the demo: every complete
+            // segment has been delivered
+            let Some((len, k)) = self.read_uv()? else {
+                return bad("incomplete file");
+            };
+            let s = Sec {
+                off: pos,
+                hdr: k as u8,
+                len,
+            };
+            let (b, _c) = self.read_body(len)?;
+            let h = parse_seg_hdr(&b[..b.len().min(SEG_HDR_MAX)])?;
+            let h = self.lay.segment(&s, h)?;
+            self.deliver(&h, &b)?;
             pos = s.end();
         }
         Ok(pos)

@@ -16,10 +16,6 @@ fn base(level: Level, seg: usize) -> (Vec<u8>, Vec<u8>) {
     (demo, c)
 }
 
-fn meta_body(m: &Metadata) -> Vec<u8> {
-    m.encode().unwrap()
-}
-
 /// Refused by every reader within `secs`, with `want` matching the error.
 fn refused(b: &[u8], what: &str, want: impl Fn(&Error) -> bool) {
     let t = Instant::now();
@@ -41,104 +37,78 @@ fn corrupt(e: &Error) -> bool {
 fn structure_rules() {
     let (demo, c) = base(Level::Normal, 300);
     assert_eq!(readers_agree(&c, "base").unwrap(), demo);
-    let secs = sections(&c);
-    let kinds: Vec<u8> = secs.iter().map(|s| s.0).collect();
-    assert_eq!(kinds[0], K_META);
-    let meta = secs[0].clone();
-    let iix = kinds.iter().position(|&k| k == K_INDEX).unwrap();
-    // rebuilt unchanged: accepted
-    assert_eq!(
-        readers_agree(&build(0, true, &secs, true), "rebuilt").unwrap(),
-        demo
-    );
-    // metadata pointer 0 in the prefix: the trailer's is used
-    assert_eq!(
-        readers_agree(&build(0, false, &secs, true), "prefix meta 0").unwrap(),
-        demo
-    );
-    // a second META (forged identity) anywhere: refused (robustness 9)
-    let mut forged = Metadata::decode(&meta.1, &mvdz::budget::Budget::unlimited()).unwrap();
-    forged.sha256 = [0xff; 32];
-    forged.map = b"maps/forged.bsp".to_vec();
-    let mut s2 = secs.clone();
-    s2.insert(iix, (K_META, meta_body(&forged)));
-    refused(&build(0, true, &s2, true), "second META", |e| {
-        *e == Error::Corrupt("duplicate META")
-    });
-    // the only META replaced by a forged one: the structure is fine, the
-    // identity check of a full decode fails
-    let mut s3 = secs.clone();
-    s3[0] = (K_META, meta_body(&forged));
-    let b = build(0, true, &s3, true);
+    let p = parts(&c);
+    assert!(p.segs.len() > 3);
+    // rebuilt unchanged: the same file
+    assert_eq!(p.build(), c);
+    // a forged identity: the structure is fine, the identity check of a
+    // full decode fails
+    let mut q = p.clone();
+    q.header.sha256 = [0xff; 32];
+    let b = q.build();
     refused(&b, "forged identity", |e| {
         *e == Error::Corrupt("identity mismatch")
     });
     assert!(
-        mvdz::read_metadata(Cursor::new(&b)).is_ok(),
-        "read_metadata does not decode the demo"
+        mvdz::read_info(Cursor::new(&b)).is_ok(),
+        "read_info does not decode the demo"
     );
-    // a second INDEX
-    let mut s4 = secs.clone();
-    s4.insert(iix + 1, secs[iix].clone());
-    refused(&build(0, true, &s4, true), "second INDEX", corrupt);
-    // a segment dropped by flipping its kind to an unknown non-critical one
-    // (spec review 3)
-    let mut s5 = secs.clone();
-    s5[2].0 = 0x08;
-    refused(&build(0, true, &s5, true), "dropped segment", corrupt);
+    // a segment dropped
+    let mut q = p.clone();
+    q.segs.remove(2);
+    refused(&q.build(), "dropped segment", corrupt);
     // segments swapped
-    let mut s6 = secs.clone();
-    s6.swap(1, 2);
-    refused(&build(0, true, &s6, true), "swapped segments", corrupt);
-    // INDEX before the last segment
-    let mut s7 = secs.clone();
-    let ix = s7.remove(iix);
-    s7.insert(2, ix);
-    refused(&build(0, true, &s7, true), "index first", corrupt);
-    // no trailer, with an index (spec review 4): incomplete everywhere
-    let b = build(0, true, &secs, false);
-    refused(&b, "no trailer", |e| {
-        *e == Error::Corrupt("incomplete file (no trailer)")
+    let mut q = p.clone();
+    q.segs.swap(1, 2);
+    refused(&q.build(), "swapped segments", corrupt);
+    // a segment twice
+    let mut q = p.clone();
+    q.segs.insert(1, p.segs[1].clone());
+    refused(&q.build(), "repeated segment", corrupt);
+    // the last segment cut short
+    refused(&c[..c.len() - 3], "cut", |e| {
+        *e == Error::Corrupt("incomplete file")
     });
-    // the trailer cut short
-    refused(&c[..c.len() - 3], "trailer cut", corrupt);
-    // data after the trailer
+    // data after the last segment
     let mut b = c.clone();
     b.push(0);
-    refused(&b, "data after trailer", corrupt);
-    // a TRAILER section in the middle
-    let mut s8 = secs.clone();
-    s8.insert(1, (K_TRAILER, vec![0; 40]));
-    refused(&build(0, true, &s8, true), "early trailer", corrupt);
-    // an unknown critical section
-    let mut s9 = secs.clone();
-    s9.insert(1, (0x99, b"x".to_vec()));
-    refused(&build(0, true, &s9, true), "unknown critical", |e| {
+    refused(&b, "trailing byte", |e| {
+        *e == Error::Corrupt("trailing bytes")
+    });
+    // a segment of a coding this version does not know
+    let mut q = p.clone();
+    let h = parse_seg_hdr(&q.segs[1]).unwrap();
+    q.segs[1][h.body_off - 1] = 9;
+    refused(&q.build(), "unknown coding", |e| {
         matches!(e, Error::Format(_))
     });
-    // a segment that needs the demoinfo before the META
-    let mut s10 = secs.clone();
-    let m = s10.remove(0);
-    s10.insert(iix - 1, m);
-    refused(
-        &build(0, true, &s10, true),
-        "META after a sharing segment",
-        corrupt,
-    );
-    // META without the shared demoinfo, CRC recomputed
-    let mut nodi = Metadata::decode(&meta.1, &mvdz::budget::Budget::unlimited()).unwrap();
-    nodi.demoinfo.clear();
-    let mut s11 = secs.clone();
-    s11[0] = (K_META, meta_body(&nodi));
-    refused(&build(0, true, &s11, true), "demoinfo missing", corrupt);
-    // empty file, magic only, other versions
+    // an empty segment in between
+    let mut q = p.clone();
+    q.segs
+        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_STORE));
+    refused(&q.build(), "empty segment", corrupt);
+    // the models block missing
+    let mut b = c[..HEADER_LEN].to_vec();
+    for s in &p.segs {
+        block(&mut b, s);
+    }
+    refused(&b, "no models block", corrupt);
+    // the high half of the header's checksum field set
+    let mut b = c.clone();
+    b[30] = 1;
+    refused(&b, "checksum field", |e| {
+        *e == Error::Corrupt("header checksum field")
+    });
+    // empty file, magic only, other versions, a cut header
     for (b, what) in [
         (&b""[..], "empty"),
         (b"MVDZ", "magic"),
         (b"MVDZ\x03\x00\x00\x00", "v3"),
-        (b"MVDZ\x01\x00", "prefix cut"),
+        (b"MVDZ\x01\x00\x00\x00", "v1"),
+        (b"MVDZ\x02\x00", "header cut"),
+        (&c[..HEADER_LEN], "header only"),
     ] {
-        assert!(readers_agree(b, what).is_none());
+        assert!(readers_agree(b, what).is_none(), "{what}");
     }
 }
 
@@ -147,32 +117,34 @@ fn structure_rules() {
 #[test]
 fn declared_sizes() {
     let (_, c) = base(Level::Fast, 0);
-    let secs = sections(&c);
-    let iseg = secs.iter().position(|s| s.0 == K_SEGMENT).unwrap();
-    let iix = secs.iter().position(|s| s.0 == K_INDEX).unwrap();
-    // a 46-byte segment that claims 4 GiB: zstd coding, raw_len 2^32 - 2^16
-    let mut s = secs.clone();
-    let mut b = seg_hdr_bytes(0, MAX_SEG_RAW, 0, 0, C_DEFLATE);
+    let p = parts(&c);
+    // a 30-byte segment that claims 4 GiB: DEFLATE coding, raw_len
+    // 2^32 - 2^16
+    let mut q = p.clone();
+    let mut b = seg_hdr_bytes(MAX_SEG_RAW, 0, 0, C_DEFLATE);
     b.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
-    s[iseg] = (K_SEGMENT, b);
-    refused(&build(0, true, &s, true), "4 GiB segment", |e| {
+    q.header.size = MAX_SEG_RAW;
+    q.segs = vec![b];
+    refused(&q.build(), "4 GiB segment", |e| {
         *e == Error::Corrupt("segment size")
     });
-    // an INDEX claiming 60 GB
-    let mut s = secs.clone();
-    let mut ix = Index::decode(&s[iix].1).unwrap();
-    ix.size = 60 << 30;
-    ix.segs[0].raw_len = 60 << 30;
-    s[iix].1 = ix.encode();
-    refused(&build(0, true, &s, true), "60 GB index", corrupt);
-    // META of 256 MiB declared in a few bytes
-    let mut mb = vec![1u8, 1];
-    put_uv(&mut mb, 256 << 20);
-    mb.extend_from_slice(&[0; 4]);
-    mb.extend_from_slice(&mvdz::deflate::compress(&[0u8; 1000], 9));
-    let mut s = secs.clone();
-    s[0] = (K_META, mb);
-    refused(&build(0, true, &s, true), "256 MiB META", corrupt);
+    // a header claiming 60 GB
+    let mut q = p.clone();
+    q.header.size = 60 << 30;
+    refused(&q.build(), "60 GB header", corrupt);
+    // a models block of 256 MiB declared in a few bytes
+    let mut b = c[..HEADER_LEN].to_vec();
+    put_uv(&mut b, 256 << 20);
+    b.extend_from_slice(&[0; 100]);
+    refused(&b, "256 MiB models", |e| {
+        *e == Error::Corrupt("models too large")
+    });
+    // a segment whose length field runs past the end of the file
+    let mut b = c[..HEADER_LEN].to_vec();
+    block(&mut b, &p.models);
+    put_uv(&mut b, 1 << 40);
+    b.extend_from_slice(&p.segs[0]);
+    refused(&b, "segment length", corrupt);
     // the caller's memory budget
     let (demo, c) = base(Level::Normal, 0);
     let small: mvdz::ReadOptions = mvdz::Limits {
@@ -199,36 +171,30 @@ fn model_amplification() {
     let Some(dir) = test_data("poc") else { return };
     let demo = synthetic(&[], false);
     let c = mvdz::compress(&demo, &cfg(Level::Normal, 0)).unwrap();
-    let secs = sections(&c);
-    let iseg = secs.iter().position(|s| s.0 == K_SEGMENT).unwrap();
+    let p = parts(&c);
     for name in ["v2model_1000.bin", "v2model_16000.bin", "v2model_65535.bin"] {
         // a rANS stream body: header length, header, rANS data
         let Ok(st) = std::fs::read(dir.join(name)) else {
             continue;
         };
-        // a segment whose only stream is a time stream with this body
+        // a segment whose only stream is a time stream with this body:
+        // fte, fte2, mvd1, tail; one entry (id 0, back end 2, count,
+        // length); no blob body
         let mut body = Vec::new();
-        for v in [0u64, 0, 0, 0, 0, 0, 0] {
-            put_uv(&mut body, v);
-        }
-        put_uv(&mut body, 1);
-        for v in [0u64, 2, demo.len() as u64, st.len() as u64] {
+        for v in [0u64, 0, 0, 0, 1, 0, 2, demo.len() as u64, st.len() as u64, 0] {
             put_uv(&mut body, v);
         }
         body.extend_from_slice(&st);
         let mut b = seg_hdr_bytes(
-            0,
             demo.len() as u64,
-            0,
+            p.header.duration_ms,
             mvdz::util::crc32(&demo),
             C_TRANSFORM,
         );
         b.extend_from_slice(&body);
-        let mut s = secs.clone();
-        s[iseg] = (K_SEGMENT, b);
-        refused(&build(0, true, &s, true), name, |e| {
-            *e == Error::Corrupt("model")
-        });
+        let mut q = p.clone();
+        q.segs = vec![b];
+        refused(&q.build(), name, |e| *e == Error::Corrupt("model"));
     }
 }
 
@@ -293,16 +259,16 @@ fn wide_model(n: u32) -> Vec<u8> {
     e.finish()
 }
 
-/// A large, legal TABLES section: the metadata path checks
-/// its grammar only (quickly, without building models: a 32 MiB budget is
+/// A large, legal models block: reading the file information checks its
+/// grammar only (quickly, without building models: a 32 MiB budget is
 /// enough), while a decode builds its models under the reader's budget,
 /// which refuses them.
 #[test]
 fn large_tables() {
     let demo = usercmd_demo();
     let c = mvdz::compress(&demo, &cfg(Level::Normal, 8192)).unwrap();
-    let mut secs = sections(&c);
-    assert_eq!(secs[1].0, K_TABLES);
+    let mut p = parts(&c);
+    assert!(!p.models.is_empty());
     let m = wide_model(512);
     let mut t = Vec::new();
     // a model for every structural stream
@@ -315,17 +281,17 @@ fn large_tables() {
         put_uv(&mut t, m.len() as u64);
         t.extend_from_slice(&m);
     }
-    secs[1].1 = t;
-    let b = build(0, true, &secs, true);
+    p.models = t;
+    let b = p.build();
     let small = mvdz::Limits {
         memory: 32 << 20,
         ..Default::default()
     };
     let t0 = Instant::now();
-    mvdz::read_metadata_with(Cursor::new(&b), &small).unwrap();
+    mvdz::read_info_with(Cursor::new(&b), &small).unwrap();
     assert!(
         t0.elapsed().as_secs_f64() < 10.0,
-        "TABLES checks took {:?}",
+        "the models checks took {:?}",
         t0.elapsed()
     );
     // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB

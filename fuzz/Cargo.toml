@@ -22,8 +22,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "read_metadata"
-path = "fuzz_targets/read_metadata.rs"
+name = "read_info"
+path = "fuzz_targets/read_info.rs"
 test = false
 doc = false
 

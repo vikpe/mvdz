@@ -115,7 +115,7 @@ int mvdz_compress(const void *in, size_t n, int level, size_t segment, int threa
 /* Incremental decoding. mvdz_open_memory copies the buffer.
  * mvdz_open_callbacks: with seek == NULL the file is read strictly
  * sequentially (pipes, network streams) and the seek functions fail with
- * MVDZ_E_INVALID; with seek, the file must be complete: its whole section
+ * MVDZ_E_INVALID; with seek, the file must be complete: its whole
  * structure is checked when it is opened. *err (may be NULL) receives the
  * error code on failure. */
 mvdz_reader *mvdz_open_memory(const void *buf, size_t n, int threads, uint64_t max_memory, unsigned flags,
@@ -129,7 +129,7 @@ mvdz_reader *mvdz_open_callbacks(mvdz_read_fn read, mvdz_seek_fn seek, void *use
  * without MVDZ_TRUSTED, the SHA-256 identity) have passed. Reading after a
  * seek checks each segment only. */
 long long mvdz_read(mvdz_reader *r, void *out, size_t n);
-/* Size of the original demo in bytes, -1 if not known (yet). */
+/* Size of the original demo in bytes (from the file's header). */
 long long mvdz_raw_size(const mvdz_reader *r);
 /* Number of segments (seek points), negative if the reader cannot seek. */
 long long mvdz_segment_count(const mvdz_reader *r);
@@ -145,13 +145,12 @@ int mvdz_seek_time(mvdz_reader *r, uint64_t ms, uint64_t *seg_start_ms, uint64_t
 int mvdz_seek_segment(mvdz_reader *r, size_t segment, uint64_t *raw_offset);
 void mvdz_close(mvdz_reader *r);
 
-/* Metadata (identity, server info, roster, census, index) as a
- * NUL-terminated JSON string (FORMAT.md §3.2), read without decoding the
- * demo; the section structure is checked. The identity is what the file
- * claims: only a full decode verifies it. *json_n excludes the NUL; free
- * with mvdz_free(json, *json_n). Byte strings are rendered as Latin-1
- * (each byte is the code point of the same value). The JSON counts
- * against max_memory. */
+/* The file's header (the demo's size, duration, CRC-32C and SHA-256) and
+ * its segments (start time, raw offset and raw length of each) as a
+ * NUL-terminated JSON string, read without decoding the demo; the file's
+ * structure is checked. The hashes are what the file claims: only a full
+ * decode verifies them. *json_n excludes the NUL; free with
+ * mvdz_free(json, *json_n). The JSON counts against max_memory. */
 int mvdz_info_json(mvdz_read_fn read, mvdz_seek_fn seek, void *user, uint64_t max_memory, char **json,
                    size_t *json_n);
 int mvdz_info_json_memory(const void *buf, size_t n, uint64_t max_memory, char **json, size_t *json_n);
