@@ -44,7 +44,7 @@ fn meta_fields(body: &[u8]) -> Vec<u8> {
         r.u32le().unwrap(),
     );
     if codec == 1 {
-        mvdz::zst::decompress(r.rest(), n).unwrap()
+        mvdz::deflate::decompress(r.rest(), n).unwrap()
     } else {
         r.rest().to_vec()
     }
@@ -54,7 +54,7 @@ fn zstd_meta(p: &[u8]) -> Vec<u8> {
     let mut out = vec![1u8, 1];
     put_uv(&mut out, p.len() as u64);
     out.extend_from_slice(&crc32(p).to_le_bytes());
-    out.extend_from_slice(&mvdz::zst::compress(p, 19));
+    out.extend_from_slice(&mvdz::deflate::compress(p, 9));
     out
 }
 
@@ -130,57 +130,6 @@ fn r_h2_adir_linear() {
         100_000
     );
     assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
-}
-
-/// R-H3, R-M1: the zstd frame rules apply in every build (native libzstd
-/// and the pure-Rust decoder of wasm): a window larger than the data, a
-/// legacy frame, a dictionary id, the reserved bit, an oversized block.
-#[test]
-fn r_h3_m1_zstd_frames() {
-    let refused = |b: &[u8], n: usize| {
-        assert_eq!(
-            mvdz::zst::decompress(b, n).unwrap_err(),
-            Error::Corrupt("zstd data"),
-            "{b:x?}"
-        )
-    };
-    // window 2^40, RLE blocks of 128 KiB: the bomb of the review, cut short
-    let mut bomb = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0xF0];
-    for _ in 0..64 {
-        bomb.extend_from_slice(&((131072u32 << 3) | (1 << 1)).to_le_bytes()[..3]);
-        bomb.push(7);
-    }
-    bomb.extend_from_slice(&(1u32 | (1 << 1) | (1 << 3)).to_le_bytes()[..3]);
-    bomb.push(7);
-    let t = Instant::now();
-    refused(&bomb, 1000);
-    assert!(t.elapsed() < Duration::from_secs(1));
-    let ok = mvdz::zst::compress(&[5u8; 3000], 3);
-    assert_eq!(mvdz::zst::decompress(&ok, 3000).unwrap(), vec![5u8; 3000]);
-    // legacy v0.7 magic with otherwise the same frame
-    let mut legacy = ok.clone();
-    legacy[0] = 0x27;
-    refused(&legacy, 3000);
-    // the reserved bit
-    let mut r = ok.clone();
-    r[4] |= 0x08;
-    refused(&r, 3000);
-    // a dictionary id
-    let mut dict = vec![0x28, 0xB5, 0x2F, 0xFD, 0x21, 1, 3];
-    dict.extend_from_slice(&(1u32 | (1 << 3)).to_le_bytes()[..3]);
-    dict.push(9);
-    refused(&dict, 3);
-    // a raw block larger than the window (single segment, content size 3)
-    let mut big = vec![0x28, 0xB5, 0x2F, 0xFD, 0x20, 3];
-    big.extend_from_slice(&(1u32 | (4 << 3)).to_le_bytes()[..3]);
-    big.extend_from_slice(b"abcd");
-    refused(&big, 4);
-    // a window of 1 MiB is fine for small data (the pure-Rust encoder
-    // writes 128 KiB windows)
-    let mut w = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 10 << 3];
-    w.extend_from_slice(&(1u32 | (3 << 3)).to_le_bytes()[..3]);
-    w.extend_from_slice(b"xyz");
-    assert_eq!(mvdz::zst::decompress(&w, 3).unwrap(), b"xyz");
 }
 
 /// R-M2: a model of 65535 tables whose header is padded to satisfy rule

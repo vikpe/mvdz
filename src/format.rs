@@ -37,7 +37,7 @@ pub const F_STREAMED: u8 = 1;
 
 /// Segment codings.
 pub const C_TRANSFORM: u8 = 0;
-pub const C_ZSTD: u8 = 1;
+pub const C_DEFLATE: u8 = 1;
 pub const C_STORE: u8 = 2;
 
 // ---------------------------------------------------------------- limits (FORMAT.md, "Limits")
@@ -353,13 +353,13 @@ impl Metadata {
         }
         // section body: meta version, codec, raw length, CRC-32C, payload;
         // zstd only when smaller and within the ratio limit
-        let z = crate::zst::compress(&p, level.zstd());
+        let z = crate::deflate::compress(&p, level.deflate());
         let mut out = vec![1u8, 0];
         put_uv(&mut out, p.len() as u64);
         out.extend_from_slice(&crc32(&p).to_le_bytes());
-        let zstd = z.len() < p.len() && ratio_ok(p.len() as u64, (out.len() + z.len()) as u64);
-        out[1] = zstd as u8;
-        out.extend_from_slice(if zstd { &z } else { &p });
+        let packed = z.len() < p.len() && ratio_ok(p.len() as u64, (out.len() + z.len()) as u64);
+        out[1] = packed as u8;
+        out.extend_from_slice(if packed { &z } else { &p });
         Ok(out)
     }
 
@@ -384,7 +384,7 @@ impl Metadata {
         let _c = budget.alloc(2 * n as u64)?;
         let p = match codec {
             0 if r.rest().len() == n => r.rest().to_vec(),
-            1 => crate::zst::decompress(r.rest(), n)?,
+            1 => crate::deflate::decompress(r.rest(), n)?,
             0 => return Err(e),
             _ => return Err(Error::Format("unknown metadata codec")),
         };
@@ -665,7 +665,7 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
                 return bad("demoinfo share");
             }
         }
-        C_ZSTD | C_STORE => {}
+        C_DEFLATE | C_STORE => {}
         _ => return Err(Error::Format("unknown segment coding")),
     }
     if raw_len > MAX_SEG_RAW {
@@ -685,7 +685,7 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
 // ---------------------------------------------------------------- attachments
 
 pub const A_STORE: u8 = 0;
-pub const A_ZSTD: u8 = 1;
+pub const A_DEFLATE: u8 = 1;
 
 /// One attachment: a file stored beside the demo, not part of its bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -795,13 +795,13 @@ pub fn parse_adir(b: &[u8]) -> Result<Vec<AttachInfo>> {
 /// ratio limit allows it), else as is. Data that zstd level 1 does not
 /// shrink by 1/32 is stored without the slow level.
 pub fn pack_attachment(a: &Attachment, off: u64) -> (AttachInfo, Vec<u8>) {
-    use crate::segment::{ZSTD_ATTACH, ZSTD_ATTACH_PROBE};
+    use crate::segment::{DEFLATE_ATTACH, DEFLATE_ATTACH_PROBE};
     let sha256: [u8; 32] = Sha256::digest(&a.data).into();
     let n = a.data.len();
-    let probe = crate::zst::compress(&a.data, ZSTD_ATTACH_PROBE);
-    let z = (probe.len() + n / 32 < n).then(|| crate::zst::compress(&a.data, ZSTD_ATTACH));
+    let probe = crate::deflate::compress(&a.data, DEFLATE_ATTACH_PROBE);
+    let z = (probe.len() + n / 32 < n).then(|| crate::deflate::compress(&a.data, DEFLATE_ATTACH));
     let (codec, body) = match z {
-        Some(z) if ratio_ok(n as u64, z.len() as u64) && z.len() + n / 16 < n => (A_ZSTD, z),
+        Some(z) if ratio_ok(n as u64, z.len() as u64) && z.len() + n / 16 < n => (A_DEFLATE, z),
         _ => (A_STORE, a.data.clone()),
     };
     let info = AttachInfo {
@@ -824,12 +824,12 @@ pub fn unpack_attachment(e: &AttachInfo, body: Vec<u8>, budget: &Budget) -> Resu
     }
     let d = match e.codec {
         A_STORE if e.size == e.stored => body,
-        A_ZSTD if ratio_ok(e.size, e.stored) => {
+        A_DEFLATE if ratio_ok(e.size, e.stored) => {
             let n = usz(e.size).ok_or(Error::Limit("attachment size"))?;
             let _c = budget.alloc(e.size)?;
-            crate::zst::decompress(&body, n)?
+            crate::deflate::decompress(&body, n)?
         }
-        A_STORE | A_ZSTD => return bad("attachment size"),
+        A_STORE | A_DEFLATE => return bad("attachment size"),
         _ => return Err(Error::Format("unknown attachment codec")),
     };
     if <[u8; 32]>::from(Sha256::digest(&d)) != e.sha256 {

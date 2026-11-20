@@ -1,11 +1,14 @@
 //! Back ends. Every stream records its own back end id.
 //!
-//! | id | name  | structural streams       | numeric streams                    | blob streams |
-//! |----|-------|--------------------------|------------------------------------|--------------|
-//! | 0  | store | bytes                    | zigzag LEB128                      | bytes        |
-//! | 1  | zstd  | zstd of the bytes        | zstd of the LEB128 bytes           | zstd         |
-//! | 2  | rans  | static rANS, ctx tables  | static rANS bucket + mantissa bits | (not allowed)|
-//! | 3  | rans  | as 2, model from TABLES  | as 2, model from TABLES            | (not allowed)|
+//! | id | name    | structural streams       | numeric streams                    |
+//! |----|---------|--------------------------|------------------------------------|
+//! | 0  | store   | bytes                    | zigzag LEB128                      |
+//! | 1  | deflate | DEFLATE of the bytes     | DEFLATE of the LEB128 bytes        |
+//! | 2  | rans    | static rANS, ctx tables  | static rANS bucket + mantissa bits |
+//! | 3  | rans    | as 2, model from TABLES  | as 2, model from TABLES            |
+//!
+//! Blob streams have no back end of their own: the blob streams of a
+//! segment are one DEFLATE stream (`segment.rs`).
 
 pub mod rans;
 pub mod rc;
@@ -17,7 +20,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 pub const BE_STORE: u8 = 0;
-pub const BE_ZSTD: u8 = 1;
+pub const BE_DEFLATE: u8 = 1;
 pub const BE_RANS: u8 = 2;
 /// rANS with the model from the file's TABLES section.
 pub const BE_FILE: u8 = 3;
@@ -68,12 +71,12 @@ pub fn encode_lazy(
     be: u8,
     syms: &[u8],
     ctxs: &[u32],
-    zlevel: i32,
+    level: u32,
     file: Option<&rans::Shared>,
 ) -> Option<Vec<u8>> {
     match be {
         BE_STORE => Some(syms.to_vec()),
-        BE_ZSTD => Some(crate::zst::compress(syms, zlevel)),
+        BE_DEFLATE => Some(crate::deflate::compress(syms, level)),
         BE_RANS => rans::encode_bytes(syms, ctxs, None),
         BE_FILE => rans::encode_bytes(syms, ctxs, Some(file?)),
         _ => None,
@@ -84,22 +87,14 @@ pub fn encode_num(
     be: u8,
     sid: usize,
     vals: &[(NCtx, i32)],
-    zlevel: i32,
+    level: u32,
     file: Option<&rans::Shared>,
 ) -> Option<Vec<u8>> {
     match be {
         BE_STORE => Some(leb_vals(vals)),
-        BE_ZSTD => Some(crate::zst::compress(&leb_vals(vals), zlevel)),
+        BE_DEFLATE => Some(crate::deflate::compress(&leb_vals(vals), level)),
         BE_RANS => rans::encode_num(sid, vals, None),
         BE_FILE => rans::encode_num(sid, vals, Some(file?)),
-        _ => None,
-    }
-}
-
-pub fn encode_blob(be: u8, data: &[u8], zlevel: i32) -> Option<Vec<u8>> {
-    match be {
-        BE_STORE => Some(data.to_vec()),
-        BE_ZSTD => Some(crate::zst::compress(data, zlevel)),
         _ => None,
     }
 }
@@ -108,17 +103,18 @@ pub fn encode_blob(be: u8, data: &[u8], zlevel: i32) -> Option<Vec<u8>> {
 /// (rANS models are charged when they are read).
 pub fn scratch(be: u8, numeric: bool, count: usize) -> u64 {
     match (be, numeric) {
-        (BE_ZSTD, false) => count as u64,
-        (BE_ZSTD, true) => 5 * count as u64,
+        (BE_DEFLATE, false) => count as u64,
+        (BE_DEFLATE, true) => 5 * count as u64,
         _ => 0,
     }
 }
 
-pub fn decode_blob(be: u8, body: &[u8], n: usize) -> Result<Cow<'_, [u8]>> {
+/// The `n` bytes of a structural stream coded with back end 0 or 1.
+pub fn decode_bytes(be: u8, body: &[u8], n: usize) -> Result<Cow<'_, [u8]>> {
     match be {
         BE_STORE if body.len() == n => Ok(Cow::Borrowed(body)),
         BE_STORE => Err(Error::Corrupt("stored stream length")),
-        BE_ZSTD => Ok(Cow::Owned(crate::zst::decompress(body, n)?)),
+        BE_DEFLATE => Ok(Cow::Owned(crate::deflate::decompress(body, n)?)),
         _ => Err(Error::Corrupt("back end")),
     }
 }
@@ -156,8 +152,8 @@ impl<'a> LazyDec<'a> {
         budget: &Budget,
     ) -> Result<LazyDec<'a>> {
         Ok(match be {
-            BE_STORE | BE_ZSTD => LazyDec::Bytes(Cursor {
-                b: decode_blob(be, body, n)?,
+            BE_STORE | BE_DEFLATE => LazyDec::Bytes(Cursor {
+                b: decode_bytes(be, body, n)?,
                 i: 0,
             }),
             BE_RANS | BE_FILE => LazyDec::Rans(Box::new(rans::ByteDec::new(
@@ -215,9 +211,9 @@ impl<'a> NumDec<'a> {
                 n,
             ),
             // the LEB128 length is not stored; it is at most 5 bytes a value
-            BE_ZSTD => NumDec::Leb(
+            BE_DEFLATE => NumDec::Leb(
                 Cursor {
-                    b: Cow::Owned(crate::zst::decompress_upto(body, 5 * n)?),
+                    b: Cow::Owned(crate::deflate::decompress_upto(body, 5 * n)?),
                     i: 0,
                 },
                 n,

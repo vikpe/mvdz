@@ -205,7 +205,7 @@ fn hostile(v: &mut Vec<Vector>) {
         r.u32le().unwrap(),
     );
     let mut p = if codec == 1 {
-        mvdz::zst::decompress(r.rest(), n).unwrap()
+        mvdz::deflate::decompress(r.rest(), n).unwrap()
     } else {
         r.rest().to_vec()
     };
@@ -226,7 +226,7 @@ fn hostile(v: &mut Vec<Vector>) {
     let mut big = vec![1u8, 1];
     put_uv(&mut big, 256 << 20);
     big.extend_from_slice(&[0; 4]);
-    big.extend_from_slice(&mvdz::zst::compress(&[0u8; 1000], 3));
+    big.extend_from_slice(&mvdz::deflate::compress(&[0u8; 1000], 9));
     s8[0] = (K_META, big);
     add(
         "meta-256m",
@@ -234,8 +234,8 @@ fn hostile(v: &mut Vec<Vector>) {
         "META declaring 256 MiB of fields",
     );
     let mut s9 = secs.clone();
-    let mut b = seg_hdr_bytes(0, MAX_SEG_RAW, 0, 0, C_ZSTD);
-    b.extend_from_slice(&mvdz::zst::compress(&[0u8; 10], 3));
+    let mut b = seg_hdr_bytes(0, MAX_SEG_RAW, 0, 0, C_DEFLATE);
+    b.extend_from_slice(&mvdz::deflate::compress(&[0u8; 10], 9));
     s9[iseg] = (K_SEGMENT, b);
     add(
         "segment-ratio",
@@ -398,7 +398,7 @@ fn hostile(v: &mut Vec<Vector>) {
     );
     // a zstd segment whose frame declares a 2^40-byte window
     let seg0 = &demo[..h.raw_len as usize];
-    let mut zb = seg_hdr_bytes(0, seg0.len() as u64, 0, mvdz::util::crc32(seg0), C_ZSTD);
+    let mut zb = seg_hdr_bytes(0, seg0.len() as u64, 0, mvdz::util::crc32(seg0), C_DEFLATE);
     zb.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD, 0x00, 0xF0]);
     let blk = (seg0.len() as u32) << 3 | 1;
     zb.extend_from_slice(&blk.to_le_bytes()[..3]);
@@ -707,7 +707,7 @@ fn meta_fields(m: &Metadata) -> Vec<u8> {
         r.u32le().unwrap(),
     );
     if codec == 1 {
-        mvdz::zst::decompress(r.rest(), n).unwrap()
+        mvdz::deflate::decompress(r.rest(), n).unwrap()
     } else {
         r.rest().to_vec()
     }
@@ -719,7 +719,7 @@ fn meta_body(p: &[u8], zstd: bool) -> Vec<u8> {
     put_uv(&mut mb, p.len() as u64);
     mb.extend_from_slice(&mvdz::util::crc32(p).to_le_bytes());
     if zstd {
-        mb.extend_from_slice(&mvdz::zst::compress(p, 19));
+        mb.extend_from_slice(&mvdz::deflate::compress(p, 9));
     } else {
         mb.extend_from_slice(p);
     }
@@ -854,7 +854,7 @@ fn all_vectors() -> Option<Vec<Vector>> {
         r.u32le().unwrap(),
     );
     let mut p = if codec == 1 {
-        mvdz::zst::decompress(r.rest(), n).unwrap()
+        mvdz::deflate::decompress(r.rest(), n).unwrap()
     } else {
         r.rest().to_vec()
     };

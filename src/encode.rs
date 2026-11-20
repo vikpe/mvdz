@@ -100,8 +100,8 @@ pub fn walk_one(s: &[u8], proto: &mut Proto, dinfo_total: &mut usize) -> Option<
 /// zstd when the ratio limit allows it and it is smaller, else stored.
 pub fn raw_body(s: &[u8], level: Level, raw_off: u64, t_start: u64) -> Vec<u8> {
     let crc = crc32(s);
-    let z = crate::zst::compress(s, level.zstd());
-    let mut b = seg_hdr_bytes(raw_off, s.len() as u64, t_start, crc, C_ZSTD);
+    let z = crate::deflate::compress(s, level.deflate());
+    let mut b = seg_hdr_bytes(raw_off, s.len() as u64, t_start, crc, C_DEFLATE);
     if z.len() < s.len() && seg_ratio_ok(s.len() as u64, (b.len() + z.len()) as u64) {
         b.extend_from_slice(&z);
         return b;

@@ -152,7 +152,7 @@ fn declared_sizes() {
     let iix = secs.iter().position(|s| s.0 == K_INDEX).unwrap();
     // a 46-byte segment that claims 4 GiB: zstd coding, raw_len 2^32 - 2^16
     let mut s = secs.clone();
-    let mut b = seg_hdr_bytes(0, MAX_SEG_RAW, 0, 0, C_ZSTD);
+    let mut b = seg_hdr_bytes(0, MAX_SEG_RAW, 0, 0, C_DEFLATE);
     b.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
     s[iseg] = (K_SEGMENT, b);
     refused(&build(0, true, &s, true), "4 GiB segment", |e| {
@@ -169,7 +169,7 @@ fn declared_sizes() {
     let mut mb = vec![1u8, 1];
     put_uv(&mut mb, 256 << 20);
     mb.extend_from_slice(&[0; 4]);
-    mb.extend_from_slice(&mvdz::zst::compress(&[0u8; 1000], 3));
+    mb.extend_from_slice(&mvdz::deflate::compress(&[0u8; 1000], 9));
     let mut s = secs.clone();
     s[0] = (K_META, mb);
     refused(&build(0, true, &s, true), "256 MiB META", corrupt);

@@ -225,7 +225,7 @@ fn attachments_round_trip_and_leave_the_demo_alone() {
         format::A_STORE,
         "incompressible data is stored"
     );
-    assert_eq!(list[1].codec, format::A_ZSTD, "text is stored compressed");
+    assert_eq!(list[1].codec, format::A_DEFLATE, "text is stored compressed");
     assert_eq!(
         mvdz::list_attachments(Cursor::new(&c2), "transcript/")
             .unwrap()
@@ -485,7 +485,7 @@ fn unknown_sections_and_fields() {
         r.u32le().unwrap(),
     );
     let mut payload = if codec == 1 {
-        mvdz::zst::decompress(r.rest(), n).unwrap()
+        mvdz::deflate::decompress(r.rest(), n).unwrap()
     } else {
         r.rest().to_vec()
     };

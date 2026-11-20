@@ -191,9 +191,9 @@ pub fn decode_segment_share(
             let th = segment::parse_header(coded, dst.len())?;
             segment::decode(coded, &th, dst, share, tables, threads, budget)?;
         }
-        C_ZSTD => {
+        C_DEFLATE => {
             let _c = budget.alloc(h.raw_len)?;
-            dst.copy_from_slice(&crate::zst::decompress(coded, dst.len())?);
+            dst.copy_from_slice(&crate::deflate::decompress(coded, dst.len())?);
         }
         C_STORE if coded.len() == dst.len() => dst.copy_from_slice(coded),
         C_STORE => return bad("stored segment length"),

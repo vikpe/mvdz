@@ -17,6 +17,7 @@ pub mod budget;
 pub mod capi;
 pub mod coder;
 pub mod decode;
+pub mod deflate;
 pub mod encode;
 pub mod error;
 pub mod format;
@@ -30,7 +31,7 @@ pub mod stream;
 pub mod streams;
 pub mod util;
 pub mod walk;
-pub mod zst;
+
 
 pub use api::{
     Config, FileInfo, Info, Selection, Writer, check_demo, compress, compress_info, decompress,

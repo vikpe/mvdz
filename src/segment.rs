@@ -3,13 +3,21 @@
 //!
 //! ```text
 //! flags uv | dinfo_off uv | dinfo_len uv | fte uv | fte2 uv | mvd1 uv | tail uv
-//! nstreams uv | nstreams x { id uv, backend uv, count uv, len uv }
-//! stream bodies, concatenated in table order
+//! nstreams uv | nstreams x entry | blob_len uv
+//! bodies of the structural and numeric streams, in table order
+//! blob body: blob_len bytes
+//!
+//! entry := id uv, backend uv, count uv, len uv     structural, numeric
+//!          id uv, count uv                         blob
 //! ```
+//!
+//! The blob streams have no bodies of their own: their bytes, concatenated
+//! in table order, are one raw DEFLATE stream, the blob body. Without blob
+//! streams `blob_len` is 0 and there is no blob body.
 
 use crate::budget::Budget;
 use crate::coder::rans::FileTables;
-use crate::coder::{self, BE_FILE, BE_RANS, BE_STORE, BE_ZSTD, LazyDec, NumDec, rans};
+use crate::coder::{self, BE_DEFLATE, BE_FILE, BE_RANS, BE_STORE, LazyDec, NumDec, rans};
 use crate::error::{Error, Result, bad};
 use crate::format::TABLES_MAX;
 use crate::numeric::{Buf, Group, NCtx, NumIO, WAVE1, WAVE1_PIPE, WAVE2};
@@ -27,42 +35,39 @@ pub const SF_DINFO: u64 = 1;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Level {
     /// Static rANS with per-context tables for structural and numeric
-    /// streams; blobs stored or zstd.
+    /// streams.
     #[default]
     Normal,
-    /// Every stream stored or zstd.
+    /// Structural and numeric streams stored or DEFLATE.
     Fast,
 }
 
-/// zstd level of the normal level's zstd streams, untransformed segments
-/// and META: 19 is 0.05 % smaller than 17 but about 10 % slower to
-/// compress, and no level changes decode speed.
-pub const ZSTD_NORMAL: i32 = 17;
-/// zstd level of the fast level's streams, untransformed segments and
-/// META, so that the fast level is fast both ways: about 15 MB/s to
-/// compress (2.2 at 19, 12.5 at 9) for a file about 5 % larger than at 19
-/// (0.7 % larger than at 9); decode speed is the same.
-pub const ZSTD_FAST: i32 = 6;
-/// zstd level of an attachment's probe: an attachment that does not shrink
-/// by 1/32 at this level is stored without trying `ZSTD_ATTACH` (opus
-/// voice at 19 costs about 0.2 s/MB and is then stored anyway).
-pub const ZSTD_ATTACH_PROBE: i32 = 1;
-/// zstd level of attachments that pass the probe: text such as analysis
-/// JSON is about 4 % smaller at 19 than at 17.
-pub const ZSTD_ATTACH: i32 = 19;
+/// DEFLATE level of the normal level's blob body, DEFLATE streams,
+/// untransformed segments and META.
+pub const DEFLATE_NORMAL: u32 = 9;
+/// DEFLATE level of the fast level's blob body, streams, untransformed
+/// segments and META.
+pub const DEFLATE_FAST: u32 = 6;
+/// DEFLATE level of an attachment's probe: an attachment that does not
+/// shrink by 1/32 at this level is stored without trying `DEFLATE_ATTACH`.
+pub const DEFLATE_ATTACH_PROBE: u32 = 1;
+/// DEFLATE level of attachments that pass the probe.
+pub const DEFLATE_ATTACH: u32 = 9;
 
 impl Level {
-    /// The zstd level of this level's streams, untransformed segments and
-    /// META.
-    pub fn zstd(self) -> i32 {
+    /// The DEFLATE level of this level's blob body, streams, untransformed
+    /// segments and META.
+    pub fn deflate(self) -> u32 {
         match self {
-            Level::Normal => ZSTD_NORMAL,
-            Level::Fast => ZSTD_FAST,
+            Level::Normal => DEFLATE_NORMAL,
+            Level::Fast => DEFLATE_FAST,
         }
     }
 }
 
-/// Per-stream statistics for reporting.
+/// Per-stream statistics for reporting. The blob streams of a segment
+/// share one body: each has `packed` 0, and the body is reported once
+/// under the id [`BLOB_BODY`] with the summed count.
 #[derive(Clone, Debug, Default)]
 pub struct StreamStat {
     pub id: usize,
@@ -350,20 +355,26 @@ pub fn walk(src: &[u8], proto: Proto, dinfo: bool) -> Option<(Walked, Proto)> {
 enum Kind {
     Lazy,
     Num,
-    Blob,
+    /// every blob stream of the segment, as one DEFLATE stream
+    Blobs,
 }
 
-/// Back ends the encoder tries, smallest output wins; if none of them can
-/// code the stream, the fallback list is tried. `file`: the file has a
-/// shared model for the stream.
-fn candidates(level: Level, kind: Kind, file: bool) -> &'static [u8] {
-    match (level, kind) {
-        (Level::Normal, Kind::Lazy | Kind::Num) if file => &[BE_FILE],
-        (Level::Normal, Kind::Lazy | Kind::Num) => &[BE_RANS],
-        // Miri cannot run libzstd (C)
-        _ if cfg!(miri) => &[BE_STORE],
-        _ => &[BE_STORE, BE_ZSTD],
+/// Back ends the encoder tries for a structural or numeric stream,
+/// smallest output wins; if none of them can code the stream, the fallback
+/// list is tried. `file`: the file has a shared model for the stream.
+fn candidates(level: Level, file: bool) -> &'static [u8] {
+    match level {
+        Level::Normal if file => &[BE_FILE],
+        Level::Normal => &[BE_RANS],
+        Level::Fast => &[BE_STORE, BE_DEFLATE],
     }
+}
+
+/// The blob streams of a walked segment, in id order.
+fn blob_ids(wk: &Walked) -> Vec<usize> {
+    (0..N_STREAMS)
+        .filter(|&sid| is_blob(sid) && !wk.io.blobs[sid].is_empty())
+        .collect()
 }
 
 fn pack_one(
@@ -375,11 +386,18 @@ fn pack_one(
     num: &[(NCtx, i32)],
     file: Option<&rans::Shared>,
 ) -> Option<Vec<u8>> {
-    let z = level.zstd();
+    let z = level.deflate();
     match kind {
         Kind::Lazy => coder::encode_lazy(be, &wk.io.syms[sid], &wk.io.ctxs[sid], z, file),
         Kind::Num => coder::encode_num(be, sid, num, z, file),
-        Kind::Blob => coder::encode_blob(be, &wk.io.blobs[sid], z),
+        Kind::Blobs => {
+            let ids = blob_ids(wk);
+            let mut all = Vec::with_capacity(ids.iter().map(|&i| wk.io.blobs[i].len()).sum());
+            for i in ids {
+                all.extend_from_slice(&wk.io.blobs[i]);
+            }
+            Some(crate::deflate::compress(&all, z))
+        }
     }
 }
 
@@ -391,14 +409,11 @@ fn pack_best(
     num: &[(NCtx, i32)],
     file: Option<&rans::Shared>,
 ) -> (u8, Vec<u8>) {
-    for list in [
-        candidates(level, kind, file.is_some()),
-        if cfg!(miri) {
-            &[BE_STORE]
-        } else {
-            &[BE_STORE, BE_ZSTD]
-        },
-    ] {
+    if matches!(kind, Kind::Blobs) {
+        let body = pack_one(kind, BE_DEFLATE, sid, level, wk, num, file);
+        return (BE_DEFLATE, body.expect("the blob body"));
+    }
+    for list in [candidates(level, file.is_some()), &[BE_STORE, BE_DEFLATE]] {
         let mut best: Option<(u8, Vec<u8>)> = None;
         for &be in list {
             if let Some(c) = pack_one(kind, be, sid, level, wk, num, file) {
@@ -526,15 +541,16 @@ pub fn encode(
             }
         }
     }
-    for sid in 0..N_STREAMS {
-        if is_blob(sid) && !wk.io.blobs[sid].is_empty() {
-            jobs.push((sid, Kind::Blob, 0, 0));
-        }
+    // the blob streams: one job, after every stream in id order
+    let blobs = blob_ids(wk);
+    let blob_total: usize = blobs.iter().map(|&sid| wk.io.blobs[sid].len()).sum();
+    if !blobs.is_empty() {
+        jobs.push((BLOB_BODY, Kind::Blobs, 0, 0));
     }
     let size = |j: &(usize, Kind, usize, usize)| match j.1 {
         Kind::Lazy => wk.io.syms[j.0].len(),
         Kind::Num => nums[j.2][j.3].len() * 2,
-        Kind::Blob => wk.io.blobs[j.0].len(),
+        Kind::Blobs => blob_total,
     };
     // biggest first for load balance; output in stream id order
     let mut order: Vec<usize> = (0..jobs.len()).collect();
@@ -553,12 +569,19 @@ pub fn encode(
     for (k, p) in packed_sorted.into_iter().enumerate() {
         packed[order[k]] = Some(p);
     }
-    let mut ids: Vec<usize> = (0..jobs.len()).collect();
+    // table order: stream id; the blob streams follow (their ids are the
+    // highest), each with its own entry but one shared body
+    let blob_job = jobs.iter().position(|j| matches!(j.1, Kind::Blobs));
+    let mut ids: Vec<usize> = (0..jobs.len()).filter(|&i| Some(i) != blob_job).collect();
     ids.sort_by_key(|&i| jobs[i].0);
     let count = |i: usize| match jobs[i].1 {
         Kind::Lazy => wk.io.syms[jobs[i].0].len(),
         Kind::Num => nums[jobs[i].2][jobs[i].3].len(),
-        Kind::Blob => wk.io.blobs[jobs[i].0].len(),
+        Kind::Blobs => blob_total,
+    };
+    let blob_body: &[u8] = match blob_job {
+        Some(i) => &packed[i].as_ref().expect("packed").1,
+        None => &[],
     };
     // the flag only when the segment has demoinfo blocks: without any,
     // the walk is the same either way and needs no metadata
@@ -571,7 +594,7 @@ pub fn encode(
     put_uv(&mut out, wk.proto0.fte2 as u64);
     put_uv(&mut out, wk.proto0.mvd1 as u64);
     put_uv(&mut out, wk.tail as u64);
-    put_uv(&mut out, ids.len() as u64);
+    put_uv(&mut out, (ids.len() + blobs.len()) as u64);
     for &i in &ids {
         let (be, body) = packed[i].as_ref().expect("packed");
         put_uv(&mut out, jobs[i].0 as u64);
@@ -585,9 +608,29 @@ pub fn encode(
             packed: body.len(),
         });
     }
+    for &sid in &blobs {
+        put_uv(&mut out, sid as u64);
+        put_uv(&mut out, wk.io.blobs[sid].len() as u64);
+        stats.push(StreamStat {
+            id: sid,
+            be: BE_DEFLATE,
+            count: wk.io.blobs[sid].len(),
+            packed: 0,
+        });
+    }
+    put_uv(&mut out, blob_body.len() as u64);
+    if blob_job.is_some() {
+        stats.push(StreamStat {
+            id: BLOB_BODY,
+            be: BE_DEFLATE,
+            count: blob_total,
+            packed: blob_body.len(),
+        });
+    }
     for &i in &ids {
         out.extend_from_slice(&packed[i].as_ref().expect("packed").1);
     }
+    out.extend_from_slice(blob_body);
     out
 }
 
@@ -630,7 +673,10 @@ pub struct Header {
     pub dinfo_len: u64,
     proto: Proto,
     tail: usize,
+    /// (id, back end, count, body length); a blob stream: back end 1, 0
     ents: Vec<(usize, u8, usize, usize)>,
+    /// length of the blob body, after the stream bodies
+    blob_len: usize,
     body_off: usize,
 }
 
@@ -663,21 +709,24 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
     let mut ents = Vec::with_capacity(n);
     let mut seen = [false; N_STREAMS];
     let mut total = 0usize;
+    let mut blob_total = 0usize;
     for _ in 0..n {
         let id = r.uz().ok_or(te)?;
-        let be = r.uv().ok_or(te)?;
-        let count = r.uz().ok_or(te)?;
-        let len = r.uz().ok_or(te)?;
         if id >= N_STREAMS || !(is_lazy(id) || is_num(id) || is_blob(id)) {
             return bad("stream id");
         }
-        let ok_be = if is_blob(id) {
-            be == BE_STORE as u64 || be == BE_ZSTD as u64
+        // a blob stream has no back end and no body of its own
+        let (be, count, len) = if is_blob(id) {
+            (BE_DEFLATE as u64, r.uz().ok_or(te)?, 0)
         } else {
-            be <= BE_FILE as u64
+            let be = r.uv().ok_or(te)?;
+            (be, r.uz().ok_or(te)?, r.uz().ok_or(te)?)
         };
-        if !ok_be {
+        if be > BE_FILE as u64 {
             return bad("stream back end");
+        }
+        if is_blob(id) {
+            blob_total = blob_total.checked_add(count).ok_or(te)?;
         }
         if seen[id] {
             return bad("duplicate stream");
@@ -690,6 +739,13 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         total = total.checked_add(len).ok_or(te)?;
         ents.push((id, be as u8, count, len));
     }
+    let blob_len = r.uz().ok_or(te)?;
+    // the blob streams decode to at most the segment; a blob body exactly
+    // when there are blob bytes
+    if blob_total > raw_len.saturating_add(16) || (blob_total == 0) != (blob_len == 0) {
+        return bad("blob body");
+    }
+    total = total.checked_add(blob_len).ok_or(te)?;
     if total != body.len() - r.i {
         return bad("stream bodies");
     }
@@ -700,6 +756,7 @@ pub fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         proto: Proto::new(fte, fte2, mvd1),
         tail,
         ents,
+        blob_len,
         body_off: r.i,
     })
 }
@@ -730,8 +787,9 @@ pub fn decode(
     for &(_, _, _, len) in &h.ents {
         bodies.push(r.take(len).ok_or(Error::Corrupt("stream body"))?);
     }
+    let blob_body = r.take(h.blob_len).ok_or(Error::Corrupt("stream body"))?;
     let cnt = |sid: usize| h.ents.iter().find(|e| e.0 == sid).map_or(0, |e| e.2);
-    // scratch: decoded blobs and stored/zstd streams, the record lists
+    // scratch: the decoded blobs and stored/DEFLATE streams, the record lists
     let recs_bytes = 12 * cnt(PI_NUM)
         + 16 * cnt(PE_BITS)
         + 20 * cnt(SND_NUM)
@@ -740,25 +798,30 @@ pub fn decode(
         + 8 * (cnt(UC) / UC_MIN_SYMS);
     let mut scratch = recs_bytes as u64;
     for &(id, be, count, _) in &h.ents {
-        scratch += if is_blob(id) && be == BE_ZSTD {
+        scratch += if is_blob(id) {
             count as u64
         } else {
             coder::scratch(be, is_num(id), count)
         };
     }
     let _charge = budget.alloc(scratch)?;
-    // blob streams first (in parallel)
-    let blob_ix: Vec<usize> = (0..n).filter(|&i| is_blob(h.ents[i].0)).collect();
-    let blobs = par_map(threads, blob_ix.len(), |j| {
-        let i = blob_ix[j];
-        let (_, be, count, _) = h.ents[i];
-        coder::decode_blob(be, bodies[i], count)
-    });
+    // the blob streams first: one DEFLATE stream, cut by their counts
+    let blob_total: usize = (0..n)
+        .filter(|&i| is_blob(h.ents[i].0))
+        .map(|i| h.ents[i].2)
+        .sum();
+    let blob_bytes = if blob_total > 0 {
+        crate::deflate::decompress(blob_body, blob_total)?
+    } else {
+        Vec::new()
+    };
     let mut blob_bufs: Vec<(Cow<[u8]>, usize)> = (0..N_STREAMS)
         .map(|_| (Cow::Borrowed(&[][..]), 0))
         .collect();
-    for (j, b) in blobs.into_iter().enumerate() {
-        blob_bufs[h.ents[blob_ix[j]].0].0 = b?;
+    let mut at = 0;
+    for &(id, _, count, _) in h.ents.iter().filter(|e| is_blob(e.0)) {
+        blob_bufs[id].0 = Cow::Borrowed(&blob_bytes[at..at + count]);
+        at += count;
     }
     blob_bufs[DINFO].0 = Cow::Borrowed(dinfo);
     let mut num_ents: Vec<StreamEnt> = vec![None; N_STREAMS];
@@ -939,13 +1002,7 @@ mod tests {
     #[test]
     fn segment_round_trip() {
         let src = demo();
-        // Miri cannot run libzstd (C): the normal level only
-        let levels: &[Level] = if cfg!(miri) {
-            &[Level::Normal]
-        } else {
-            &[Level::Normal, Level::Fast]
-        };
-        for &level in levels {
+        for level in [Level::Normal, Level::Fast] {
             for threads in [1, 3] {
                 let (wk, _) = walk(&src, Proto::default(), true).unwrap();
                 let mut st = Vec::new();
@@ -995,12 +1052,7 @@ mod tests {
             src.extend_from_slice(&p);
         }
         src.extend(demo());
-        let levels: &[Level] = if cfg!(miri) {
-            &[Level::Normal]
-        } else {
-            &[Level::Normal, Level::Fast]
-        };
-        for &level in levels {
+        for level in [Level::Normal, Level::Fast] {
             for threads in [1, 3] {
                 let (wk, _) = walk(&src, Proto::default(), true).unwrap();
                 let body = encode(&src, &wk, level, 0, 1, &mut Vec::new(), &[]);

@@ -70,6 +70,9 @@ pub const NAILS: usize = 85;
 pub const HIDMISC: usize = 86;
 pub const SNDF: usize = 87;
 pub const TEF: usize = 88;
+/// Not a stored stream: the id under which the blob body of a segment (the
+/// DEFLATE stream of all its blob streams) is reported in statistics.
+pub const BLOB_BODY: usize = 78;
 /// Not a stored stream: the segment's share of the metadata's demoinfo
 /// store, `u32le len | len bytes` per KTX demoinfo block.
 pub const DINFO: usize = 79;
@@ -140,6 +143,8 @@ pub fn name(id: usize) -> String {
         NUM[id - NUM_BASE].into()
     } else if (RAW..=TEF).contains(&id) {
         BLOB[id - RAW].into()
+    } else if id == BLOB_BODY {
+        "blob".into()
     } else if (GEN_BASE..N_STREAMS).contains(&id) {
         format!("gen.{}", id - GEN_BASE)
     } else {
