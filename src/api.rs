@@ -147,40 +147,6 @@ pub fn read_info_with<R: Read + Seek>(r: R, limits: &Limits) -> Result<FileInfo>
     })
 }
 
-#[derive(serde::Serialize)]
-struct JSeg {
-    t_start_ms: u64,
-    raw_offset: u64,
-    raw_len: u64,
-}
-
-#[derive(serde::Serialize)]
-struct JInfo {
-    version: u32,
-    file_size: u64,
-    size: u64,
-    duration_ms: u64,
-    crc32c: String,
-    sha256: String,
-    segments: Vec<JSeg>,
-}
-
-/// A `Write` that refuses to grow past a limit.
-struct Capped(Vec<u8>, usize);
-
-impl Write for Capped {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        if self.0.len() + b.len() > self.1 {
-            return Err(std::io::Error::other("limit"));
-        }
-        self.0.extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 impl FileInfo {
     /// JSON rendering (see [`FileInfo::to_json_with`]), without a size
     /// limit.
@@ -189,31 +155,42 @@ impl FileInfo {
     }
 
     /// JSON rendering, refused with a limit error once it would exceed
-    /// `max` bytes.
+    /// `max` bytes: one object with `version`, `file_size`, `size`,
+    /// `duration_ms`, `crc32c` and `sha256` (hexadecimal strings) and
+    /// `segments`, a list of `{t_start_ms, raw_offset, raw_len}`.
     pub fn to_json_with(&self, max: usize) -> Result<String> {
+        use std::fmt::Write as _;
+        let over = Error::Limit("file information rendering");
         let h = &self.header;
-        let j = JInfo {
-            version: VERSION,
-            file_size: self.file_size,
-            size: h.size,
-            duration_ms: h.duration_ms,
-            crc32c: format!("{:08x}", h.crc),
-            sha256: hex(&h.sha256),
-            segments: self
-                .index
-                .segs
-                .iter()
-                .map(|s| JSeg {
-                    t_start_ms: s.t_start,
-                    raw_offset: s.raw_off,
-                    raw_len: s.raw_len,
-                })
-                .collect(),
-        };
-        let mut w = Capped(Vec::new(), max);
-        serde_json::to_writer(&mut w, &j).map_err(|_| Error::Limit("file information rendering"))?;
-        // serde_json writes UTF-8
-        Ok(String::from_utf8(w.0).expect("JSON is UTF-8"))
+        // numbers and hexadecimal strings only: nothing needs escaping
+        let mut s = String::new();
+        let _ = write!(
+            s,
+            "{{\"version\":{VERSION},\"file_size\":{},\"size\":{},\"duration_ms\":{},\"crc32c\":\"{:08x}\",\"sha256\":\"{}\",\"segments\":[",
+            self.file_size,
+            h.size,
+            h.duration_ms,
+            h.crc,
+            hex(&h.sha256)
+        );
+        for (i, g) in self.index.segs.iter().enumerate() {
+            if s.len() > max {
+                return Err(over);
+            }
+            let _ = write!(
+                s,
+                "{}{{\"t_start_ms\":{},\"raw_offset\":{},\"raw_len\":{}}}",
+                if i > 0 { "," } else { "" },
+                g.t_start,
+                g.raw_off,
+                g.raw_len
+            );
+        }
+        s.push_str("]}");
+        if s.len() > max {
+            return Err(over);
+        }
+        Ok(s)
     }
 }
 
