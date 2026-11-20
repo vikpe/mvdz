@@ -1,7 +1,7 @@
 //! The library interface.
 
 use crate::budget::{Budget, Limits, ReadOptions};
-use crate::decode::{SeekSrc, SliceSrc, scan_layout};
+use crate::decode::{SeekSrc, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
 use crate::stream::{Reader, Seq, StreamEncoder};

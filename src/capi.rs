@@ -684,6 +684,15 @@ pub unsafe extern "C" fn mvdz_info_json_memory(
     })
 }
 
+/// A UTF-8 C string (None: NULL or not UTF-8).
+unsafe fn cstr(p: *const c_char) -> Option<String> {
+    if p.is_null() {
+        None
+    } else {
+        unsafe { CStr::from_ptr(p) }.to_str().ok().map(String::from)
+    }
+}
+
 // ---------------------------------------------------------------- streaming writer
 
 pub struct WCb {

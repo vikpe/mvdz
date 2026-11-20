@@ -30,11 +30,6 @@ fn key(i: usize, w: usize) -> String {
         .collect()
 }
 
-fn sha(b: &[u8]) -> [u8; 32] {
-    use sha2::Digest;
-    sha2::Sha256::digest(b).into()
-}
-
 fn meta_fields(body: &[u8]) -> Vec<u8> {
     let mut r = mvdz::util::Rd::new(body);
     let (_, codec, n, _) = (
@@ -425,43 +420,6 @@ fn trusted_mode() {
     bad[i - 100] ^= 0x40;
     assert!(mvdz::decompress_with(&bad, 1, &t).is_err());
     assert!(!ok.is_empty());
-}
-
-unsafe extern "C" fn w_vec(
-    user: *mut std::ffi::c_void,
-    buf: *const std::ffi::c_void,
-    n: usize,
-) -> std::ffi::c_longlong {
-    let v = unsafe { &mut *(user as *mut Vec<u8>) };
-    v.extend_from_slice(unsafe { std::slice::from_raw_parts(buf as *const u8, n) });
-    n as i64
-}
-
-unsafe extern "C" fn r_cur(
-    user: *mut std::ffi::c_void,
-    buf: *mut std::ffi::c_void,
-    n: usize,
-) -> std::ffi::c_longlong {
-    let c = unsafe { &mut *(user as *mut Cursor<Vec<u8>>) };
-    std::io::Read::read(c, unsafe {
-        std::slice::from_raw_parts_mut(buf as *mut u8, n)
-    })
-    .map_or(-1, |k| k as i64)
-}
-
-unsafe extern "C" fn s_cur(
-    user: *mut std::ffi::c_void,
-    off: std::ffi::c_longlong,
-    wh: std::ffi::c_int,
-) -> std::ffi::c_longlong {
-    use std::io::{Seek, SeekFrom};
-    let c = unsafe { &mut *(user as *mut Cursor<Vec<u8>>) };
-    let p = match wh {
-        0 => SeekFrom::Start(off as u64),
-        1 => SeekFrom::Current(off),
-        _ => SeekFrom::End(off),
-    };
-    c.seek(p).map_or(-1, |v| v as i64)
 }
 
 /// C decode calls refuse flag bits they do not define.

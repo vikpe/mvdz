@@ -234,10 +234,6 @@ fn try_write_output(p: &str, data: &[u8], gzip: bool) -> Result<(), String> {
     }
 }
 
-fn write_output(p: &str, data: &[u8], gzip: bool) {
-    try_write_output(p, data, gzip).unwrap_or_else(|e| die(format!("{p}: {e}")))
-}
-
 /// Whether `name` ends with the ASCII suffix `suf`, ignoring case.
 fn has_suffix(name: &str, suf: &str) -> bool {
     name.len() >= suf.len()

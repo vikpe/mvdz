@@ -12,7 +12,6 @@
 use crate::budget::{Budget, Charge};
 use crate::error::{Error, Result, bad};
 use crate::util::{Rd, crc32, put_uv, usz};
-use sha2::{Digest, Sha256};
 
 pub const MAGIC: &[u8; 4] = b"MVDZ";
 pub const VERSION: u8 = 1;
