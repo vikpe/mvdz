@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::numeric::NCtx;
 use crate::streams::*;
 use crate::util::{Rd, put_uv};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 pub const SCALE: u32 = 12;
 const T: u32 = 1 << SCALE;
@@ -428,9 +428,8 @@ fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
 type Header = (Vec<u32>, Vec<u8>, Charge);
 
 /// Reads a model header (FORMAT.md, "Model header"). `alpha` is the
-/// alphabet the stream kind requires. Without `keep` the header is only
-/// checked: its tables are not kept.
-fn read_header(b: &[u8], alpha_req: usize, keep: bool, budget: &Budget) -> Result<Header> {
+/// alphabet the stream kind requires.
+fn read_header(b: &[u8], alpha_req: usize, budget: &Budget) -> Result<Header> {
     let bad = Error::Corrupt("model");
     let max_dec = (b.len() as u64)
         .saturating_mul(DEC_PER_BYTE)
@@ -443,10 +442,9 @@ fn read_header(b: &[u8], alpha_req: usize, keep: bool, budget: &Budget) -> Resul
         return Err(bad);
     }
     // the log-quantised tables (u8: q <= 160) until the layout is known
-    let kn = if keep { n } else { 0 };
-    let _c = budget.alloc(((kn + 1) * alpha + 4 * (kn + 1)) as u64)?;
-    let mut qs: Vec<u8> = with_capacity((kn + 1) * alpha)?;
-    let mut keys: Vec<u32> = with_capacity(kn)?;
+    let _c = budget.alloc(((n + 1) * alpha + 4 * (n + 1)) as u64)?;
+    let mut qs: Vec<u8> = with_capacity((n + 1) * alpha)?;
+    let mut keys: Vec<u32> = with_capacity(n)?;
     let fbq = read_table(&mut d, &mut im, alpha, None);
     qs.extend(fbq.iter().map(|&q| q as u8));
     let mut k = 0u32;
@@ -463,10 +461,8 @@ fn read_header(b: &[u8], alpha_req: usize, keep: bool, budget: &Budget) -> Resul
             return Err(bad);
         }
         let t = read_table(&mut d, &mut im, alpha, Some(&fbq));
-        if keep {
-            keys.push(k);
-            qs.extend(t.iter().map(|&q| q as u8));
-        }
+        keys.push(k);
+        qs.extend(t.iter().map(|&q| q as u8));
         if d.overrun() {
             return Err(bad);
         }
@@ -482,7 +478,7 @@ fn read_header(b: &[u8], alpha_req: usize, keep: bool, budget: &Budget) -> Resul
 
 /// Reads a model header and builds its decoder model.
 pub(crate) fn read_model(b: &[u8], alpha: usize, budget: &Budget) -> Result<DModel> {
-    let (keys, qs, _c) = read_header(b, alpha, true, budget)?;
+    let (keys, qs, _c) = read_header(b, alpha, budget)?;
     // a symbol is present (frequency >= 1) exactly when its q is non-zero
     // (`normalize`), so the layout is known before any table is built;
     // the tables are then built one at a time
@@ -791,47 +787,36 @@ pub struct Shared {
 /// The decoder models of a file, by stream id.
 pub(crate) type Models = Vec<Option<Arc<DModel>>>;
 
-/// A TABLES section (FORMAT.md §2.6): its grammar is checked when the
-/// section is read, its models are built for the first segment that uses
-/// them.
+/// The models of a file (FORMAT.md §2.6): the models block is read once,
+/// when the file is opened; that checks it and builds its models.
 pub struct FileTables {
-    body: Vec<u8>,
-    models: OnceLock<Result<Models>>,
+    len: u64,
+    models: Models,
 }
 
 impl FileTables {
-    /// Checks a TABLES body without building its models.
-    pub(crate) fn new(body: Vec<u8>, budget: &Budget) -> Result<FileTables> {
-        read_tables(&body, false, budget)?;
+    /// Reads a models block's body: checks it and builds its models
+    /// (charged to `budget`).
+    pub(crate) fn new(body: &[u8], budget: &Budget) -> Result<FileTables> {
         Ok(FileTables {
-            body,
-            models: OnceLock::new(),
+            len: body.len() as u64,
+            models: read_tables(body, budget)?,
         })
     }
 
+    /// The length of the body the models were read from.
     pub(crate) fn len(&self) -> u64 {
-        self.body.len() as u64
+        self.len
     }
 
-    /// The models, built once by one thread (charged to `budget`; other
-    /// threads wait), so a decode near a memory limit passes or fails the
-    /// same way every time. The result is kept, an error too: a reader
-    /// whose model build failed must be reopened to try again.
-    pub(crate) fn models(&self, budget: &Budget) -> Result<&Models> {
-        match self
-            .models
-            .get_or_init(|| read_tables(&self.body, true, budget))
-        {
-            Ok(m) => Ok(m),
-            Err(e) => Err(*e),
-        }
+    pub(crate) fn models(&self) -> &Models {
+        &self.models
     }
 }
 
 /// Reads `n uv | n x { sid uv | len uv | model }`: ids strictly increasing,
-/// each model a structural or numeric stream's (§8.3, M1 without a count);
-/// builds the models when `build`.
-fn read_tables(b: &[u8], build: bool, budget: &Budget) -> Result<Models> {
+/// each model a structural or numeric stream's (§8.3, M1 without a count).
+fn read_tables(b: &[u8], budget: &Budget) -> Result<Models> {
     let e = Error::Corrupt("tables");
     let mut r = Rd::new(b);
     let n = r.uz().ok_or(e)?;
@@ -853,11 +838,7 @@ fn read_tables(b: &[u8], build: bool, budget: &Budget) -> Result<Models> {
             return Err(e);
         };
         let hdr = r.bytes().ok_or(e)?;
-        if build {
-            m[sid] = Some(Arc::new(read_model(hdr, alpha, budget)?));
-        } else {
-            read_header(hdr, alpha, false, budget)?;
-        }
+        m[sid] = Some(Arc::new(read_model(hdr, alpha, budget)?));
         prev = Some(sid);
     }
     if !r.done() {

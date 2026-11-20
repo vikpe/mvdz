@@ -268,10 +268,9 @@ fn wide_model(n: u32) -> Vec<u8> {
     e.finish()
 }
 
-/// A large, legal models block: reading the file information checks its
-/// grammar only (quickly, without building models: a 32 MiB budget is
-/// enough), while a decode builds its models under the reader's budget,
-/// which refuses them.
+/// A large, legal models block: its models are built when the file is
+/// opened, under the reader's budget, which refuses them, for the file
+/// information as for a decode. With room for them the file opens, quickly.
 #[test]
 fn large_tables() {
     let demo = usercmd_demo();
@@ -292,22 +291,20 @@ fn large_tables() {
     }
     p.models = t;
     let b = p.build();
-    let small = mvdz::Limits {
-        memory: 32 << 20,
-        ..Default::default()
-    };
-    let t0 = Instant::now();
-    mvdz::read_info_with(Cursor::new(&b), &small).unwrap();
-    assert!(
-        t0.elapsed().as_secs_f64() < 10.0,
-        "the models checks took {:?}",
-        t0.elapsed()
-    );
     // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
     let lim = mvdz::Limits {
         memory: 128 << 20,
         ..Default::default()
     };
+    let e = mvdz::read_info_with(Cursor::new(&b), &lim).err();
+    assert_eq!(e, Some(Error::Limit("memory")));
     let e = mvdz::decompress_with(&b, 1, &lim.into()).unwrap_err();
     assert_eq!(e, Error::Limit("memory"));
+    let t0 = Instant::now();
+    mvdz::read_info_with(Cursor::new(&b), &mvdz::Limits::default()).unwrap();
+    assert!(
+        t0.elapsed().as_secs_f64() < 10.0,
+        "reading the models took {:?}",
+        t0.elapsed()
+    );
 }

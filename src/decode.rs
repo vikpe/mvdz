@@ -106,7 +106,7 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
     }
     if mlen > 0 {
         let (b, _c) = read_vec(src, off, mlen, budget)?;
-        lay.models(Some(FileTables::new(b, budget)?))?;
+        lay.models(Some(FileTables::new(&b, budget)?))?;
     } else {
         lay.models(None)?;
     }

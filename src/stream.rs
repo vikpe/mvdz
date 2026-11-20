@@ -264,7 +264,7 @@ impl<S: Source> Reader<S> {
                 }
                 let t = if len > 0 {
                     let (b, _c) = self.read_body(len)?;
-                    Some(FileTables::new(b, &self.budget)?)
+                    Some(FileTables::new(&b, &self.budget)?)
                 } else {
                     None
                 };

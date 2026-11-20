@@ -704,9 +704,9 @@ pub fn decode(
     budget: &Budget,
 ) -> Result<()> {
     let n = h.ents.len();
-    // the file's models, built for the first segment that uses them
+    // the file's models
     let fm = match tables {
-        Some(t) if h.ents.iter().any(|e| e.1 == BE_RANS) => Some(t.models(budget)?),
+        Some(t) if h.ents.iter().any(|e| e.1 == BE_RANS) => Some(t.models()),
         _ => None,
     };
     let mut bodies: Vec<&[u8]> = Vec::with_capacity(n);
@@ -1019,7 +1019,7 @@ mod tests {
                 .filter(|&s| s != big)
                 .collect::<Vec<_>>()
         );
-        let ft = FileTables::new(tables_body(&models, &kept), &Budget::unlimited()).unwrap();
+        let ft = FileTables::new(&tables_body(&models, &kept), &Budget::unlimited()).unwrap();
         let mut st = Vec::new();
         let body = encode(&src, &wk, 1, &mut st, &models);
         let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;
