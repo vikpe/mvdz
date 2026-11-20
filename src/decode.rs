@@ -84,8 +84,9 @@ fn len_at(src: &mut impl Src, off: u64, len: u64) -> Result<Option<u64>> {
 
 /// Reads and checks the whole structure of a complete file: the header,
 /// the models and the header of every segment (FORMAT.md, "Validation").
-/// Segment payloads are not decoded.
-pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
+/// Segment payloads are not decoded. The models are built on up to
+/// `threads` threads.
+pub fn scan_layout(src: &mut impl Src, threads: usize, budget: &Budget) -> Result<Layout> {
     let len = src.len()?;
     let mut h = [0u8; HEADER_LEN];
     let n = len.min(HEADER_LEN as u64) as usize;
@@ -105,7 +106,7 @@ pub fn scan_layout(src: &mut impl Src, budget: &Budget) -> Result<Layout> {
     }
     if mlen > 0 {
         let (b, _c) = read_vec(src, off, mlen, budget)?;
-        lay.models(Some(FileTables::new(&b, budget)?))?;
+        lay.models(Some(FileTables::new(&b, threads, budget)?))?;
     } else {
         lay.models(None)?;
     }
@@ -217,13 +218,13 @@ impl DemoCheck {
 pub fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
     let budget = Budget::new(limits);
     budget.input(b.len() as u64);
-    let lay = scan_layout(&mut SliceSrc(b), &budget)?;
+    let threads = threads.max(1);
+    let lay = scan_layout(&mut SliceSrc(b), threads, &budget)?;
     let size = lay.header.size;
     let _c = budget.alloc(size)?;
     budget.work(size)?;
     let mut out = zeroed(usz(size).ok_or(Error::Limit("demo size"))?)?;
     let nseg = lay.segs.len();
-    let threads = threads.max(1);
     let (outer, inner) = if nseg >= threads {
         (threads, 1)
     } else {

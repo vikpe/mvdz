@@ -19,7 +19,7 @@ use crate::budget::{Budget, Charge, with_capacity};
 use crate::error::{Error, Result};
 use crate::numeric::NCtx;
 use crate::streams::*;
-use crate::util::{Rd, put_uv};
+use crate::util::{Rd, par_map, put_uv};
 use std::sync::Arc;
 
 pub const SCALE: u32 = 12;
@@ -796,11 +796,11 @@ pub struct FileTables {
 
 impl FileTables {
     /// Reads a models block's body: checks it and builds its models
-    /// (charged to `budget`).
-    pub(crate) fn new(body: &[u8], budget: &Budget) -> Result<FileTables> {
+    /// (charged to `budget`) on up to `threads` threads.
+    pub(crate) fn new(body: &[u8], threads: usize, budget: &Budget) -> Result<FileTables> {
         Ok(FileTables {
             len: body.len() as u64,
-            models: read_tables(body, budget)?,
+            models: read_tables(body, threads, budget)?,
         })
     }
 
@@ -816,18 +816,19 @@ impl FileTables {
 
 /// Reads `n uv | n x { sid uv | len uv | model }`: ids strictly increasing,
 /// each model a structural or numeric stream's (§8.3, M1 without a count).
-fn read_tables(b: &[u8], budget: &Budget) -> Result<Models> {
+/// The models do not depend on each other: they are built in parallel.
+fn read_tables(b: &[u8], threads: usize, budget: &Budget) -> Result<Models> {
     let e = Error::Corrupt("tables");
     let mut r = Rd::new(b);
     let n = r.uz().ok_or(e)?;
     if n == 0 {
         return Err(e);
     }
-    let mut m: Models = vec![None; N_STREAMS];
-    let mut prev: Option<usize> = None;
+    // (stream id, alphabet, model header)
+    let mut ents: Vec<(usize, usize, &[u8])> = Vec::new();
     for _ in 0..n {
         let sid = r.uz().ok_or(e)?;
-        if prev.is_some_and(|p| sid <= p) {
+        if ents.last().is_some_and(|p| sid <= p.0) {
             return Err(e);
         }
         let alpha = if is_lazy(sid) {
@@ -837,12 +838,17 @@ fn read_tables(b: &[u8], budget: &Budget) -> Result<Models> {
         } else {
             return Err(e);
         };
-        let hdr = r.bytes().ok_or(e)?;
-        m[sid] = Some(Arc::new(read_model(hdr, alpha, budget)?));
-        prev = Some(sid);
+        ents.push((sid, alpha, r.bytes().ok_or(e)?));
     }
     if !r.done() {
         return Err(e);
+    }
+    let built = par_map(threads, ents.len(), |i| {
+        read_model(ents[i].2, ents[i].1, budget)
+    });
+    let mut m: Models = vec![None; N_STREAMS];
+    for (ent, model) in ents.iter().zip(built) {
+        m[ent.0] = Some(Arc::new(model?));
     }
     Ok(m)
 }

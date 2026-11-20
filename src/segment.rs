@@ -1019,7 +1019,7 @@ mod tests {
                 .filter(|&s| s != big)
                 .collect::<Vec<_>>()
         );
-        let ft = FileTables::new(&tables_body(&models, &kept), &Budget::unlimited()).unwrap();
+        let ft = FileTables::new(&tables_body(&models, &kept), 1, &Budget::unlimited()).unwrap();
         let mut st = Vec::new();
         let body = encode(&src, &wk, 1, &mut st, &models);
         let be = |sid: usize| st.iter().find(|s| s.id == sid).unwrap().be;

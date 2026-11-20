@@ -310,7 +310,7 @@ pub fn failing_segments(
         }
     }
     let budget = Budget::unlimited();
-    let lay = scan_layout(&mut SliceSrc(file), &budget).ok()?;
+    let lay = scan_layout(&mut SliceSrc(file), threads, &budget).ok()?;
     if lay.segs.len() != cuts.len() - 1 {
         return None;
     }

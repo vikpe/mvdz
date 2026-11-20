@@ -139,7 +139,7 @@ pub fn read_info_with<R: Read + Seek>(r: R, limits: &Limits) -> Result<FileInfo>
     let mut src = SeekSrc(r);
     let len = crate::decode::Src::len(&mut src)?;
     budget.input(len);
-    let lay = scan_layout(&mut src, &budget)?;
+    let lay = scan_layout(&mut src, 1, &budget)?;
     Ok(FileInfo {
         header: lay.header,
         index: lay.index(),

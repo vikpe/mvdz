@@ -124,7 +124,7 @@ impl<R: Read + Seek> Reader<Seekable<R>> {
         let mut src = SeekSrc(r);
         let len = crate::decode::Src::len(&mut src)?;
         budget.input(len);
-        let lay = scan_layout(&mut src, &budget)?;
+        let lay = scan_layout(&mut src, threads.max(1), &budget)?;
         let check = Some(DemoCheck::default());
         Ok(Reader {
             r: Seekable(src.0),
@@ -264,7 +264,7 @@ impl<S: Source> Reader<S> {
                 }
                 let t = if len > 0 {
                     let (b, _c) = self.read_body(len)?;
-                    Some(FileTables::new(&b, &self.budget)?)
+                    Some(FileTables::new(&b, self.threads, &self.budget)?)
                 } else {
                     None
                 };
