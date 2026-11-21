@@ -8,7 +8,8 @@ use crate::coder::rans::FileTables;
 use crate::decode::{DemoCheck, decode_segment};
 use crate::error::{Error, Result, bad};
 use crate::format::{
-    HEADER_LEN, Header, LEN, Layout, SEG_FIELDS, Sec, SegHdr, TABLES_MAX, len_field, parse_seg_hdr,
+    HEADER_LEN, Header, LEN, Layout, SEG_FIELDS, Sec, SegHdr, TABLES_MAX, check_coded_len,
+    len_field, parse_seg_hdr,
 };
 use std::io::{self, Read};
 
@@ -173,6 +174,7 @@ impl<R: Read> Reader<R> {
             let Some(coded) = self.read_len()? else {
                 return bad("incomplete file");
             };
+            check_coded_len(coded)?;
             let s = Sec {
                 off: self.pos,
                 len: coded + SEG_FIELDS as u64,

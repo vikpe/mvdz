@@ -6,8 +6,8 @@ use crate::coder::rans::Shared;
 use crate::decode::{DemoCheck, SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::{
-    C_DEFLATE, C_TRANSFORM, Header, MAX_SEGMENTS, models_block, seg_hdr_bytes, seg_ratio_ok,
-    segment_block,
+    C_DEFLATE, C_TRANSFORM, Header, MAX_SEG_CODED, MAX_SEGMENTS, SEG_FIELDS, models_block,
+    seg_hdr_bytes, segment_block,
 };
 use crate::proto::{Proto, frame_len};
 use crate::segment::{
@@ -141,21 +141,18 @@ fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize
 }
 
 /// The body of a segment coded without the transform: the whole segment
-/// as one raw DEFLATE stream. If the best compression breaks the ratio
-/// limit, the stream is written as stored blocks instead.
+/// as one raw DEFLATE stream. DEFLATE grows data it cannot compress by a
+/// fraction of a percent, so the largest segment stays far below the
+/// largest coded length.
 pub(crate) fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
     let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s), C_DEFLATE);
-    let mut z = crate::deflate::compress(s, DEFLATE_LEVEL);
-    if !seg_ratio_ok(s.len() as u64, (b.len() + z.len()) as u64) {
-        z = crate::deflate::compress(s, 0);
-    }
-    b.extend_from_slice(&z);
+    b.extend_from_slice(&crate::deflate::compress(s, DEFLATE_LEVEL));
     b
 }
 
 /// The body of a walked segment with numeric values `nums`, or None if one
-/// of its streams has no model in `shared` (the file's models) or it breaks
-/// the ratio limit.
+/// of its streams has no model in `shared` (the file's models) or it is
+/// longer than a coded segment may be.
 pub(crate) fn transform_body(
     s: &[u8],
     wk: &Walked,
@@ -167,7 +164,7 @@ pub(crate) fn transform_body(
 ) -> Option<Vec<u8>> {
     let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s), C_TRANSFORM);
     b.extend_from_slice(&segment::encode(wk, nums, threads, st, shared)?);
-    seg_ratio_ok(s.len() as u64, b.len() as u64).then_some(b)
+    ((b.len() - SEG_FIELDS) as u64 <= MAX_SEG_CODED).then_some(b)
 }
 
 /// Compresses a demo into segments of [`SEGMENT`] raw bytes.

@@ -6,7 +6,7 @@ use crate::coder::rans::FileTables;
 use crate::error::{Error, Result, bad};
 use crate::format::{
     C_DEFLATE, C_TRANSFORM, HEADER_LEN, LEN, Layout, MAX_SEG_RAW, SEG_FIELDS, Sec, SegHdr,
-    TABLES_MAX, len_field, parse_seg_hdr,
+    TABLES_MAX, check_coded_len, len_field, parse_seg_hdr,
 };
 use crate::segment::{self, frame_scan};
 use crate::util::{Crc, crc32, par_map, usz};
@@ -121,6 +121,7 @@ pub(crate) fn scan_layout(src: &mut impl Src, threads: usize, budget: &Budget) -
         let Some(coded) = len_at(src, off, len)? else {
             return bad("incomplete file");
         };
+        check_coded_len(coded)?;
         let s = Sec {
             off,
             len: coded + SEG_FIELDS as u64,

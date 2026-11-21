@@ -39,24 +39,22 @@ pub const C_DEFLATE: u8 = 1;
 /// segment. The encoder cuts at a frame boundary well below it and at
 /// this length only where no boundary comes first.
 pub const MAX_SEG_RAW: u64 = 1 << 20;
-/// A segment decodes to at most `SEG_RATIO * len + SEG_SLACK` bytes.
-pub(crate) const SEG_RATIO: u64 = 1024;
-pub(crate) const SEG_SLACK: u64 = 4096;
+/// Largest coded length of one segment (its `len` field): what a reader
+/// holds at most of a segment's coded data. Twice the largest raw length:
+/// no segment the encoder writes comes near it.
+pub const MAX_SEG_CODED: u64 = 2 << 20;
 /// Largest models block.
 pub(crate) const TABLES_MAX: u64 = 1 << 24;
 /// Most segments the reference encoder writes into one file (an encoder
 /// rule, not a reader rule).
 pub const MAX_SEGMENTS: usize = 1 << 16;
 
-/// The ratio limit: `raw` bytes may be coded in `len` bytes.
-pub(crate) fn ratio_ok(raw: u64, len: u64) -> bool {
-    raw <= len.saturating_mul(SEG_RATIO).saturating_add(SEG_SLACK)
-}
-
-/// True if a segment of `raw_len` bytes may be stored in a body of `len`
-/// bytes.
-pub(crate) fn seg_ratio_ok(raw_len: u64, len: u64) -> bool {
-    raw_len <= MAX_SEG_RAW && ratio_ok(raw_len, len)
+/// Checks a segment's `len` field, before any of its coded data is read.
+pub(crate) fn check_coded_len(coded: u64) -> Result<()> {
+    if coded > MAX_SEG_CODED {
+        return bad("segment size");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- header
@@ -308,9 +306,6 @@ impl Layout {
     /// The next segment with its parsed header; returns the header with
     /// its raw offset and start time.
     pub(crate) fn segment(&mut self, s: &Sec, mut h: SegHdr) -> Result<SegHdr> {
-        if !seg_ratio_ok(u64::from(h.raw_len), s.len) {
-            return bad("segment size");
-        }
         h.raw_off = self.raw;
         h.t_start = self.t;
         let raw = self.raw.checked_add(u64::from(h.raw_len));

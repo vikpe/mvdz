@@ -275,14 +275,11 @@ fn hostile(v: &mut Vec<Vector>) -> anyhow::Result<()> {
         .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_DEFLATE));
     add("segment-empty", q.build(), "an empty segment");
     let mut q = p.clone();
-    let mut b = seg_hdr_bytes(u32::try_from(MAX_SEG_RAW)?, 0, 0, C_DEFLATE);
-    b.extend_from_slice(&mvdz::deflate::compress(&[0u8; 10], 9));
-    q.header.size = MAX_SEG_RAW;
-    q.segs = vec![b];
+    q.segs[0].resize(SEG_FIELDS + usize::try_from(MAX_SEG_CODED)? + 1, 0);
     add(
-        "segment-ratio",
+        "segment-length",
         q.build(),
-        "a few-byte DEFLATE segment declaring 4 GiB",
+        "the first segment padded with zeros to one byte over the largest coded length (2 MiB)",
     );
     // a DEFLATE segment whose header claims 1 ms more than its frames hold
     // (the header's duration raised with it)

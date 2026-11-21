@@ -125,14 +125,20 @@ fn structure_rules() -> anyhow::Result<()> {
 fn declared_sizes() -> anyhow::Result<()> {
     let (_, c) = base(0)?;
     let p = parts(&c)?;
-    // a 30-byte segment that claims 4 GiB: DEFLATE coding, raw_len
-    // 2^32 - 2^16
+    // a segment that claims the largest raw length in 9 bytes that are
+    // not DEFLATE data: its output buffer is within the budget, and
+    // decoding refuses it
     let mut q = p.clone();
     let mut b = seg_hdr_bytes(u32::try_from(MAX_SEG_RAW)?, 0, 0, C_DEFLATE);
     b.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
     q.header.size = MAX_SEG_RAW;
     q.segs = vec![b];
-    refused(&q.build(), "4 GiB segment", |e| {
+    refused(&q.build(), "1 MiB segment in 9 bytes", corrupt);
+    // a segment one byte over the largest coded length: refused at its
+    // length field
+    let mut q = p.clone();
+    q.segs[0].resize(SEG_FIELDS + usize::try_from(MAX_SEG_CODED)? + 1, 0);
+    refused(&q.build(), "coded length", |e| {
         *e == Error::Corrupt("segment size")
     });
     // a header claiming 60 GB

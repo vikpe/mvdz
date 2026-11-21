@@ -2,10 +2,11 @@
 
 MVDZ is a proposal with no files in the wild, so there is no compatibility burden.
 
-## Status (2026-11-21, end of day)
+## Status (2026-11-21, evening)
 
-Resume point: "Suggestions (2026-11-21)" near the end of this file. Tree clean at
-82bcd89, 38 commits on `master`. Tests (`cargo nextest run --release` in `mvdz_rust/`):
+Resume point: "Format decisions of 2026-11-21" under Results per change: five decisions,
+step A implemented (uncommitted), steps B and C to do. After them, "Suggestions
+(2026-11-21)" near the end of this file. Last commit 97bea21, 39 commits on `master`. Tests (`cargo nextest run --release` in `mvdz_rust/`):
 41 pass, 4 fail (the known four). `cargo clippy --all-targets -- -D warnings` is clean.
 
 Done on 2026-11-21: two-pass encoder and the memory work, CLI decompress streams,
@@ -91,7 +92,12 @@ All implemented unless marked.
 | General-purpose compressor | Raw DEFLATE (RFC 1951) replaces zstd | +0.41 % size and +0.24 % decode time; zstd was 26 % of compression time; DEFLATE is in the Go, Python, Java and Node standard libraries and in browsers |
 | Blob layout | One DEFLATE stream per chunk holds all blob streams | Blob decode 1.7 times faster than one stream each; one inflate call per chunk; 0.08 % larger |
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
-| Fallback | One: a chunk the transform cannot code is one raw DEFLATE stream. A modelled stream is always rANS with the file's model; the per-stream back-end id, the store and DEFLATE back ends and the `stored` chunk coding are gone | Two chunk codings, one coder per stream kind; -0.056 % size |
+| Chunk codings (2026-11-21, step B, not done) | One: the transform. A chunk the transform cannot code is written as all tail; the `coding` byte and coding 1 (raw DEFLATE) go; chunk header 16 bytes | Coding 1 was used in 0 of 9,109 segments of 525 archive demos and 0 of 5 damaged copies; a 1 MiB segment of junk already codes as all tail and round-trips |
+| Ratio rule (2026-11-21, step A) | Removed (`raw_len <= 1024 * len + 4096`, the two constants, the reader check, the "stored blocks" fallback). In its place a reader rule: a chunk's `len` is at most 2 MiB (`MAX_SEG_CODED`), checked at the length field before anything is read | Largest `raw_len / len` in 9,109 segments is 118.39, so the rule had 8.7 times headroom; the 1 MiB raw cap already bounds output. The largest coded segment seen is 110,888 bytes; 1 MiB of junk codes to about 1 MiB + 0.5 KiB, so 2 MiB is 2 times the possible maximum |
+| Models block limit | Stays 16 MiB | Once per file; largest seen 47,608 bytes (352 times headroom); the cost is reader memory, not file bytes |
+| Integers inside a chunk and in the models index (2026-11-21, step C, not done) | Every number a little-endian u32: the chunk's protocol flags, tail, stream count, each stream entry (id, count, length), the blob body length, and the models block index (count, id, length). No variable-length integers anywhere | Simplicity over the margin (Viktor, 2026-11-21): one integer type in the file, no variable-length reader and its three edge rules in any port, no padded encodings. Measured cost +0.66 % of output on 500 random archive demos, +1.31 % on the 25 largest and longest (arithmetic from the entry counts, not a rebuilt encoder). Open question 4 closed |
+| Header fields | Stay u64 (`size`, `duration_ms`, `crc`), 64-byte header; `MAX_SEGMENTS` stays | Once per file, 12 bytes; the rule of 2026-11-21: a single-place field may be generous if cheap, a repeated one gets about 100 times the real maximum |
+| Fallback (2026-11-20, superseded by "Chunk codings" above) | One: a chunk the transform cannot code is one raw DEFLATE stream. A modelled stream is always rANS with the file's model; the per-stream back-end id, the store and DEFLATE back ends and the `stored` chunk coding are gone | Two chunk codings, one coder per stream kind; -0.056 % size |
 | Model over the decision limit (rule M2) | The encoder makes it smaller (own contexts with the fewest symbols join the fallback table) instead of dropping it | Without this a stream with no model sends every chunk of its file to DEFLATE: one demo in 500 grew 3.6 times, the output 1.9 % |
 | Thread count | The tool defaults to all logical cores, no cap, `-j` overrides; the library's default stays 1 and 0 means all logical cores (also in the C interface and `-j 0`) | The usual convention; a library should not take every core unasked; inside one file 12 threads give nothing over 4, so a cap would buy nothing |
 | Built-in profiler | Removed, with the `sampler` feature and the optional `libc` dependency | `perf` does the same; 92 lines, all of them around `unsafe` blocks |
@@ -161,8 +167,11 @@ Rules:
 - Each chunk decodes on its own, given the models block. Protocol state at the chunk
   start is in the chunk, so map changes decode as before.
 - KTX demoinfo blocks stay in their chunk; the shared demoinfo store is gone.
-- Limits: a chunk is at most 0xFFFF0000 raw bytes and decodes to at most 1024 times its
-  coded length plus 4096; the models block is at most 16 MiB.
+- Limits: a chunk is at most 1 MiB raw and its coded data (`len`) at most 2 MiB (step A;
+  the ratio rule of 1024 times plus 4096 is gone); the models block is at most 16 MiB.
+  Steps B and C (chunk coding, u32 integers) are decided but not implemented: the
+  grammar above still shows `coding u8` and the chunk's stream table is still
+  variable-length.
 
 What consumers do without META:
 
@@ -177,12 +186,14 @@ What consumers do without META:
 
 ## Open questions
 
-All Viktor's to decide. Of those left, 4, 9, 12 and 13 can change the file format.
+All Viktor's to decide. Of those left, 9, 12 and 13 can change the file format.
 
 1. Fallback paths: decided and implemented, see "One fallback".
 2. The whole-demo CRC pass: decided, it stays (see Decisions).
 3. Checksum algorithm: decided, the CRC-32 of zlib (see "Checksum: CRC-32").
-4. The stream table inside a chunk: fixed width too? Not measured.
+4. The stream table inside a chunk: decided 2026-11-21, every integer a u32 (see
+   Decisions, "Integers inside a chunk"; measured under "Format decisions of
+   2026-11-21").
 5. The C interface: decided, removed (see Decisions).
 6. Encoder self-check default: on (as now) or off like `flac -V`. Recommended: on.
 7. Gzip input (`.mvd.gz`) accepted by compress? Decided: no (see Decisions).
@@ -634,6 +645,68 @@ All 2,000 demos, 4 threads; every variant round-trips every demo.
   67.2 MB/s one file at a time; without it 196.4 and 101.5. It is 35 % of
   compression time.
 - Not measured: `uc` and `uc.a` (no demo has usercmd blocks).
+
+### Format decisions of 2026-11-21 (mvdsv's writer and the archive)
+
+What mvdsv can write (checkout 70f1135 of `~/dev/reference/mvdsv`, `src/sv_demo.c`,
+`src/sv_demo_misc.c`, `src/bothdefs.h`, `src/server.h`; message types from
+`~/dev/reference/qwprot`, the submodule directory in the mvdsv checkout being empty):
+
+| Thing | mvdsv | Ours |
+|---|---|---|
+| Frame payload | 8,092 bytes (`MAX_MVD_SIZE` = 8192 - 100); a larger write stops recording | any 32-bit length |
+| Whole frame | 8,102 bytes (10-byte `dem_multiple` header + payload) | no limit; a segment is cut at 1 MiB |
+| Bytes per server frame | 32,408 accumulated (`_buf__data`) plus one player message of up to 8,098 | - |
+| Frame time | one byte, capped at 255 ms; under 2 ms written as 0 | `dur_ms` u32 per segment |
+| Demo size | `sv_demoMaxSize` default 20,480 KiB, 0 = unlimited | u64 `size`; `MAX_SEGMENTS` 65,536 |
+| Frame types written | 3, 4, 5, 6 only (`dem_read` and `dem_set` sit in commented-out code) | 1 to 6 accepted |
+| Demoinfo | the file read up to 200 KiB, split into blocks of 8,084 content bytes; more than four blocks in one server frame overflows the buffer (by reading, not run) | stays in its segment |
+
+The archive (`/media/vikpe/qw_storage/demos_storage/all_demos/index.jsonl`, 293,929 MVD
+files; `~/dev/mvdz-bench` and `~/dev/qwdemos` are not on this machine): median
+2,032,160 bytes, p99 14,010,690, largest 67,109,197; longest 6,986,474 ms; 122 files
+over 20 MiB, 1 over 64 MiB. Two samples, compressed with the encoder at 97bea21 (scripts
+in `/tmp/mvdz-framescan`, not kept): random 500 (`random.Random(20261121)` over the
+sorted MVD list; 1,418,792,446 bytes, 5,649 segments, output 278,553,572, 0.1963) and
+extreme 25 (the 20 largest and 5 longest; 904,801,169 bytes, 3,460 segments, 0.0827).
+
+| Measure | Random 500 | Extreme 25 |
+|---|---|---|
+| Largest frame | 8,102 | 8,102 |
+| Largest segment raw | 270,004 | 265,008 |
+| Largest segment coded (`len`) | 110,888 | 92,469 |
+| Largest `raw_len / len` | 17.69 | 118.39 |
+| Largest `dur_ms` | 267,395 | 499,384 |
+| Largest models block | 36,006 | 47,608 |
+| Segments coded as DEFLATE (coding 1) | 0 | 0 |
+| Segments with an unframed tail | 0 | 0 |
+| Stream table, share of output | 0.399 % | 0.728 % |
+| Stream table fixed width, id u16 and the rest u32 | +0.457 % | +0.930 % |
+| Stream table, every number u32 | +0.66 % | +1.31 % |
+| Frame types 1 and 2 | present (488,560 and 27 frames) | - |
+
+Also: of 367 files with demoinfo in the random 500, it starts before the last 256 KiB
+segment in 25 and ends before it in 21, so "decode the last chunk" does not always find
+it. Five damaged copies of one demo (truncated mid-frame, 100 bytes overwritten, 100
+inserted, 2 MiB appended): none used coding 1; the overwritten and inserted copies did
+not frame again, so the rest of the demo (911,582 bytes) became one tail in a
+1,036,762-byte segment, and the output doubled. The "or exactly 1 MiB" exception in the
+segment rule is therefore live for damaged demos and unreachable for intact mvdsv ones.
+
+Decisions (Viktor, 2026-11-21): A. ratio rule out, `len <= 2 MiB` in; B. one chunk
+coding; C. every integer in a chunk and in the models index a u32; the models limit
+stays 16 MiB. Rule for limits: a repeated thing gets about 100 times the real maximum,
+a single-place field may be generous if cheap, and where the simple choice clears the
+limits with a wide margin, take the simple choice.
+
+Step A (uncommitted on top of 97bea21): `SEG_RATIO`, `SEG_SLACK`, `ratio_ok`,
+`seg_ratio_ok` gone; `MAX_SEG_CODED` (2 MiB) and `check_coded_len` in `format.rs`,
+applied by both readers at the length field; the encoder's "stored blocks" second try
+gone; `transform_body` refuses a body over the limit. Tests: `ratio_limit_fallback`
+became `nop_flood_round_trips` (no fallback expected), the "4 GiB segment" hostile case
+is now refused by DEFLATE rather than the ratio rule, a new case pads a segment to one
+byte over 2 MiB, vector `segment-ratio` became `segment-length` (vectors not
+regenerated). 41 pass, the known 4 fail; clippy clean.
 
 ### Known failing tests
 
