@@ -445,47 +445,20 @@ pub(crate) struct DModel {
 }
 
 /// Number of entries of `c[0..16*chunks]` that are <= slot.
+///
+/// One counter per position in a chunk of 16 keeps the loop in a form the
+/// compiler turns into vector instructions. A counter counts at most
+/// `chunks` (at most `SEARCH_MAX / 16`); `slot` is below `T`, so fits a u16.
 #[inline(always)]
 fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
-    debug_assert!(c.len() >= 16 * chunks);
-    #[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
-    {
-        use std::arch::x86_64::{
-            __m128i, _mm_add_epi32, _mm_cmpgt_epi16, _mm_cvtsi128_si32, _mm_loadu_si128,
-            _mm_sad_epu8, _mm_set1_epi16, _mm_setzero_si128, _mm_srli_si128, _mm_sub_epi16,
-        };
-        // SAFETY: SSE2 is part of x86_64; the loads stay within
-        // c[..16 * chunks]: every caller passes a search table of
-        // 2 * 16 * chunks entries (read_model).
-        unsafe {
-            // A compare gives -1 in every lane that is greater: the lanes
-            // are summed (no population count, which plain x86-64 has no
-            // instruction for). A lane counts at most 2 * chunks <= 255,
-            // so the byte sums of `_mm_sad_epu8` are the lane sums.
-            debug_assert!(chunks <= 127);
-            let sv = _mm_set1_epi16(slot as i16);
-            let mut gt = _mm_setzero_si128();
-            #[expect(clippy::cast_ptr_alignment, reason = "read with unaligned loads only")]
-            let p = c.as_ptr().cast::<__m128i>();
-            for i in 0..chunks {
-                let a = _mm_loadu_si128(p.add(2 * i));
-                let b = _mm_loadu_si128(p.add(2 * i + 1));
-                gt = _mm_sub_epi16(gt, _mm_cmpgt_epi16(a, sv));
-                gt = _mm_sub_epi16(gt, _mm_cmpgt_epi16(b, sv));
-            }
-            let s = _mm_sad_epu8(gt, _mm_setzero_si128());
-            let n =
-                _mm_cvtsi128_si32(_mm_add_epi32(s, _mm_srli_si128(s, 8))).cast_unsigned() as usize;
-            16 * chunks - n
+    let s = slot as u16;
+    let mut n = [0u16; 16];
+    for ch in c[..16 * chunks].as_chunks::<16>().0 {
+        for i in 0..16 {
+            n[i] += u16::from(ch[i] <= s);
         }
     }
-    #[cfg(any(not(target_arch = "x86_64"), feature = "scalar"))]
-    {
-        c[..16 * chunks]
-            .iter()
-            .filter(|&&x| u32::from(x) <= slot)
-            .count()
-    }
+    n.iter().map(|&v| usize::from(v)).sum()
 }
 
 /// A model header's own tables' contexts and q values of every
@@ -660,10 +633,10 @@ impl DModel {
         let slot = x & (T - 1);
         let (sym, mut x) = if e & E_LUT == 0 {
             let m = 16 * self.chunks;
-            // SAFETY: every search entry was built pointing at a table of
-            // 2*m + 1 pool entries (read_model), and entries are never
-            // changed afterwards.
-            let t = unsafe { self.pool.get_unchecked(e as usize..e as usize + 2 * m + 1) };
+            // every search entry was built pointing at a table of 2*m + 1
+            // pool entries (read_model), and entries are never changed
+            // afterwards
+            let t = &self.pool[e as usize..=e as usize + 2 * m];
             let k = count_le(&t[1..], self.chunks, slot);
             let lo = u32::from(t[k]);
             let hi = u32::from(t[k + 1]);

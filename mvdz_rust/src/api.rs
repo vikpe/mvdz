@@ -62,9 +62,11 @@ pub fn decompress_with(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<
     crate::decode::decompress(b, threads, limits)
 }
 
-/// Decompresses from `r` into `w` segment by segment (sequential reading;
-/// nothing is buffered beyond one segment). On an error the bytes already
-/// written are a prefix of the demo.
+/// Decompresses from `r` into `w` segment by segment.
+///
+/// The file is read in order; up to `threads` segments are decoded at once
+/// and nothing more is buffered. On an error the bytes already written are
+/// a prefix of the demo.
 pub fn decompress_stream<R: Read, W: Write>(
     r: R,
     mut w: W,

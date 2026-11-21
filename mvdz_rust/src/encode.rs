@@ -329,17 +329,12 @@ pub(crate) fn failing_segments(
     if nseg != cuts.len() - 1 {
         return None;
     }
-    let (outer, inner) = if nseg >= threads {
-        (threads, 1)
-    } else {
-        (1, threads)
-    };
-    let timings = par_map(outer, nseg, |i| {
+    let timings = par_map(threads, nseg, |i| {
         let (s, h) = &lay.segs[i];
         let want = &src[cuts[i]..cuts[i + 1]];
         let mut dst = vec![0u8; want.len()];
         let body = file.get(s.body_range()?)?;
-        decode_segment(&lay, body, h, &mut dst, inner, &budget)
+        decode_segment(&lay, body, h, &mut dst, &budget)
             .ok()
             .filter(|_| dst == want)
     });

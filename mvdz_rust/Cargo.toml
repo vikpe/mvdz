@@ -47,12 +47,9 @@ lto = false
 codegen-units = 16
 debug = 0
 
-[features]
-# force the portable (non-SIMD) code paths, to test the fallbacks used on
-# wasm32 and other targets
-scalar = []
-
 [lints.rust]
+# no unsafe code anywhere: library, tool, tests, examples, benchmarks
+unsafe_code = "forbid"
 # `pub` only where something outside the crate names it
 unreachable_pub = "warn"
 

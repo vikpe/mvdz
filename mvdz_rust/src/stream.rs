@@ -1,7 +1,8 @@
 //! Decompression in order.
 //!
 //! [`Reader`] decodes a file as it arrives from any `io::Read` (file,
-//! pipe, socket, VFS callback), one segment at a time.
+//! pipe, socket, VFS callback), as many segments at a time as it has
+//! threads.
 
 use crate::budget::{Budget, Charge, Limits, zeroed};
 use crate::coder::rans::FileTables;
@@ -11,6 +12,8 @@ use crate::format::{
     HEADER_LEN, Header, LEN, Layout, SEG_FIELDS, Sec, SegHdr, TABLES_MAX, check_coded_len,
     len_field, parse_seg_hdr,
 };
+use crate::util::par_map;
+use std::collections::VecDeque;
 use std::io::{self, Read};
 
 // ---------------------------------------------------------------- reader
@@ -30,6 +33,11 @@ pub struct Reader<R: Read> {
     /// held so the current segment stays charged to the budget
     cur_charge: Option<Charge>,
     at: usize,
+    /// decoded and checked segments after the current one
+    ready: VecDeque<(Vec<u8>, Charge)>,
+    /// an error met after the segments in `ready`, reported once they
+    /// are read
+    later: Option<Error>,
     done: bool,
     failed: Option<Error>,
     threads: usize,
@@ -62,6 +70,8 @@ impl<R: Read> Reader<R> {
             cur: Vec::new(),
             cur_charge: None,
             at: 0,
+            ready: VecDeque::new(),
+            later: None,
             done: false,
             failed: None,
             threads: crate::util::threads(threads),
@@ -114,26 +124,84 @@ impl<R: Read> Reader<R> {
         Ok((v, c))
     }
 
-    fn deliver(&mut self, h: &SegHdr, body: &[u8]) -> Result<()> {
-        let n = h.raw_len as usize;
-        self.cur = Vec::new();
-        self.cur_charge = None;
-        let charge = self.budget.alloc(u64::from(h.raw_len))?;
-        self.budget.work(u64::from(h.raw_len))?;
-        let mut out = zeroed(n)?;
-        let tm = decode_segment(&self.lay, body, h, &mut out, self.threads, &self.budget)?;
-        if let Some(c) = self.check.as_mut() {
-            c.segment(&out, tm)?;
+    /// The next segment of the stream: its header and its bytes, charged
+    /// to the budget while the charge lives.
+    fn read_segment(&mut self) -> Result<(SegHdr, Vec<u8>, Charge)> {
+        // the stream may end here, short of the demo: the complete
+        // segments before this point are delivered first (`fill`)
+        let Some(coded) = self.read_len()? else {
+            return bad("incomplete file");
+        };
+        check_coded_len(coded)?;
+        let s = Sec {
+            off: self.pos,
+            len: coded + SEG_FIELDS as u64,
+        };
+        let (b, c) = self.read_body(s.len)?;
+        let h = parse_seg_hdr(&b[..SEG_FIELDS])?;
+        let h = self.lay.segment(&s, h)?;
+        self.pos = s.end();
+        Ok((h, b, c))
+    }
+
+    /// Reads up to `threads` segments, decodes them in parallel and queues
+    /// them in order, each checked. An error after the first segment waits
+    /// in `later` until the segments before it have been read.
+    fn fill(&mut self) -> Result<()> {
+        let mut segs = Vec::new();
+        while segs.len() < self.threads && !self.lay.complete() {
+            match self.read_segment() {
+                Ok(seg) => segs.push(seg),
+                Err(e) if !segs.is_empty() => {
+                    self.later = Some(e);
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
         }
-        self.cur = out;
-        self.cur_charge = Some(charge);
-        self.at = 0;
+        let (lay, budget) = (&self.lay, &self.budget);
+        let decoded = par_map(self.threads, segs.len(), |i| {
+            let (h, body, _) = &segs[i];
+            let charge = budget.alloc(u64::from(h.raw_len))?;
+            budget.work(u64::from(h.raw_len))?;
+            let mut out = zeroed(h.raw_len as usize)?;
+            let tm = decode_segment(lay, body, h, &mut out, budget)?;
+            Ok((out, charge, tm))
+        });
+        for r in decoded {
+            let checked = r.and_then(|(out, charge, tm)| {
+                if let Some(c) = self.check.as_mut() {
+                    c.segment(&out, tm)?;
+                }
+                Ok((out, charge))
+            });
+            match checked {
+                Ok(seg) => self.ready.push_back(seg),
+                Err(e) => {
+                    // an earlier error than any met while reading on
+                    self.later = Some(e);
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 
     /// Reads on until a segment's bytes are available or the file ends.
     fn advance(&mut self) -> Result<()> {
         while !self.done && self.at == self.cur.len() {
+            if let Some((out, charge)) = self.ready.pop_front() {
+                self.cur = out;
+                self.cur_charge = Some(charge);
+                self.at = 0;
+                continue;
+            }
+            self.cur = Vec::new();
+            self.cur_charge = None;
+            self.at = 0;
+            if let Some(e) = self.later.take() {
+                return Err(e);
+            }
             if !self.lay.has_models() {
                 let Some(len) = self.read_len()? else {
                     return bad("incomplete file");
@@ -169,21 +237,7 @@ impl<R: Read> Reader<R> {
                 self.done = true;
                 break;
             }
-            // the stream may end here, short of the demo: every complete
-            // segment has been delivered
-            let Some(coded) = self.read_len()? else {
-                return bad("incomplete file");
-            };
-            check_coded_len(coded)?;
-            let s = Sec {
-                off: self.pos,
-                len: coded + SEG_FIELDS as u64,
-            };
-            let (b, _c) = self.read_body(s.len)?;
-            let h = parse_seg_hdr(&b[..SEG_FIELDS])?;
-            let h = self.lay.segment(&s, h)?;
-            self.deliver(&h, &b)?;
-            self.pos = s.end();
+            self.fill()?;
         }
         Ok(())
     }
@@ -197,6 +251,7 @@ impl<R: Read> Reader<R> {
                 self.failed = Some(e);
                 self.cur = Vec::new();
                 self.cur_charge = None;
+                self.ready.clear();
                 self.at = 0;
                 return Err(e);
             }

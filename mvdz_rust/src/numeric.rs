@@ -5,8 +5,9 @@
 //! residual through a [`NumIO`]. The same code runs in both directions: on
 //! encode it reads the value from the input buffer, on decode it writes the
 //! reconstructed value into the output buffer at the recorded offset.
-//! Groups in wave 1 are independent of each other; wave 2 (sounds, temp
-//! entities) reads player and entity origins that wave 1 wrote.
+//! The groups are independent of each other except that sounds and temp
+//! entities read player and entity origins the others wrote: decoding runs
+//! them last ([`GROUPS`]).
 
 use crate::streams::{PE_F0, PE_OX, PI_AP, PI_F0, PI_OX, SND_O, TE_O, UC_A};
 use crate::walk::{NONE, PE_FLOAT, PE_INPREV, PeRec, PiRec, Recs};
@@ -22,82 +23,41 @@ pub(crate) trait NumIO {
     /// Encode: record `v` on local stream `k`, return it. Decode: return the
     /// decoded residual.
     fn code(&mut self, k: usize, ctx: NCtx, v: i32) -> i32;
+    /// The segment: the input on encode, the output on decode.
+    fn buf(&self) -> &[u8];
+    /// The output segment on decode; empty on encode, which writes nothing.
+    fn buf_mut(&mut self) -> &mut [u8];
 }
 
-/// Shared view of the segment buffer.
-///
-/// On encode it is the input (never
-/// written); on decode the output. Groups running in parallel write
-/// disjoint byte ranges: every offset comes from the walker's monotonic
-/// cursor, so no two records share a byte.
-#[derive(Clone, Copy)]
-pub(crate) struct Buf {
-    ptr: *mut u8,
-    len: usize,
+/// The little-endian u16 at `off` (0 outside `b`).
+#[inline(always)]
+fn rd16(b: &[u8], off: u32) -> u16 {
+    b.get(off as usize..)
+        .and_then(<[u8]>::first_chunk)
+        .map_or(0, |a| u16::from_le_bytes(*a))
 }
-unsafe impl Send for Buf {}
-unsafe impl Sync for Buf {}
 
-impl Buf {
-    pub(crate) fn new(b: &mut [u8]) -> Self {
-        Self {
-            ptr: b.as_mut_ptr(),
-            len: b.len(),
-        }
+/// The little-endian u32 at `off` (0 outside `b`).
+#[inline(always)]
+fn rd32(b: &[u8], off: u32) -> u32 {
+    b.get(off as usize..)
+        .and_then(<[u8]>::first_chunk)
+        .map_or(0, |a| u32::from_le_bytes(*a))
+}
+
+/// Writes `v` at `off` as little-endian (nothing outside `b`).
+#[inline(always)]
+fn wr16(b: &mut [u8], off: u32, v: u16) {
+    if let Some(a) = b.get_mut(off as usize..).and_then(<[u8]>::first_chunk_mut) {
+        *a = v.to_le_bytes();
     }
-    pub(crate) fn ro(b: &[u8]) -> Self {
-        Self {
-            ptr: b.as_ptr().cast_mut(),
-            len: b.len(),
-        }
-    }
-    pub(crate) fn ptr(&self) -> *mut u8 {
-        self.ptr
-    }
-    #[allow(clippy::len_without_is_empty)]
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-    #[inline(always)]
-    pub(crate) fn rd16(&self, off: u32) -> u16 {
-        let o = off as usize;
-        if o.wrapping_add(2) <= self.len && o < self.len {
-            unsafe { u16::from_le_bytes(self.ptr.add(o).cast::<[u8; 2]>().read_unaligned()) }
-        } else {
-            0
-        }
-    }
-    #[inline(always)]
-    pub(crate) fn rd32(&self, off: u32) -> u32 {
-        let o = off as usize;
-        if o.wrapping_add(4) <= self.len && o < self.len {
-            unsafe { u32::from_le_bytes(self.ptr.add(o).cast::<[u8; 4]>().read_unaligned()) }
-        } else {
-            0
-        }
-    }
-    #[inline(always)]
-    pub(crate) fn wr16(&self, off: u32, v: u16) {
-        let o = off as usize;
-        if o.wrapping_add(2) <= self.len && o < self.len {
-            unsafe {
-                let b = v.to_le_bytes();
-                *self.ptr.add(o) = b[0];
-                *self.ptr.add(o + 1) = b[1];
-            }
-        }
-    }
-    #[inline(always)]
-    pub(crate) fn wr32(&self, off: u32, v: u32) {
-        let o = off as usize;
-        if o.wrapping_add(4) <= self.len && o < self.len {
-            unsafe {
-                self.ptr
-                    .add(o)
-                    .cast::<[u8; 4]>()
-                    .write_unaligned(v.to_le_bytes());
-            }
-        }
+}
+
+/// Writes `v` at `off` as little-endian (nothing outside `b`).
+#[inline(always)]
+fn wr32(b: &mut [u8], off: u32, v: u32) {
+    if let Some(a) = b.get_mut(off as usize..).and_then(<[u8]>::first_chunk_mut) {
+        *a = v.to_le_bytes();
     }
 }
 
@@ -158,7 +118,6 @@ fn pred_dt(last: u16, prev: u16, dt_now: i32, dt_prev: i32) -> u16 {
 
 #[inline(always)]
 fn x16<const ENC: bool, IO: NumIO>(
-    buf: Buf,
     off: u32,
     pred: u16,
     io: &mut IO,
@@ -166,21 +125,20 @@ fn x16<const ENC: bool, IO: NumIO>(
     c: NCtx,
 ) -> (u16, i32) {
     if ENC {
-        let v = buf.rd16(off);
+        let v = rd16(io.buf(), off);
         let r = i32::from(v.wrapping_sub(pred).cast_signed());
         io.code(k, c, r);
         (v, r)
     } else {
         let r = io.code(k, c, 0);
         let v = pred.wrapping_add(r.cast_unsigned() as u16);
-        buf.wr16(off, v);
+        wr16(io.buf_mut(), off, v);
         (v, i32::from(r as i16))
     }
 }
 
 #[inline(always)]
 fn x32<const ENC: bool, IO: NumIO>(
-    buf: Buf,
     off: u32,
     pred: u32,
     io: &mut IO,
@@ -188,14 +146,14 @@ fn x32<const ENC: bool, IO: NumIO>(
     c: NCtx,
 ) -> (u32, i32) {
     if ENC {
-        let v = buf.rd32(off);
+        let v = rd32(io.buf(), off);
         let r = v.wrapping_sub(pred).cast_signed();
         io.code(k, c, r);
         (v, r)
     } else {
         let r = io.code(k, c, 0);
         let v = pred.wrapping_add(r.cast_unsigned());
-        buf.wr32(off, v);
+        wr32(io.buf_mut(), off, v);
         (v, r)
     }
 }
@@ -205,20 +163,15 @@ pub(crate) enum Group {
     PiO(u8),
     PiA(u8),
     PeO(u8),
-    /// the three player origin axes in one pass
-    PiOAll,
-    /// the three player angle axes in one pass
-    PiAAll,
-    /// all three entity axes in one pass
-    PeAll,
     /// usercmd angles on the grid
     Uc,
     Snd,
     Te,
 }
 
-/// Wave 1, split per axis (for multi-threaded decoding).
-pub(crate) const WAVE1: [Group; 10] = [
+/// Every group, in decoding order: sounds and temp entities last, as they
+/// read the origins the others write.
+pub(crate) const GROUPS: [Group; 12] = [
     Group::PiA(1),
     Group::PiA(0),
     Group::PiO(0),
@@ -229,10 +182,9 @@ pub(crate) const WAVE1: [Group; 10] = [
     Group::PeO(2),
     Group::PiA(2),
     Group::Uc,
+    Group::Snd,
+    Group::Te,
 ];
-/// Wave 1 for pipelined decoding next to the walker (one task per worker).
-pub(crate) const WAVE1_PIPE: [Group; 4] = [Group::PiAAll, Group::PiOAll, Group::PeAll, Group::Uc];
-pub(crate) const WAVE2: [Group; 2] = [Group::Snd, Group::Te];
 
 impl Group {
     /// Stream ids by local index.
@@ -247,21 +199,18 @@ impl Group {
             Self::PeO(0) => &[PE_OX, PE_F0],
             Self::PeO(1) => &[PE_OX + 1, PE_F0 + 1],
             Self::PeO(_) => &[PE_OX + 2, PE_F0 + 2],
-            Self::PeAll => &[PE_OX, PE_F0, PE_OX + 1, PE_F0 + 1, PE_OX + 2, PE_F0 + 2],
-            Self::PiOAll => &[PI_OX, PI_F0, PI_OX + 1, PI_F0 + 1, PI_OX + 2, PI_F0 + 2],
-            Self::PiAAll => &[PI_AP, PI_AP + 1, PI_AP + 2],
             Self::Uc => &[UC_A],
             Self::Snd => &[SND_O],
             Self::Te => &[TE_O],
         }
     }
 
-    pub(crate) fn run<const ENC: bool, IO: NumIO>(self, recs: &Recs, buf: Buf, io: &mut IO) {
+    pub(crate) fn run<const ENC: bool, IO: NumIO>(self, recs: &Recs, io: &mut IO) {
         match self {
             Self::PiO(a) => {
                 let mut st = vec![Track::default(); 256];
                 let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
+                for r in recs.pi.iter() {
                     let (dn, dp) = times(&mut tm[r.num as usize], r.t);
                     pi_origin_step::<ENC, IO>(
                         a as usize,
@@ -269,7 +218,6 @@ impl Group {
                         r,
                         dn,
                         dp,
-                        buf,
                         io,
                         0,
                     );
@@ -278,7 +226,7 @@ impl Group {
             Self::PiA(a) => {
                 let mut st = vec![Track::default(); 256];
                 let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
+                for r in recs.pi.iter() {
                     let (dn, dp) = times(&mut tm[r.num as usize], r.t);
                     pi_angle_step::<ENC, IO>(
                         a as usize,
@@ -286,59 +234,26 @@ impl Group {
                         r,
                         dn,
                         dp,
-                        buf,
                         io,
                         0,
                     );
-                }
-            }
-            Self::PiOAll => {
-                let mut st = vec![[Track::default(); 3]; 256];
-                let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
-                    let (dn, dp) = times(&mut tm[r.num as usize], r.t);
-                    let s = &mut st[r.num as usize];
-                    for a in 0..3 {
-                        pi_origin_step::<ENC, IO>(a, &mut s[a], r, dn, dp, buf, io, 2 * a);
-                    }
-                }
-            }
-            Self::PiAAll => {
-                let mut st = vec![[Track::default(); 3]; 256];
-                let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.feed() {
-                    let (dn, dp) = times(&mut tm[r.num as usize], r.t);
-                    let s = &mut st[r.num as usize];
-                    for a in 0..3 {
-                        pi_angle_step::<ENC, IO>(a, &mut s[a], r, dn, dp, buf, io, a);
-                    }
                 }
             }
             Self::PeO(a) => {
                 let mut st = vec![Track::default(); 2048];
-                for r in recs.pe.feed() {
+                for r in recs.pe.iter() {
                     pe_origin_step::<ENC, IO>(
                         a as usize,
                         &mut st[(r.num & 2047) as usize],
                         r,
-                        buf,
                         io,
                         0,
                     );
                 }
             }
-            Self::PeAll => {
-                let mut st = vec![[Track::default(); 3]; 2048];
-                for r in recs.pe.feed() {
-                    let s = &mut st[(r.num & 2047) as usize];
-                    for a in 0..3 {
-                        pe_origin_step::<ENC, IO>(a, &mut s[a], r, buf, io, 2 * a);
-                    }
-                }
-            }
-            Self::Uc => uc::<ENC, IO>(recs, buf, io),
-            Self::Snd => snd::<ENC, IO>(recs, buf, io),
-            Self::Te => te::<ENC, IO>(recs, buf, io),
+            Self::Uc => uc::<ENC, IO>(recs, io),
+            Self::Snd => snd::<ENC, IO>(recs, io),
+            Self::Te => te::<ENC, IO>(recs, io),
         }
     }
 }
@@ -381,7 +296,6 @@ fn pi_origin_step<const ENC: bool, IO: NumIO>(
     r: &PiRec,
     dt_now: i32,
     dt_prev: i32,
-    buf: Buf,
     io: &mut IO,
     k: usize,
 ) {
@@ -393,7 +307,7 @@ fn pi_origin_step<const ENC: bool, IO: NumIO>(
             let c = NCtx {
                 f: [q(s.fres), axis as u8, 0, 0, 0, 0],
             };
-            let (v, d) = x32::<ENC, IO>(buf, off, pred, io, k + 1, c);
+            let (v, d) = x32::<ENC, IO>(off, pred, io, k + 1, c);
             s.fprev = s.flast;
             s.flast = v;
             s.fres = d;
@@ -416,7 +330,7 @@ fn pi_origin_step<const ENC: bool, IO: NumIO>(
                     0,
                 ],
             };
-            let (v, d) = x16::<ENC, IO>(buf, off, pred, io, k, c);
+            let (v, d) = x16::<ENC, IO>(off, pred, io, k, c);
             s.res = d;
             v
         } else {
@@ -436,7 +350,6 @@ fn pi_angle_step<const ENC: bool, IO: NumIO>(
     r: &PiRec,
     dt_now: i32,
     dt_prev: i32,
-    buf: Buf,
     io: &mut IO,
     k: usize,
 ) {
@@ -457,7 +370,7 @@ fn pi_angle_step<const ENC: bool, IO: NumIO>(
                 0,
             ],
         };
-        let (v, d) = x16::<ENC, IO>(buf, off, pred, io, k, c);
+        let (v, d) = x16::<ENC, IO>(off, pred, io, k, c);
         s.res = d;
         v
     } else {
@@ -474,7 +387,6 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
     axis: usize,
     s: &mut Track,
     r: &PeRec,
-    buf: Buf,
     io: &mut IO,
     k: usize,
 ) {
@@ -488,7 +400,7 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
             let c = NCtx {
                 f: [q(s.fres), axis as u8, 0, 0, 0, 0],
             };
-            let (v, d) = x32::<ENC, IO>(buf, off, pred, io, k + 1, c);
+            let (v, d) = x32::<ENC, IO>(off, pred, io, k + 1, c);
             s.fprev = s.flast;
             s.flast = v;
             s.fres = d;
@@ -506,7 +418,7 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
                     0,
                 ],
             };
-            let (v, d) = x16::<ENC, IO>(buf, off, pred, io, k, c);
+            let (v, d) = x16::<ENC, IO>(off, pred, io, k, c);
             s.res = d;
             s.prev = s.last;
             s.last = v;
@@ -521,9 +433,9 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
 
 /// usercmd angles (FORMAT.md §7.6): per player and axis, the grid value
 /// against the linear prediction from that axis's last two grid values.
-fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
+fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
     let mut st = vec![[Track::default(); 3]; 256];
-    for r in recs.uc.feed() {
+    for r in recs.uc.iter() {
         let s = &mut st[r.num as usize];
         for (a, t) in s.iter_mut().enumerate() {
             if r.grid & (1 << a) == 0 {
@@ -537,12 +449,12 @@ fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
                 f: [q(t.res), q(d), q(d2), a as u8, 0, 0],
             };
             let v = if ENC {
-                let v = crate::walk::on_grid(buf.rd32(off)).expect("the walker saw it on the grid");
+                let v = crate::walk::on_grid(rd32(io.buf(), off)).expect("the walker saw it on the grid");
                 io.code(0, c, i32::from(v.wrapping_sub(pred).cast_signed()));
                 v
             } else {
                 let v = pred.wrapping_add(io.code(0, c, 0).cast_unsigned() as u16);
-                buf.wr32(off, crate::walk::grid_f32(v));
+                wr32(io.buf_mut(), off, crate::walk::grid_f32(v));
                 v
             };
             t.res = i32::from(v.wrapping_sub(pred).cast_signed());
@@ -554,47 +466,47 @@ fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
 }
 
 #[inline(always)]
-fn rd_ref(buf: Buf, r: u32) -> u16 {
-    if r == NONE { 0 } else { buf.rd16(r) }
+fn rd_ref(b: &[u8], r: u32) -> u16 {
+    if r == NONE { 0 } else { rd16(b, r) }
 }
 
-fn snd<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
-    for r in recs.snd.feed() {
+fn snd<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
+    for r in recs.snd.iter() {
         for i in 0..3u32 {
-            let pred = rd_ref(buf, r.refs[i as usize]);
+            let pred = rd_ref(io.buf(), r.refs[i as usize]);
             let c = NCtx {
                 f: [i as u8 | r.kind << 2, r.num, 0, 0, 0, 0],
             };
-            x16::<ENC, IO>(buf, r.off + 2 * i, pred, io, 0, c);
+            x16::<ENC, IO>(r.off + 2 * i, pred, io, 0, c);
         }
     }
 }
 
-fn te<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
+fn te<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
     let mut last = [0u16; 3];
-    for r in recs.te.feed() {
+    for r in recs.te.iter() {
         if matches!(r.ty, 5 | 6 | 9) {
             let mut start = [0u16; 3];
             for i in 0..3u32 {
-                let pred = rd_ref(buf, r.refs[i as usize]);
+                let pred = rd_ref(io.buf(), r.refs[i as usize]);
                 let c = NCtx {
                     f: [i as u8 | 1 << 2, r.ty, 0, 0, 0, 0],
                 };
-                start[i as usize] = x16::<ENC, IO>(buf, r.off + 2 * i, pred, io, 0, c).0;
+                start[i as usize] = x16::<ENC, IO>(r.off + 2 * i, pred, io, 0, c).0;
             }
             for i in 0..3u32 {
                 let c = NCtx {
                     f: [i as u8 | 2 << 2, r.ty, 0, 0, 0, 0],
                 };
                 last[i as usize] =
-                    x16::<ENC, IO>(buf, r.off + 6 + 2 * i, start[i as usize], io, 0, c).0;
+                    x16::<ENC, IO>(r.off + 6 + 2 * i, start[i as usize], io, 0, c).0;
             }
         } else {
             for i in 0..3u32 {
                 let c = NCtx {
                     f: [i as u8, r.ty, 0, 0, 0, 0],
                 };
-                last[i as usize] = x16::<ENC, IO>(buf, r.off + 2 * i, last[i as usize], io, 0, c).0;
+                last[i as usize] = x16::<ENC, IO>(r.off + 2 * i, last[i as usize], io, 0, c).0;
             }
         }
     }

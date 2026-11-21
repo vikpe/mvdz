@@ -8,8 +8,10 @@ Resume point: "After steps B and C" in the Handoff below. Five format decisions 
 2026-11-21; steps A (149c415), B (d1a8c06) and C (3fedb9d, every integer a u32) are
 done. Open questions 6, 13 and 14 decided later the same day (see Decisions); the
 self-check switch is removed (f0c2019). 12 decided: every stream model stays (see
-Measurements and Decisions). Open: 9 (needs a new probe). Then "Suggestions (2026-11-21)" near the end of this file. Tests
-(`cargo nextest run --release` in `mvdz_rust/`): 40 pass, 4 fail (the known four).
+Measurements and Decisions). Open: 9 (needs a new probe). Then "Suggestions (2026-11-21)" near the end of this file.
+No unsafe code since the same night (not committed at the time of writing; see
+Decisions). Tests (`cargo nextest run --release` in `mvdz_rust/`): 41 pass, 4 fail (the
+known four).
 `cargo clippy --all-targets -- -D warnings` is clean.
 
 Done on 2026-11-21: two-pass encoder and the memory work, CLI decompress streams,
@@ -313,6 +315,7 @@ All implemented unless marked.
 | Blob layout | One DEFLATE stream per chunk holds all blob streams | Blob decode 1.7 times faster than one stream each; one inflate call per chunk; 0.08 % larger |
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
 | Stream models, open question 12 (2026-11-21) | Every one of the 34 stays, `pi.ar` included | Measured with a rebuilt codec per stream: every model pays except `pi.ar`, -0.004 % (8,951 bytes on 379 demos) without it. Dropping it was implemented and reverted the same day: it saved no function, and made roll an exception to "the three angles are coded alike" in the walker's byte layout and in the specification. The uniform rule is the simpler one |
+| No unsafe code (2026-11-21, not committed) | `unsafe_code = "forbid"` in `Cargo.toml`. Decoding is sequential inside a segment and parallel across segments; the streaming reader decodes `threads` segments at a time; the rANS table search is one safe loop on every target (`scalar` feature gone) | Viktor: "unsafe is horrible choice". Accepted cost: single-thread decode +7 %, whole-file decode at 4 threads +6 %, demos of 1 segment at `-j 4` +0.4 to 0.9 ms. The CLI at `-j 4` on a 16 MB demo is 30 % faster. 20 lines of `unsafe` and 240 lines of library code gone |
 | Chunk codings (2026-11-21, step B, d1a8c06) | One: the transform. A chunk the transform cannot code is written as all tail; the `coding` byte and coding 1 (raw DEFLATE) go; chunk header 16 bytes | Coding 1 was used in 0 of 9,109 segments of 525 archive demos and 0 of 5 damaged copies; a 1 MiB segment of junk already codes as all tail and round-trips |
 | Ratio rule (2026-11-21, step A, 149c415) | Removed (`raw_len <= 1024 * len + 4096`, the two constants, the reader check, the "stored blocks" fallback). In its place a reader rule: a chunk's `len` is at most 2 MiB (`MAX_SEG_CODED`), checked at the length field before anything is read | Largest `raw_len / len` in 9,109 segments is 118.39, so the rule had 8.7 times headroom; the 1 MiB raw cap already bounds output. The largest coded segment seen is 110,888 bytes; 1 MiB of junk codes to about 1 MiB + 0.5 KiB, so 2 MiB is 2 times the possible maximum |
 | Models block limit | Stays 16 MiB | Once per file; largest seen 47,608 bytes (352 times headroom); the cost is reader memory, not file bytes |
@@ -818,6 +821,78 @@ On the 120 demos with `-j 4` (wall, median) and the 500 with `bench -r 3 -j 4`.
   thread); a symbols-only pass for training (`num_syms` also packs the mantissa bits
   there, unused; about 1 %).
 
+### No unsafe code (2026-11-21, on dc1a422, not committed)
+
+The plan, measured 2026-11-21 on f0c2019 with a temporary `MVDZ_NOPIPE` switch (since
+reverted). In-process: mean of 30 runs after 3 warm-up runs. CLI: hyperfine, 20
+runs. One machine (12 cores), one demo per size from `/tmp/mvdz-strat/demos`.
+"Split" means no pipeline, with segments spread over threads even when there are
+fewer segments than threads (`outer = min(nseg, threads)`), which is what the code
+would do without the pipeline:
+
+| Demo, path | j1 | j4 now | j4 without pipeline |
+|---|---|---|---|
+| 16.1 MB (62 seg), whole-file | 145.4 ms | 40.3 ms | 41.2 ms |
+| 16.1 MB, streaming (`Reader`) | 145.0 ms | 75.0 ms | 144.0 ms |
+| 16.1 MB, CLI `mvdz decompress` | 171.0 ms | 103.9 ms | 175.9 ms |
+| 664 KB (3 seg), whole-file | 7.7 ms | 4.0 ms | 6.2 ms; split 3.0 ms |
+| 237 KB (1 seg), whole-file | 3.2 ms | 1.4 ms | 2.3 ms; split 2.4 ms |
+
+- The pipeline is worth 1.9 times on one segment at 4 threads (145 to 75 ms
+  streaming). Removing it alone makes the CLI as slow as `-j 1`.
+- Segment parallelism beats it: whole-file at 4 threads (40 ms) is 1.9 times
+  faster than the pipelined streaming path (75 ms) on the same file.
+- Split beats the pipeline from 3 segments (3.0 against 4.0 ms). Only demos of
+  1 or 2 segments (under 512 KiB) lose, about 1 ms at 1 segment (1.4 to 2.4 ms).
+  How many archive demos are that small: unmeasured (the stratified sample is
+  not representative of sizes).
+
+What went (all 20 lines of `unsafe`):
+
+| What | Before | Now |
+|---|---|---|
+| Inside a segment | Walker and numeric groups at once: spin-wait `RecBuf`, raw-pointer `Buf` shared by all | Walker, then the groups in order (`GROUPS`), each with the output as `&mut [u8]`; record lists are plain `Vec`s |
+| Combined groups (`PiOAll`, `PiAAll`, `PeAll`) | Used by the pipeline | Removed: in sequence they decode no faster than the per-axis groups (at most 0.5 %, within noise; 32 demos, 1 thread, 3 runs) |
+| Whole-file decoder | Segments over threads, or the pipeline when fewer segments than threads | Segments over threads |
+| Streaming reader (CLI) | One segment at a time, threads in the pipeline | Reads up to `threads` segments, decodes them at once, hands them out in order; an error waits until the segments before it are read |
+| `par_map` | Raw-pointer result slots | Each thread returns its results on join |
+| rANS table search | SSE2 (`unsafe`) plus a `scalar` path | One loop over 16 counters that the compiler vectorizes |
+| rANS table slice | `get_unchecked` | Checked slice |
+
+Table search alternatives, decode of 32 demos (108 MB) at 1 thread, best of 10, two
+runs each: SSE2 1017.8 / 1013.4 ms; 16 `u16` counters 1075.6 / 1076.7 ms (+6 %); the
+old `scalar` path 1246.9 / 1255.0 ms (+23 %); 8 `i16` counters 1220.9 / 1216.4 ms
+(+20 %). The SSE2 intrinsics need `unsafe` even though SSE2 is always on for x86_64.
+Checked slice for `get_unchecked`: 1018.9 / 1016.6 against 1016.6 / 1012.8 ms (within
+noise).
+
+Result, old and new build alternated twice, cores 0, 2, 4, 6, silent machine, 104 s in
+all (`/tmp/seqdec/harness/quick.sh`). Library figures over 32 demos of the stratified
+set (108,606,042 bytes raw; plus a 1-segment and a 3-segment demo); CLI on single demos:
+62 segments (16,107,150 bytes raw, 3,108,929 coded), 3 (663,865; 167,896) and 1
+(237,314; 65,619). Medians of each run:
+
+| Measure | Before | After | Change |
+|---|---|---|---|
+| Library decode, 1 thread | 1017 / 1020 ms | 1090 / 1087 ms | +7 % |
+| Library whole-file decode, 4 threads | 368 / 363 ms | 386 / 387 ms | +6 % |
+| Library streaming decode, 4 threads | 638 / 576 ms | 470 / 471 ms | -22 % |
+| CLI, 62 segments, `-j 1` | 162 / 165 ms | 180 / 179 ms | +10 % |
+| CLI, 62 segments, `-j 4` | 102 / 124 ms | 79 / 80 ms | -30 % |
+| CLI, 3 segments, `-j 4` | 7.9 / 8.1 ms | 7.2 / 5.8 ms | faster |
+| CLI, 1 segment, `-j 4` | 4.0 / 4.1 ms | 4.9 / 4.5 ms | +0.4 to 0.9 ms |
+| CLI batch, 32 files, `-j 4` | 424 / 447 ms | 452 / 409 ms | no clear change |
+| Compress, 4 threads | 1449 / 1493 ms | 1408 / 1440 ms | -3 %, within run spread |
+| Peak memory, CLI `-j 4`, 62 segments | 6.6 / 6.7 MiB | 8.1 / 8.3 MiB | +1.5 MiB |
+| wasm decode, 1 thread, node | 43.5 / 60.5 MB/s | 55.6 / 55.3 MB/s | not conclusive: the old build's runs differ by 39 % |
+
+- Correctness: all 379 stratified demos compress to the same bytes as before and decode
+  to their SHA-256 at `-j 1` and `-j 4`. New test `sequential_reader_threads_agree`:
+  at 2 and 4 threads the reader yields the same bytes and error as at 1 on cut and
+  damaged files (it fails when the waiting error is reported early).
+- The pre-implementation timings above ran while the machine was in use; the result
+  table did not.
+
 ### Checksum candidates (2026-11-20)
 
 One thread, whole demos, best of 5 passes, MB/s. Native: the first 500 demos, Rust
@@ -1209,33 +1284,16 @@ number is given.
    45); with 11 archive demos as `MVDZ_TEST_DATA/sample` the same, and `sweep` round
    trips all 11. The tests that need the duel sample still skip on this machine.
 3. `TABLE_BITS_PER_SYM` (`rans.rs`): a global atomic nothing writes. Make it a constant.
-4. The `scalar` feature: two uses. Keep only if CI runs it (not checked).
+4. Done 2026-11-21: the `scalar` feature is removed with the SSE2 table search (see
+   "No unsafe code" under Results per change).
 
 ### Structure
 
 1. Eight `#[doc(hidden)] pub` modules (`coder`, `deflate`, `encode`, `format`, `proto`,
    `segment`, `streams`, `util`) are public only for tests that build files by hand.
    Moving those tests into the crate as unit tests lets every module be private.
-2. Decode-side concurrency: the walker and the numeric groups run at the same time on
-   a shared record buffer with a spin-wait reader (`RecBuf`, `WAVE1_PIPE`); most of the
-   `unsafe` is here. The encoder runs the same steps in sequence. Sequential decode
-   per segment would remove it. What it costs depends on the path (checked in the
-   code 2026-11-21):
-   - Whole-file `decompress` (`decode.rs`): with at least as many segments as
-     threads, one segment per thread and the pipeline off (`inner = 1`). At 1 MiB
-     segments any demo over about 4 MiB at 4 threads already decodes without it.
-     Nothing lost; multi-core stays faster through segment parallelism.
-   - Streaming `decompress_stream` (`stream.rs`), which the CLI uses: one segment
-     at a time, all threads inside the pipeline. Without it `mvdz decompress` of one
-     file is single-threaded whatever `-j` says. Batch (one file per thread)
-     unaffected.
-   - Worth of the pipeline inside a segment: unmeasured. From the 4a20f89 profile
-     (walk 25.05 s, wave 1 27.64 s summed) the overlap can save at most about half
-     the segment time.
-   Suggested: do it together with "Possible later, larger" 2 (a whole-file decoder
-   that writes a window of segments), which gives the CLI path segment parallelism
-   and leaves the pipeline no job. Measure first: streaming decode of one large demo
-   at 1 and 4 threads with the pipeline branch forced off.
+2. Done 2026-11-21 (not committed): decode-side concurrency removed with every
+   `unsafe`. See "No unsafe code" under Results per change and Decisions.
 3. The work budget (`Limits::work_per_byte` and its accounting): with segments at
    1 MiB and models at 16 MiB the work a file can demand is bounded by its size. Maybe
    only the memory limit is needed. Check what the hostile-file tests rely on first.
@@ -1269,11 +1327,10 @@ number is given.
 
 1. Streaming input for the encoder (read the demo twice instead of holding it): peak
    drops by the raw size. 250 MB works today at about 410 MiB.
-2. Single-file decode at several threads is slower since the CLI streams (282 MB demo,
-   4 threads: 0.80 s to 1.40 s; 1 thread and batch unchanged). Fix: a whole-file decoder
-   that writes a window of segments at a time, or accept it. Pairs with Structure 2:
-   the windowed decoder is what keeps the CLI multi-threaded once the segment pipeline
-   goes.
+2. Done 2026-11-21 with Structure 2: the streaming reader the CLI uses decodes
+   `threads` segments at a time. (Was: single-file decode at several threads slower since
+   the CLI streams, 282 MB demo at 4 threads 0.80 s to 1.40 s; that demo is not
+   re-measured.)
 
 ### Measuring
 

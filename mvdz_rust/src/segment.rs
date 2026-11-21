@@ -25,16 +25,15 @@ use crate::coder::rans::FileTables;
 use crate::coder::{self, rans};
 use crate::error::{Error, Result, bad};
 use crate::format::{MAX_SEG_RAW, TABLES_MAX};
-use crate::numeric::{Buf, Group, NCtx, NumIO, WAVE1, WAVE1_PIPE, WAVE2};
+use crate::numeric::{GROUPS, Group, NCtx, NumIO};
 use crate::proto::{Proto, frame_len};
 use crate::streams::{
     BLOB_BODY, N_LAZY, N_STREAMS, PE_BITS, PI_NUM, RAW, SND_NUM, TAIL, TE_TYPE, UC, UC_MIN_SYMS,
     is_blob, is_lazy, is_num,
 };
-use crate::util::{HAS_THREADS, Rd, par_map, put_u32};
+use crate::util::{Rd, par_map, put_u32};
 use crate::walk::{Recs, SymIO, Walker};
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Raw bytes per segment: a segment is cut at the first frame boundary at
 /// or after this many bytes.
@@ -91,15 +90,22 @@ impl SymIO for EncIO {
     }
 }
 
-struct NumEnc {
+struct NumEnc<'a> {
     vals: Vec<rans::NumSymW>,
+    src: &'a [u8],
 }
 
-impl NumIO for NumEnc {
+impl NumIO for NumEnc<'_> {
     #[inline(always)]
     fn code(&mut self, k: usize, ctx: NCtx, v: i32) -> i32 {
         self.vals[k].push(ctx, v);
         v
+    }
+    fn buf(&self) -> &[u8] {
+        self.src
+    }
+    fn buf_mut(&mut self) -> &mut [u8] {
+        &mut []
     }
 }
 
@@ -136,10 +142,12 @@ impl SymIO for DecIO<'_> {
     }
 }
 
-const MAXK: usize = 6;
+/// Streams in a group, at most.
+const MAXK: usize = 2;
 
 struct NumDecIO<'a> {
     d: [rans::NumDec<'a>; MAXK],
+    dst: &'a mut [u8],
     over: bool,
 }
 
@@ -153,6 +161,12 @@ impl NumIO for NumDecIO<'_> {
             0
         }
     }
+    fn buf(&self) -> &[u8] {
+        self.dst
+    }
+    fn buf_mut(&mut self) -> &mut [u8] {
+        self.dst
+    }
 }
 
 /// (body, count) of a present stream.
@@ -161,8 +175,8 @@ type StreamEnt<'a> = Option<(&'a [u8], usize)>;
 fn walk_dec<'a>(
     lazy: [rans::ByteDec<'a>; N_LAZY],
     blobs: Vec<(Cow<'a, [u8]>, usize)>,
-    dst: Buf,
-    recs: &Recs,
+    dst: &mut [u8],
+    recs: &mut Recs,
     proto: Proto,
     tail: usize,
 ) -> Result<()> {
@@ -171,7 +185,7 @@ fn walk_dec<'a>(
         blobs,
         over: false,
     };
-    let mut w: Walker<false, DecIO> = Walker::new(&[], dst.ptr(), dst.len(), recs, io, proto);
+    let mut w: Walker<false, DecIO> = Walker::new(&[], dst, recs, io, proto);
     w.run(tail);
     if w.err || w.io.over {
         return bad("structure");
@@ -187,7 +201,7 @@ fn walk_dec<'a>(
 fn run_group(
     g: Group,
     recs: &Recs,
-    buf: Buf,
+    dst: &mut [u8],
     ents: &[StreamEnt],
     fm: Option<&rans::Models>,
 ) -> Result<()> {
@@ -197,8 +211,12 @@ fn run_group(
             d[k] = rans::NumDec::new(sid, b, c, coder::file_model(fm, sid)?)?;
         }
     }
-    let mut io = NumDecIO { d, over: false };
-    g.run::<false, NumDecIO>(recs, buf, &mut io);
+    let mut io = NumDecIO {
+        d,
+        dst,
+        over: false,
+    };
+    g.run::<false, NumDecIO>(recs, &mut io);
     if io.over || !io.d.iter().all(super::coder::rans::NumDec::done) {
         return bad("numeric stream");
     }
@@ -226,14 +244,13 @@ impl Walked {
 /// and the protocol state at its end, or None if the transform cannot
 /// represent the segment.
 pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
-    let recs = Recs::growable(src.len());
+    let mut recs = Recs::growable(src.len());
     let (io, tail, pend, err) = {
         let mut w: Walker<true, EncIO> =
-            Walker::new(src, std::ptr::null_mut(), 0, &recs, EncIO::new(), proto);
+            Walker::new(src, &mut [], &mut recs, EncIO::new(), proto);
         let tail = w.run(0);
         (w.io, tail, w.proto, w.err)
     };
-    recs.finish();
     if err {
         return None;
     }
@@ -255,7 +272,6 @@ pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked {
     let mut io = EncIO::new();
     io.blobs[TAIL] = src.to_vec();
     let recs = Recs::growable(0);
-    recs.finish();
     Walked {
         io,
         recs,
@@ -306,31 +322,25 @@ fn pack_one(
     }
 }
 
-/// The numeric groups in coding order.
-fn groups() -> Vec<Group> {
-    WAVE1.iter().chain(WAVE2.iter()).copied().collect()
-}
-
 /// The numeric values of a walked segment as they are coded, per group
-/// (in [`groups`] order) and stream of the group.
+/// (in [`GROUPS`] order) and stream of the group.
 pub(crate) type Nums = Vec<Vec<rans::NumSyms>>;
 
 /// Runs the numeric predictors over a walked segment `src`. The encoder
 /// does this once: the models are trained on the values and the segment is
 /// coded from them.
 pub(crate) fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Nums {
-    let groups = groups();
-    let buf = Buf::ro(src);
-    par_map(threads, groups.len(), |gi| {
-        let g = groups[gi];
+    par_map(threads, GROUPS.len(), |gi| {
+        let g = GROUPS[gi];
         let mut io = NumEnc {
             vals: g
                 .streams()
                 .iter()
                 .map(|&sid| rans::NumSymW::new(sid))
                 .collect(),
+            src,
         };
-        g.run::<true, NumEnc>(&wk.recs, buf, &mut io);
+        g.run::<true, NumEnc>(&wk.recs, &mut io);
         io.vals
             .into_iter()
             .map(super::coder::rans::NumSymW::finish)
@@ -353,7 +363,7 @@ pub(crate) struct Trainer {
 impl Default for Trainer {
     fn default() -> Self {
         let mut at = vec![None; N_STREAMS];
-        for (gi, g) in groups().iter().enumerate() {
+        for (gi, g) in GROUPS.iter().enumerate() {
             for (k, &sid) in g.streams().iter().enumerate() {
                 at[sid] = Some((gi, k));
             }
@@ -442,7 +452,6 @@ pub(crate) fn encode(
     stats: &mut Vec<StreamStat>,
     shared: &[Option<rans::Shared>],
 ) -> Option<Vec<u8>> {
-    let groups = groups();
     // every non-empty stream is a job: (sid, kind, group, index in group)
     let mut jobs: Vec<(usize, Kind, usize, usize)> = Vec::new();
     for sid in 0..N_LAZY {
@@ -450,7 +459,7 @@ pub(crate) fn encode(
             jobs.push((sid, Kind::Lazy, 0, 0));
         }
     }
-    for (gi, g) in groups.iter().enumerate() {
+    for (gi, g) in GROUPS.iter().enumerate() {
         for (k, &sid) in g.streams().iter().enumerate() {
             if !nums[gi][k].syms.is_empty() {
                 jobs.push((sid, Kind::Num, gi, k));
@@ -659,7 +668,6 @@ pub(crate) fn decode(
     h: &Header,
     dst: &mut [u8],
     tables: Option<&FileTables>,
-    threads: usize,
     budget: &Budget,
 ) -> Result<()> {
     let n = h.ents.len();
@@ -716,78 +724,22 @@ pub(crate) fn decode(
             num_ents[id] = Some((bodies[i], count));
         }
     }
-    let recs = Recs::fixed(
+    let mut recs = Recs::fixed(
         cnt(PI_NUM),
         cnt(PE_BITS),
         cnt(SND_NUM),
         cnt(TE_TYPE),
         cnt(UC) / UC_MIN_SYMS,
     )?;
-    let buf = Buf::new(dst);
-    let run_g = |g: Group| run_group(g, &recs, buf, &num_ents, fm);
-    let blob_cell = std::sync::Mutex::new(Some(blob_bufs));
-    let walk = || -> Result<()> {
-        let blobs = blob_cell
-            .lock()
-            .map_err(|_| Error::Internal("lock"))?
-            .take()
-            .ok_or(Error::Internal("walk"))?;
-        let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
-        for (id, e) in lazy_ents.iter().enumerate() {
-            if let Some((b, c)) = *e {
-                lazy[id] = rans::ByteDec::new(b, c, coder::file_model(fm, id)?)?;
-            }
-        }
-        walk_dec(lazy, blobs, buf, &recs, h.proto, h.tail)
-    };
-    if threads > 1 && HAS_THREADS {
-        // pipelined: wave-1 groups follow the walker on worker threads
-        let next = AtomicUsize::new(0);
-        let (wres, gres) = std::thread::scope(|sc| {
-            let workers: Vec<_> = (0..(threads - 1).min(WAVE1_PIPE.len()))
-                .map(|_| {
-                    sc.spawn(|| -> Result<()> {
-                        let mut res = Ok(());
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            if i >= WAVE1_PIPE.len() {
-                                break;
-                            }
-                            let r = run_g(WAVE1_PIPE[i]);
-                            if res.is_ok() {
-                                res = r;
-                            }
-                        }
-                        res
-                    })
-                })
-                .collect();
-            // finish the record buffers on every exit, unwinding included,
-            // so worker threads can never wait forever
-            let guard = std::mem::DropGuard::new(&recs, Recs::finish);
-            let wres = walk();
-            drop(guard);
-            let mut gres = Ok(());
-            for h in workers {
-                let r = h.join().unwrap_or(Err(Error::Internal("worker panicked")));
-                if gres.is_ok() {
-                    gres = r;
-                }
-            }
-            (wres, gres)
-        });
-        wres?;
-        gres?;
-    } else {
-        let r = walk();
-        recs.finish();
-        r?;
-        for &g in &WAVE1 {
-            run_g(g)?;
+    let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
+    for (id, e) in lazy_ents.iter().enumerate() {
+        if let Some((b, c)) = *e {
+            lazy[id] = rans::ByteDec::new(b, c, coder::file_model(fm, id)?)?;
         }
     }
-    for r in par_map(threads.min(2), WAVE2.len(), |i| run_g(WAVE2[i])) {
-        r?;
+    walk_dec(lazy, blob_bufs, dst, &mut recs, h.proto, h.tail)?;
+    for g in GROUPS {
+        run_group(g, &recs, dst, &num_ents, fm)?;
     }
     Ok(())
 }
@@ -812,10 +764,9 @@ mod tests {
         h: &Header,
         len: usize,
         tables: Option<&FileTables>,
-        threads: usize,
     ) -> anyhow::Result<Vec<u8>> {
         let mut dst = vec![0u8; len];
-        decode(body, h, &mut dst, tables, threads, &Budget::unlimited())?;
+        decode(body, h, &mut dst, tables, &Budget::unlimited())?;
         Ok(dst)
     }
 
@@ -860,12 +811,10 @@ mod tests {
     #[test]
     fn segment_round_trip() -> anyhow::Result<()> {
         let src = demo();
-        for threads in [1, 3] {
-            let (body, ft) = coded(&src)?;
-            let h = parse_header(&body, src.len())?;
-            let dst = decoded(&body, &h, src.len(), Some(&ft), threads)?;
-            assert!(dst == src, "{threads}");
-        }
+        let (body, ft) = coded(&src)?;
+        let h = parse_header(&body, src.len())?;
+        let dst = decoded(&body, &h, src.len(), Some(&ft))?;
+        assert!(dst == src);
         Ok(())
     }
     /// usercmd hidden blocks (type 1): on and off the grid, other lengths,
@@ -907,14 +856,12 @@ mod tests {
             src.extend_from_slice(&p);
         }
         src.extend(demo());
-        for threads in [1, 3] {
-            let (body, ft) = coded(&src)?;
-            let h = parse_header(&body, src.len())?;
-            let uc = h.ents.iter().find(|e| e.0 == UC).context("a uc stream")?.1;
-            assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
-            let dst = decoded(&body, &h, src.len(), Some(&ft), threads)?;
-            assert!(dst == src, "{threads}");
-        }
+        let (body, ft) = coded(&src)?;
+        let h = parse_header(&body, src.len())?;
+        let uc = h.ents.iter().find(|e| e.0 == UC).context("a uc stream")?.1;
+        assert!(uc >= (300 + 9) * UC_MIN_SYMS, "{uc}");
+        let dst = decoded(&body, &h, src.len(), Some(&ft))?;
+        assert!(dst == src);
         // without usercmd blocks neither stream is in the table
         let plain = demo();
         let (body, _) = coded(&plain)?;

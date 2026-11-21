@@ -245,7 +245,7 @@ let demo2 = mvdz::decompress(&packed, 4)?;                                  // 4
 let demo3 = mvdz::decompress_with(&packed, 1, &Limits { memory: 256 << 20, ..Default::default() }.into())?;
 let demo4 = mvdz::decompress_with(&packed, 1, &ReadOptions { trusted: true, ..Default::default() })?;
 
-// decoding in order from any io::Read, one segment at a time
+// decoding in order from any io::Read, `threads` segments at a time
 let mut r = mvdz::Reader::new(std::fs::File::open("game.mvdz")?, 2, &Default::default())?;
 std::io::copy(&mut r, &mut out)?;
 mvdz::decompress_stream(std::io::stdin(), std::io::stdout(), 1, &ReadOptions::default())?;
@@ -304,7 +304,6 @@ development sample there (`MVDZ_TEST_DATA=$PWD/testdata`).
 demos they were made from, which the download lacks). Fuzz targets are in `mvdz_rust/fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
 `stream_writer`, `compress_rt` and the structure-aware `gen_rt`).
-The feature `scalar` forces the portable code paths (as on wasm).
 
 Speed: `MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path
 mvdz_rust/Cargo.toml --bench codec` times compress and decompress of every `*.mvd` in that

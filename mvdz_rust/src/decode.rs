@@ -151,7 +151,6 @@ pub(crate) fn decode_segment(
     body: &[u8],
     h: &SegHdr,
     dst: &mut [u8],
-    threads: usize,
     budget: &Budget,
 ) -> Result<SegTiming> {
     let tables = lay.tables.as_ref();
@@ -162,7 +161,7 @@ pub(crate) fn decode_segment(
         .get(h.body_off..)
         .ok_or(Error::Corrupt("segment header"))?;
     let th = segment::parse_header(coded, dst.len())?;
-    segment::decode(coded, &th, dst, tables, threads, budget)?;
+    segment::decode(coded, &th, dst, tables, budget)?;
     if crc32(dst) != h.crc {
         return bad("segment checksum");
     }
@@ -221,11 +220,6 @@ pub(crate) fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Ve
     budget.work(size)?;
     let mut out = zeroed(usz(size).ok_or(Error::Limit("demo size"))?)?;
     let nseg = lay.segs.len();
-    let (outer, inner) = if nseg >= threads {
-        (threads, 1)
-    } else {
-        (1, threads)
-    };
     let mut slices: Vec<std::sync::Mutex<&mut [u8]>> = Vec::with_capacity(nseg);
     let mut rest: &mut [u8] = &mut out;
     for (_, h) in &lay.segs {
@@ -233,14 +227,14 @@ pub(crate) fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Ve
         slices.push(std::sync::Mutex::new(a));
         rest = r;
     }
-    let res = par_map(outer, nseg, |i| {
+    let res = par_map(threads, nseg, |i| {
         let (s, h) = &lay.segs[i];
         let body = s
             .body_range()
             .and_then(|range| b.get(range))
             .ok_or(Error::Corrupt("truncated"))?;
         let mut dst = slices[i].lock().map_err(|_| Error::Internal("lock"))?;
-        decode_segment(&lay, body, h, &mut dst, inner, &budget)
+        decode_segment(&lay, body, h, &mut dst, &budget)
     });
     drop(slices);
     let mut chk = DemoCheck::default();

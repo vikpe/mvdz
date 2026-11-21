@@ -103,33 +103,36 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync>(threads: usize, n: usize, f: F
         return (0..n).map(f).collect();
     }
     let next = AtomicUsize::new(0);
-    let mut out: Vec<Option<T>> = Vec::from_fn(n, |_| None);
-    let slots = SyncPtr(out.as_mut_ptr());
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n) {
-            s.spawn(|| {
-                let slots = &slots;
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
+    // each thread claims the next index and keeps what it computed; the
+    // results are put in order once every thread has finished
+    let done: Vec<Vec<(usize, T)>> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads.min(n))
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= n {
+                            break mine;
+                        }
+                        mine.push((i, f(i)));
                     }
-                    let v = f(i);
-                    // SAFETY: each index is claimed by exactly one thread,
-                    // and `out` outlives the scope.
-                    unsafe { *slots.0.add(i) = Some(v) };
-                }
-            });
-        }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
     });
+    let mut out: Vec<Option<T>> = Vec::from_fn(n, |_| None);
+    for (i, v) in done.into_iter().flatten() {
+        out[i] = Some(v);
+    }
     out.into_iter()
         .map(|v| v.expect("every index is filled"))
         .collect()
 }
-
-struct SyncPtr<T>(*mut T);
-unsafe impl<T> Sync for SyncPtr<T> {}
-unsafe impl<T> Send for SyncPtr<T> {}
 
 #[cfg(test)]
 mod tests {

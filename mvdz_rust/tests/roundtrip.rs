@@ -32,6 +32,63 @@ fn sample_demos() -> anyhow::Result<()> {
 }
 
 /// Input that is not an MVD demo is refused by the encoder.
+/// The bytes a sequential reader at `threads` threads yields before its
+/// first error, and that error.
+fn read_until_error(f: &[u8], threads: usize) -> (Vec<u8>, Option<mvdz::Error>) {
+    let mut out = Vec::new();
+    let l = mvdz::Limits::default();
+    let mut r = match mvdz::Reader::new(std::io::Cursor::new(f), threads, &l) {
+        Ok(r) => r,
+        Err(e) => return (out, Some(e)),
+    };
+    let mut buf = [0u8; 4096];
+    loop {
+        match r.read_demo(&mut buf) {
+            Ok(0) => return (out, None),
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) => return (out, Some(e)),
+        }
+    }
+}
+
+/// A sequential reader that decodes several segments at once yields what
+/// one decoding a segment at a time does: the segments before a cut or a
+/// damaged segment, then the same error.
+#[test]
+fn sequential_reader_threads_agree() -> anyhow::Result<()> {
+    let demo = several_segments(&synthetic(&[], false));
+    let f = compress(&demo)?;
+    let p = parts(&f)?;
+    anyhow::ensure!(p.segs.len() >= 4, "{} segments", p.segs.len());
+    let mut cases = Vec::new();
+    for k in 1..8 {
+        cases.push(f[..f.len() * k / 8].to_vec());
+    }
+    for i in 0..p.segs.len() {
+        let mut q = p.clone();
+        let s = q.segs[i].last_mut().context("a segment body")?;
+        *s ^= 0x55;
+        cases.push(q.build());
+    }
+    let mut partial = 0;
+    for (k, c) in cases.iter().enumerate() {
+        let one = read_until_error(c, 1);
+        assert!(demo.starts_with(&one.0), "case {k}");
+        if k < 7 {
+            assert!(one.1.is_some(), "cut {k} is refused");
+        }
+        if one.1.is_some() && !one.0.is_empty() {
+            partial += 1;
+        }
+        for threads in [2, 4] {
+            assert!(read_until_error(c, threads) == one, "case {k}, {threads} threads");
+        }
+    }
+    // the cases include errors after some segments were delivered
+    assert!(partial >= 2, "{partial}");
+    Ok(())
+}
+
 #[test]
 fn empty_and_tiny_inputs() -> anyhow::Result<()> {
     let mut rng = Rng(7);

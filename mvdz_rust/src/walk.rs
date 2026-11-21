@@ -5,8 +5,8 @@
 //! streams and writes them to the output. Numeric fields (origins, angles,
 //! sound/TE coordinates, long stats) are not touched: the walker only
 //! reserves their bytes and records where they are ([`Recs`]); the numeric
-//! groups (`numeric.rs`) fill them in afterwards, in parallel. The structure
-//! of a demo never depends on a numeric value, so the walk and the numeric
+//! groups (`numeric.rs`) fill them in after the walk. The structure of a
+//! demo never depends on a numeric value, so the walk and the numeric
 //! groups are independent.
 //!
 //! Every read and write is bounds-checked and sets a sticky `err` instead of
@@ -109,145 +109,41 @@ pub(crate) struct UcRec {
     pub(crate) grid: u8,
 }
 
-/// An append-only record buffer with one writer and any number of readers.
-///
-/// The writer is the walker; the concurrent readers (the numeric groups)
-/// see a published prefix. A fixed-capacity buffer never moves: the writer writes through a
-/// raw pointer taken once, and no reference to the vector exists while
-/// readers follow the walker. Growable buffers (encode side, never shared
-/// between threads) may reallocate.
+/// A record list: the walker appends, the numeric groups read it once the
+/// walk is done.
 pub(crate) struct RecBuf<T> {
-    /// owns the allocation (fixed: its length stays 0, it is only freed)
-    mem: std::cell::UnsafeCell<Vec<T>>,
-    /// start of the records (fixed: set once at construction)
-    base: std::cell::UnsafeCell<*mut T>,
-    /// records written (writer only)
-    wlen: std::cell::UnsafeCell<usize>,
+    v: Vec<T>,
+    /// records allowed (decode: the count from the stream table)
     cap: usize,
-    len: std::sync::atomic::AtomicUsize,
-    done: std::sync::atomic::AtomicBool,
-    fixed: bool,
 }
 
-// SAFETY: one writer appends beyond the published length through `base`;
-// readers only touch the published prefix (Release/Acquire on `len`).
-// `base` of a fixed buffer is never written after construction; growable
-// buffers are not shared between threads.
-unsafe impl<T: Send> Sync for RecBuf<T> {}
-unsafe impl<T: Send> Send for RecBuf<T> {}
-
-impl<T: Copy> RecBuf<T> {
-    /// A buffer that never reallocates; allocation failure is an error.
+impl<T> RecBuf<T> {
+    /// A list of at most `cap` records, allocated up front; allocation
+    /// failure is an error.
     pub(crate) fn fixed(cap: usize) -> crate::error::Result<Self> {
-        let mut v: Vec<T> = crate::budget::with_capacity(cap)?;
-        let base = v.as_mut_ptr();
         Ok(Self {
-            mem: std::cell::UnsafeCell::new(v),
-            base: std::cell::UnsafeCell::new(base),
-            wlen: std::cell::UnsafeCell::new(0),
+            v: crate::budget::with_capacity(cap)?,
             cap,
-            len: std::sync::atomic::AtomicUsize::default(),
-            done: std::sync::atomic::AtomicBool::default(),
-            fixed: true,
         })
     }
-    pub(crate) fn growable(cap: usize) -> Self {
-        let mut v: Vec<T> = Vec::with_capacity(cap);
-        let base = v.as_mut_ptr();
+    /// A list without a limit, `n` records reserved.
+    pub(crate) fn growable(n: usize) -> Self {
         Self {
-            mem: std::cell::UnsafeCell::new(v),
-            base: std::cell::UnsafeCell::new(base),
-            wlen: std::cell::UnsafeCell::new(0),
-            cap,
-            len: std::sync::atomic::AtomicUsize::default(),
-            done: std::sync::atomic::AtomicBool::default(),
-            fixed: false,
+            v: Vec::with_capacity(n),
+            cap: usize::MAX,
         }
     }
-    /// Single-writer append; false if a fixed buffer is full.
+    /// Appends `r`; false if the list is full.
     #[inline(always)]
-    pub(crate) fn push(&self, v: T) -> bool {
-        use std::sync::atomic::Ordering;
-        // SAFETY: only the walker calls push (single writer). A fixed
-        // buffer writes slot n < cap of its allocation, which no reader
-        // sees before it is published; a growable buffer is not shared.
-        let n = unsafe {
-            let w = &mut *self.wlen.get();
-            if self.fixed {
-                if *w == self.cap {
-                    return false;
-                }
-                (*self.base.get()).add(*w).write(v);
-            } else {
-                let m = &mut *self.mem.get();
-                m.push(v);
-                *self.base.get() = m.as_mut_ptr();
-            }
-            *w += 1;
-            *w
-        };
-        // publish in batches: a store per record would bounce the cache
-        // line between the walker and the readers polling it
-        if n % 256 == 0 {
-            self.len.store(n, Ordering::Release);
+    pub(crate) fn push(&mut self, r: T) -> bool {
+        if self.v.len() == self.cap {
+            return false;
         }
+        self.v.push(r);
         true
     }
-    #[inline(always)]
-    pub(crate) fn published(&self) -> &[T] {
-        let n = self.len.load(std::sync::atomic::Ordering::Acquire);
-        // SAFETY: the first n records are initialised (published with
-        // Release after they were written) and never written again
-        unsafe { std::slice::from_raw_parts(*self.base.get(), n) }
-    }
-    pub(crate) fn finish(&self) {
-        // SAFETY: called by the writer after its last push
-        let n = unsafe { *self.wlen.get() };
-        self.len.store(n, std::sync::atomic::Ordering::Release);
-        self.done.store(true, std::sync::atomic::Ordering::Release);
-    }
-    /// Iterates all records, waiting for the writer where needed.
-    pub(crate) fn feed(&self) -> Feed<'_, T> {
-        Feed {
-            rb: self,
-            i: 0,
-            avail: self.published(),
-        }
-    }
-}
-
-pub(crate) struct Feed<'a, T> {
-    rb: &'a RecBuf<T>,
-    i: usize,
-    avail: &'a [T],
-}
-
-impl<'a, T: Copy> Iterator for Feed<'a, T> {
-    type Item = &'a T;
-    #[inline(always)]
-    fn next(&mut self) -> Option<&'a T> {
-        if self.i >= self.avail.len() {
-            let mut spins = 0u32;
-            loop {
-                let done = self.rb.done.load(std::sync::atomic::Ordering::Acquire);
-                self.avail = self.rb.published();
-                if self.i < self.avail.len() {
-                    break;
-                }
-                if done {
-                    return None;
-                }
-                spins += 1;
-                if spins < 64 {
-                    std::hint::spin_loop();
-                } else {
-                    std::thread::yield_now();
-                }
-            }
-        }
-        let r = &self.avail[self.i];
-        self.i += 1;
-        Some(r)
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.v.iter()
     }
 }
 
@@ -286,13 +182,6 @@ impl Recs {
             uc: RecBuf::fixed(uc)?,
         })
     }
-    pub(crate) fn finish(&self) {
-        self.pi.finish();
-        self.pe.finish();
-        self.snd.finish();
-        self.te.finish();
-        self.uc.finish();
-    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -325,13 +214,13 @@ struct EntState {
 
 pub(crate) struct Walker<'a, const ENC: bool, IO: SymIO> {
     pub(crate) src: &'a [u8],
-    dst: *mut u8,
-    dst_len: usize,
+    /// the output segment (decode; empty on encode)
+    dst: &'a mut [u8],
     pub(crate) p: usize,
     pub(crate) err: bool,
     pub(crate) io: IO,
     pub(crate) proto: Proto,
-    pub(crate) recs: &'a Recs,
+    pub(crate) recs: &'a mut Recs,
     pl: Box<[PlState; 256]>,
     ent: Box<[EntState; 2048]>,
     st: Box<[[u8; 256]; 32]>,
@@ -360,25 +249,23 @@ pub(crate) struct Walker<'a, const ENC: bool, IO: SymIO> {
 }
 
 impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
-    /// `dst`/`dst_len`: the output segment (decode; empty on encode). The
-    /// walker writes only structural bytes; numeric groups may write the
-    /// reserved bytes concurrently through their own raw pointer.
+    /// `dst`: the output segment (decode; empty on encode). The walker
+    /// writes only structural bytes; the numeric groups fill in the
+    /// reserved bytes after the walk.
     #[expect(
         clippy::large_stack_arrays,
         reason = "fixed-size tables keep byte-indexed lookups free of bounds checks"
     )]
     pub(crate) fn new(
         src: &'a [u8],
-        dst: *mut u8,
-        dst_len: usize,
-        recs: &'a Recs,
+        dst: &'a mut [u8],
+        recs: &'a mut Recs,
         io: IO,
         proto: Proto,
     ) -> Self {
         Walker {
             src,
             dst,
-            dst_len,
             p: 0,
             err: false,
             io,
@@ -413,7 +300,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
 
     #[inline(always)]
     fn limit(&self) -> usize {
-        if ENC { self.src.len() } else { self.dst_len }
+        if ENC { self.src.len() } else { self.dst.len() }
     }
 
     #[inline(always)]
@@ -429,9 +316,8 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
 
     #[inline(always)]
     fn wr(&mut self, v: u8) {
-        if self.p < self.dst_len {
-            // SAFETY: in bounds; this byte is structural (walker-owned)
-            unsafe { *self.dst.add(self.p) = v };
+        if let Some(d) = self.dst.get_mut(self.p) {
+            *d = v;
         } else {
             self.err = true;
         }
@@ -538,10 +424,9 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             self.p += n;
         } else {
             let p = self.p;
-            match self.io.take_blob(sid, n) {
-                Some(b) if p + n <= self.dst_len => {
-                    // SAFETY: in bounds, walker-owned bytes
-                    unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), self.dst.add(p), n) };
+            match (self.io.take_blob(sid, n), self.dst.get_mut(p..p + n)) {
+                (Some(b), Some(d)) => {
+                    d.copy_from_slice(b);
                     self.p += n;
                 }
                 _ => self.err = true,
@@ -575,7 +460,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             self.t_end = self.t;
             t
         } else {
-            let stop = self.dst_len.saturating_sub(tail);
+            let stop = self.dst.len().saturating_sub(tail);
             while !self.err && self.p < stop {
                 self.frame();
             }
@@ -637,11 +522,8 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 self.payload(0, ty);
             }
             let n = (self.p - at - 4) as u32;
-            if at + 4 <= self.dst_len {
-                // SAFETY: in bounds, walker-owned bytes
-                unsafe {
-                    std::ptr::copy_nonoverlapping(n.to_le_bytes().as_ptr(), self.dst.add(at), 4);
-                };
+            if let Some(d) = self.dst.get_mut(at..at + 4) {
+                d.copy_from_slice(&n.to_le_bytes());
             }
         }
     }
@@ -807,11 +689,11 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 let start = self.generic(GEN_BASE + 11, 11);
                 if !self.err {
                     let end = self.p;
-                    // SAFETY (decode): the serverdata body was just written by the walker
+                    // decode: the serverdata body the walker just wrote
                     let b: &[u8] = if ENC {
                         &self.src[start..end]
                     } else {
-                        unsafe { std::slice::from_raw_parts(self.dst.add(start), end - start) }
+                        self.dst.get(start..end).unwrap_or_default()
                     };
                     let mut pr = self.proto;
                     pr.observe_server_data(b);
