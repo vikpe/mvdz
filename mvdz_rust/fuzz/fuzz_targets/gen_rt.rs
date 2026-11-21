@@ -14,22 +14,17 @@ fn rt(c: &[u8], demo: &[u8], what: &str) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 3 {
+    if data.len() < 2 {
         return;
     }
-    let seg = if data[0] & 2 == 0 {
-        0
-    } else {
-        32 + data[1] as usize * 8
-    };
     let threads = 1 + (data[0] as usize >> 2) % 3;
-    let demo = mgen::demo(&data[2..]);
+    let demo = mgen::demo(&data[1..]);
     // (1) the transform without verification
     let cfg = mvdz::Config {
         threads,
         verify: false,
     };
-    let (c, _) = mvdz::encode::compress_segmented(&demo, seg, &cfg).expect("compress (no verify)");
+    let (c, _) = mvdz::encode::compress(&demo, &cfg).expect("compress (no verify)");
     if std::env::var("REQUIRE_TRANSFORM_LOSSLESS").is_ok() {
         rt(&c, &demo, "unverified transform");
     } else if mvdz::decompress(&c, 1).ok().as_deref() != Some(&demo[..]) {
@@ -40,7 +35,7 @@ fuzz_target!(|data: &[u8]| {
         threads,
         ..Default::default()
     };
-    let (c, _) = mvdz::encode::compress_segmented(&demo, seg, &cfg).expect("compress");
+    let (c, _) = mvdz::encode::compress(&demo, &cfg).expect("compress");
     rt(&c, &demo, "one-shot");
     assert!(mvdz::decompress(&c, 3).unwrap() == demo);
 });

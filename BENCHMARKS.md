@@ -363,19 +363,17 @@ of hashes: [`benchmarks/samples/`](benchmarks/samples) holds the lists
 used here.
 
 ```
-# ratios and library speeds over a set of demos (as the release builds:
-# --target x86_64-unknown-linux-musl)
-cargo build --release
-target/release/mvdz bench --levels normal,fast -r 1 -j 4 demos/*.mvd
-target/release/mvdz bench --levels normal,fast -r 1 -j 1 --skip-compress --trusted demos/*.mvd
+# library speeds over a set of demos (every *.mvd in the directory),
+# compress and decompress at 4 threads and 1, with criterion
+MVDZ_BENCH_DEMOS=$PWD/demos cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
 
 # command-line decode speed against gzip, xz and zstd (one process per
 # file); for the speed tables each command ran once per round, 5 rounds
 ls demos/*.mvd > list.txt
 scripts/bench_cli.sh /tmp/bench list.txt
 
-# round trips: both levels, whole and segmented, one-shot and streamed
-cargo run --release --example sweep -- -s 1M demos/*.mvd
+# round trips: every demo through the whole-file and the sequential reader
+cargo run --release --example sweep -- demos/*.mvd
 
 # the tests, with real demos where they help (see README, Tests)
 MVDZ_TEST_DATA=/path/to/testdata cargo nextest run --release

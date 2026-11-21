@@ -212,13 +212,13 @@ fn hostile(v: &mut Vec<Vector>) -> anyhow::Result<()> {
         v.push((format!("hostile-{name}.mvdz"), b, None, how.to_string()));
     };
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let base = compress(&demo, &cfg(300))?;
+    let base = compress(&several_segments(&demo))?;
     let p = parts(&base)?;
     assert!(p.segs.len() > 3);
     add(
         "base-cut",
         base[..base.len() - 10].to_vec(),
-        "the base file (a synthetic demo, -s 300) without its last 10 bytes",
+        "the base file (a synthetic demo repeated to several segments) without its last 10 bytes",
     );
     let mut x = base.clone();
     x.push(0);
@@ -363,11 +363,11 @@ fn hostile(v: &mut Vec<Vector>) -> anyhow::Result<()> {
     tables(&mut add)
 }
 
-/// Hostile models blocks (FORMAT.md §2.6, §8.4), from the usercmd demo at
-/// -s 8K.
+/// Hostile models blocks (FORMAT.md §2.6, §8.4), from the usercmd demo
+/// repeated to several segments.
 fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let uc = usercmd_demo();
-    let tc = compress(&uc, &cfg(8192))?;
+    let tc = compress(&several_segments(&uc))?;
     let p = parts(&tc)?;
     assert!(!p.models.is_empty(), "a segmented normal file has models");
     let ents = tables_entries(&p.models)?;
@@ -541,30 +541,24 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         v.push((name.to_string(), b, Some(d.to_vec()), how.to_string()));
     };
     // without the input check: some vectors hold non-demo input
-    let one = |d: &[u8], c: Cfg| anyhow::Ok(unchecked(d, &c)?.0);
+    let one = |d: &[u8]| anyhow::Ok(unchecked(d)?.0);
     let src = "duel = sample 3ff1f82b...8d92";
     add(
         "duel.normal.mvdz",
-        one(&duel, cfg(0))?,
+        one(&duel)?,
         &duel,
         &format!("{src}; compress"),
     );
-    add(
-        "duel.normal.seg64k.mvdz",
-        one(&duel, cfg(65536))?,
-        &duel,
-        &format!("{src}; compress -s 64K"),
-    );
-    let fb = untransformed(&duel, &cfg(65536))?;
+    let fb = untransformed(&duel)?;
     add(
         "duel.untransformed.mvdz",
         fb,
         &duel,
-        &format!("{src}; every segment zstd (the fallback layout), segment 64K"),
+        &format!("{src}; every segment DEFLATE (the fallback layout)"),
     );
     add(
         "duel-truncated.normal.mvdz",
-        one(&duel[..150_000], cfg(0))?,
+        one(&duel[..150_000])?,
         &duel[..150_000],
         "the first 150000 bytes of duel (ends inside a frame)",
     );
@@ -572,56 +566,57 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let random: Vec<u8> = Vec::from_fn(3000, |_| rng.next() as u8);
     add(
         "float-mvd1.normal.mvdz",
-        one(&mvd1, cfg(0))?,
+        one(&mvd1)?,
         &mvd1,
         "rev-correct gen1/float_mvd1.mvd (MVD1 float coordinates, 3 escapes)",
     );
     add(
         "float-fte.normal.mvdz",
-        one(&fte, cfg(0))?,
+        one(&fte)?,
         &fte,
         "the first 300000 bytes of sample 3fdd8018 (FTE float coordinates)",
     );
     let esc = escapes();
     add(
         "escapes.normal.mvdz",
-        one(&esc, cfg(0))?,
+        one(&esc)?,
         &esc,
         "synthetic demo with unknown commands and lying hidden blocks",
     );
-    let md = multi_demoinfo();
+    let md = several_segments(&multi_demoinfo());
     add(
         "demoinfo-multi.normal.mvdz",
-        one(&md, cfg(1000))?,
+        one(&md)?,
         &md,
-        "synthetic demo carrying a 3-block KTX demoinfo twice; segment 1000",
+        "synthetic demo carrying a 3-block KTX demoinfo twice, repeated to several segments",
     );
     add(
         "random.normal.mvdz",
-        one(&random, cfg(0))?,
+        one(&random)?,
         &random,
         "3000 random bytes (no frame: all tail)",
     );
-    let rs = untransformed(&random, &cfg(0))?;
+    let rs = untransformed(&random)?;
     add(
         "random.deflate.mvdz",
         rs,
         &random,
         "the same, untransformed: one DEFLATE segment",
     );
-    add("empty.normal.mvdz", one(b"", cfg(0))?, b"", "an empty demo");
+    add("empty.normal.mvdz", one(b"")?, b"", "an empty demo");
     let uc = usercmd_demo();
     add(
         "usercmd.normal.mvdz",
-        one(&uc, cfg(0))?,
+        one(&uc)?,
         &uc,
         "synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)",
     );
+    let ucs = several_segments(&uc);
     add(
-        "usercmd.normal.seg8k.mvdz",
-        one(&uc, cfg(8192))?,
-        &uc,
-        "the same, -s 8K",
+        "usercmd.normal.segments.mvdz",
+        one(&ucs)?,
+        &ucs,
+        "the same, repeated to several segments",
     );
     hostile(&mut v)?;
     Ok(Some(v))

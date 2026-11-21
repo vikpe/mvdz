@@ -4,9 +4,9 @@ MVDZ is a proposal with no files in the wild, so there is no compatibility burde
 
 ## Status (2026-11-21, evening)
 
-Resume point: "Format decisions of 2026-11-21" under Results per change: five decisions,
-step A implemented (uncommitted), steps B and C to do. After them, "Suggestions
-(2026-11-21)" near the end of this file. Last commit 97bea21, 39 commits on `master`. Tests (`cargo nextest run --release` in `mvdz_rust/`):
+Resume point: "Handoff" below. Five format decisions on 2026-11-21; step A committed
+(149c415), steps B and C to do. After them, "Suggestions (2026-11-21)" near the end of
+this file. 40 commits on `master`. Tests (`cargo nextest run --release` in `mvdz_rust/`):
 41 pass, 4 fail (the known four). `cargo clippy --all-targets -- -D warnings` is clean.
 
 Done on 2026-11-21: two-pass encoder and the memory work, CLI decompress streams,
@@ -58,6 +58,182 @@ a reboot); it was:
 `/tmp/blobplan/mvd2000.txt`. `/tmp` does not survive a reboot: the harness sources are
 `bench2_a9.rs` and `bench3.rs` there, the probe `tmp_probe4.rs`.
 
+## Handoff (written 2026-11-21 for the next session)
+
+Read this section first. Everything needed to finish steps B and C is here; the rest of
+the file is history and measurements.
+
+### Working rules
+
+- Viktor commits every change himself. Never commit, never `git add`. Stop after each
+  step, list the changed files, suggest a commit message, and wait.
+- Do not edit code until Viktor says so for the step at hand (he has said so for steps A,
+  B and C: "2. Record and implement", 2026-11-21). Do not start the Suggestions without
+  being asked.
+- Between commits no test may fail that is not under "Known failing tests" (the four
+  that read old vectors). Run from `mvdz_rust/`: `cargo nextest run --release
+  --no-fail-fast`, `cargo clippy --all-targets --release -- -D warnings`, `cargo fmt`.
+- Every claim needs a measurement or a checked fact; otherwise say it is unmeasured.
+- Decisions are Viktor's: recommend, number the options, and wait. Each suggestion in
+  a table with the current and the proposed solution side by side.
+- Limits: a thing repeated per segment or per stream gets about 100 times the real
+  maximum (what mvdsv can write; see the table below), never 1,000. A field that occurs
+  once per file may be generous (u64) if it costs little. Where the simple choice still
+  clears the limits by a wide margin, take the simple choice (fixed width over
+  variable-length).
+
+### Where things are
+
+- Code: `mvdz_rust/` (crate `mvdz`). Paths below are relative to it.
+- Step A is committed: 149c415 "Replace the ratio rule with a 2 MiB cap on a segments
+  coded length". Step B starts from there, on branch `feature/simplify`.
+- Demos for measuring: `~/dev/mvdz-bench` and `~/dev/qwdemos` do not exist on this
+  machine. Use the archive: `/media/vikpe/qw_storage/demos_storage/all_demos/index.jsonl`
+  (one JSON object per line; fields `format`, `size_bytes`, `duration_ms`, `xxh3_64`,
+  `sha256`, `server_info`); the file of a row is
+  `all_demos/processed/<xxh3_64[:3]>/<xxh3_64[3:]>.gz` (gzip of the raw demo). Take only
+  rows with `"format":"mvd"`. The sample used today: sort the mvd paths, shuffle with
+  Python `random.Random(20261121)`, take the first 500. Decompress with Python `gzip`
+  to a temporary file, run `target/release/mvdz compress -j 4 -f in.mvd out.mvdz`.
+- Reference sources: `~/dev/reference/mvdsv` (demo writer in `src/sv_demo.c`,
+  `src/sv_demo_misc.c`; constants in `src/bothdefs.h`, `src/server.h`) and
+  `~/dev/reference/qwprot/src/protocol.h` (message types `dem_*`, hidden block ids).
+
+### The target format after steps B and C
+
+```
+file    := header | models | segment*
+header  := "MVDZ" | version u32 | size u64 | duration_ms u64 | crc u64 | sha256[32]  (64 bytes)
+models  := len u32 | body[len]
+body    := n u32 | n x { id u32 | len u32 | model[len] }           (ids strictly increasing)
+segment := len u32 | raw_len u32 | dur_ms u32 | crc u32 | coded[len]   (16 bytes, then coded)
+coded   := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
+           | n x { id u32 | count u32 | [len u32 if id is not a blob stream] }
+           | blob_len u32 | stream bodies in table order | one raw DEFLATE stream of blob_len bytes
+```
+
+Every integer is little-endian; every integer is a u32 except the three u64 fields of
+the file header. There is one segment coding, the transform. A segment the transform
+cannot code is written with `tail = raw_len`: no frames, every byte in the `TAIL` blob
+stream (id 81). Limits: `raw_len` 1 to 1 MiB (`MAX_SEG_RAW`); `len` at most 2 MiB
+(`MAX_SEG_CODED`, step A); models block at most 16 MiB (`TABLES_MAX`). Every segment
+but the last is whole frames or exactly 1 MiB. `version` stays 2 until the vectors are
+regenerated (the old vectors fail anyway).
+
+### Step B: one segment coding (decided, not started)
+
+Goal: delete coding 1 (whole segment as DEFLATE) and the `coding` byte. Write the test
+first: a segment of bytes that *do* frame, written as all tail, must round-trip through
+every reader (`readers_agree` in `tests/common/mod.rs`). Today an all-tail segment is
+only known to work for bytes that do not frame (`random.normal.mvdz`, 3,000 random
+bytes, and 1 MiB of appended junk in a manual run).
+
+Library:
+
+1. `src/format.rs`: remove `C_TRANSFORM`, `C_DEFLATE`, the `coding` field of `SegHdr`,
+   the `coding` parameter of `seg_hdr_bytes`, the coding check in `parse_seg_hdr`;
+   `SEG_FIELDS` becomes `4 + 4 + 4` (12). Update the module doc grammar.
+2. `src/decode.rs` `decode_segment`: drop the `match h.coding`; always
+   `segment::parse_header` + `segment::decode`. Imports of `C_*` go.
+3. `src/encode.rs`: delete `raw_body`, `Body::raw`, `Body::fallback`,
+   `Info::fallback_segments`, `compress_untransformed` and the `force_raw` parameter of
+   `compress_inner`; import of `DEFLATE_LEVEL` goes. Where a segment is not walkable
+   (`t.walked[i]` false, or `segment::walk` returns None in pass 2, or
+   `transform_body` returns None) code it as all tail (point 4). The self-check loop
+   (`for _round in 0..2`, `failing_segments`): keep it, but a failing segment is
+   replaced by its all-tail body instead of `Body::raw`; a segment that is already all
+   tail and still fails is `Error::Internal`. `Info::escaped` already counts tail bytes.
+4. `src/segment.rs`: add `pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked`
+   next to `walk` (line 227): `io = EncIO::new()` with `io.blobs[TAIL] =
+   src.to_vec()`, `recs = Recs::growable(0)` then `recs.finish()`, `tail = src.len()`,
+   `proto0 = proto`; the protocol state after it is `proto` unchanged (nothing was
+   parsed). Then `numerics(src, &wk, threads)` must give empty streams for it (check:
+   `Group::run` over empty `recs`), and `segment::encode` must write a table with the
+   one blob entry (`TAIL`, count = len) and the DEFLATE blob body. Decode side needs no
+   change: `Walker::run` in decode direction with `tail == dst_len` runs no frame and
+   copies the tail (walk.rs line 578). Untested until the test in the first paragraph
+   passes.
+5. `src/main.rs`: remove the fallback warning (lines 315-318). (`bench` and its
+   `fallback_segments` column are gone with the criterion change.)
+6. `src/deflate.rs` stays: the blob body is DEFLATE. `compress` with level 0 (stored)
+   is then unused: remove that branch if nothing else calls it.
+
+Tests:
+
+7. `tests/common/mod.rs`: delete `untransformed`.
+8. `tests/hostile.rs` lines 84-95: the "unknown coding" case goes; the "empty segment"
+   case builds its header with the 3-argument `seg_hdr_bytes`. Lines 128-136 (the
+   "1 MiB segment in 9 bytes" case) build a transform body instead: any 9 bytes are
+   refused by `parse_header`. Line 202-206 and `tests/review_fixes.rs` line 68: drop the
+   `C_TRANSFORM` argument. `tests/review_fixes.rs` lines 174-187 (an untransformed
+   segment's CRC): use a normally compressed file.
+9. `tests/vectors.rs`: remove vectors `segment-coding` (line 272), rebuild
+   `segment-empty` (275) and `segment-duration` (288-310) without coding 1 (the latter
+   can use `one(&plain, ...)` and raise `dur_ms` and the header's duration by 1); remove
+   `duel.untransformed.mvdz` (555-566) and `random.deflate.mvdz` (600-613). Add
+   `framed-as-tail.mvdz`: a synthetic demo written as all tail (needs a test entry
+   point; `compress_untransformed` becomes `compress_all_tail` with the same
+   `#[doc(hidden)]` status, or the vector is built by hand from `parts`).
+10. `tests/roundtrip.rs` lines 14, 113, 275 and `tests/corrupt.rs` line 52: the
+    `fallback_segments` asserts go. `fuzz/fuzz_targets/gen_rt.rs` line 4 comment.
+11. FORMAT.md is rewritten later (Remaining implementation); do not touch it now.
+
+Measure after B: the 500-demo output size must be unchanged to the byte except for the
+missing coding byte (5,649 segments: 278,553,572 - 5,649 = 278,547,923 bytes). Report.
+
+### Step C: every integer a u32 (decided, not started)
+
+Goal: no variable-length integers in the file. Expected cost: +0.66 % of output on the
+500 (arithmetic from the entry counts; measure the real figure).
+
+1. `src/segment.rs` `encode` (lines 482-507): each `put_uv(&mut out, v)` becomes
+   `out.extend_from_slice(&(v as u32).to_le_bytes())` (ids, counts and lengths all fit:
+   count at most 1 MiB + 16, length at most 2 MiB; use `u32::try_from` with an
+   `Internal` error, or a checked cast under the crate's cast rule).
+2. `src/segment.rs` `parse_header` (579-640): `r.u32v()`/`r.uz()` become `r.u32le()`
+   (then `usize::from`/`as usize` per the cast rule). Keep every check (tail <=
+   raw_len, n <= N_STREAMS, stream id valid, no duplicate, count bound, bodies sum to
+   the body length).
+3. `src/segment.rs` `tables_body` (389-395) and `src/coder/rans.rs` `read_tables`
+   (885-900): count, id and length as u32.
+4. `src/util.rs`: delete `put_uv`, `Rd::uv`, `Rd::uz`, `Rd::u32v` and the test
+   `uv_limits` (174-185) once nothing uses them. `Rd::u32le` stays.
+5. Tests that write these integers by hand: `tests/hostile.rs` (192, 199, 293-296),
+   `tests/review_fixes.rs` (54-65), `tests/vectors.rs` (119-177, 508-511): write u32s.
+6. Re-measure the flippable-bit count afterwards if asked (open question 9): padded
+   variable-length encodings (`80 00` for 0) were one source of flippable bits.
+
+Measure after C: output size on the same 500 against the step-B figure; report the
+percentage. The Decisions table row "Integers inside a chunk" has the estimate.
+
+### mvdsv's limits against ours (2026-11-21)
+
+Theoretical maxima are from mvdsv's code (70f1135); headroom is ours divided by mvdsv's.
+
+| Thing | mvdsv maximum | Ours (after A to C) | Headroom |
+|---|---|---|---|
+| Frame payload | 8,092 bytes (`MAX_MVD_SIZE`) | no rule; a frame up to 786,432 bytes is always kept whole in one segment | 97x |
+| Whole frame | 8,102 bytes | same | 97x |
+| Bytes per server tick | 40,506 | no rule; bounded by the 1 MiB segment | 26x |
+| Frame time | 255 ms, one byte | `dur_ms` u32 per segment; a 1 MiB segment holds at most 44,564,310 ms | 96x |
+| Segment raw length | 270,245 (256 KiB target + one largest frame) | 1 MiB | 3.9x |
+| Segment coded length | about 270 KiB for mvdsv data; about 1 MiB + 0.5 KiB for junk | 2 MiB | 7.7x / 2x |
+| Demo size | 20 MiB default (`sv_demoMaxSize`; 0 = unlimited) | u64; `MAX_SEGMENTS` 65,536, about 16 GiB | 819x |
+| Segments per demo | 80 | 65,536 | 819x |
+| Demo duration | about 10 days at the default size cap | u64 | 2 x 10^10 x |
+| Symbol count per stream | 1,048,592 | u32 (step C; u16 is too small) | 4,096x |
+| Stream body length | 2 MiB | u32 (step C) | 2,048x |
+| Models block | none; largest measured 47,608 | 16 MiB | 352x (measured) |
+| Frame types | writes 3, 4, 5, 6 | accepts 1 to 6 (1 and 2 occur in the archive) | - |
+
+### After steps B and C
+
+The open questions 9, 12, 13 and 14 (format), then 6 and 11; then the Suggestions in the
+order given there (out-of-the-library 1 and 2, tests-and-experiments 1 and 3, naming),
+then Remaining implementation (vectors, FORMAT.md, README, BENCHMARKS.md). Note for
+FORMAT.md: demoinfo is not always in the last segment (25 of 367 files), so the
+consumer note "decode the last chunk" must become "scan back from the last segment".
+
 ## Goal
 
 A format simple enough to stay unchanged for 10+ years.
@@ -93,7 +269,7 @@ All implemented unless marked.
 | Blob layout | One DEFLATE stream per chunk holds all blob streams | Blob decode 1.7 times faster than one stream each; one inflate call per chunk; 0.08 % larger |
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
 | Chunk codings (2026-11-21, step B, not done) | One: the transform. A chunk the transform cannot code is written as all tail; the `coding` byte and coding 1 (raw DEFLATE) go; chunk header 16 bytes | Coding 1 was used in 0 of 9,109 segments of 525 archive demos and 0 of 5 damaged copies; a 1 MiB segment of junk already codes as all tail and round-trips |
-| Ratio rule (2026-11-21, step A) | Removed (`raw_len <= 1024 * len + 4096`, the two constants, the reader check, the "stored blocks" fallback). In its place a reader rule: a chunk's `len` is at most 2 MiB (`MAX_SEG_CODED`), checked at the length field before anything is read | Largest `raw_len / len` in 9,109 segments is 118.39, so the rule had 8.7 times headroom; the 1 MiB raw cap already bounds output. The largest coded segment seen is 110,888 bytes; 1 MiB of junk codes to about 1 MiB + 0.5 KiB, so 2 MiB is 2 times the possible maximum |
+| Ratio rule (2026-11-21, step A, 149c415) | Removed (`raw_len <= 1024 * len + 4096`, the two constants, the reader check, the "stored blocks" fallback). In its place a reader rule: a chunk's `len` is at most 2 MiB (`MAX_SEG_CODED`), checked at the length field before anything is read | Largest `raw_len / len` in 9,109 segments is 118.39, so the rule had 8.7 times headroom; the 1 MiB raw cap already bounds output. The largest coded segment seen is 110,888 bytes; 1 MiB of junk codes to about 1 MiB + 0.5 KiB, so 2 MiB is 2 times the possible maximum |
 | Models block limit | Stays 16 MiB | Once per file; largest seen 47,608 bytes (352 times headroom); the cost is reader memory, not file bytes |
 | Integers inside a chunk and in the models index (2026-11-21, step C, not done) | Every number a little-endian u32: the chunk's protocol flags, tail, stream count, each stream entry (id, count, length), the blob body length, and the models block index (count, id, length). No variable-length integers anywhere | Simplicity over the margin (Viktor, 2026-11-21): one integer type in the file, no variable-length reader and its three edge rules in any port, no padded encodings. Measured cost +0.66 % of output on 500 random archive demos, +1.31 % on the 25 largest and longest (arithmetic from the entry counts, not a rebuilt encoder). Open question 4 closed |
 | Header fields | Stay u64 (`size`, `duration_ms`, `crc`), 64-byte header; `MAX_SEGMENTS` stays | Once per file, 12 bytes; the rule of 2026-11-21: a single-place field may be generous if cheap, a repeated one gets about 100 times the real maximum |
@@ -699,7 +875,7 @@ stays 16 MiB. Rule for limits: a repeated thing gets about 100 times the real ma
 a single-place field may be generous if cheap, and where the simple choice clears the
 limits with a wide margin, take the simple choice.
 
-Step A (uncommitted on top of 97bea21): `SEG_RATIO`, `SEG_SLACK`, `ratio_ok`,
+Step A (149c415): `SEG_RATIO`, `SEG_SLACK`, `ratio_ok`,
 `seg_ratio_ok` gone; `MAX_SEG_CODED` (2 MiB) and `check_coded_len` in `format.rs`,
 applied by both readers at the length field; the encoder's "stored blocks" second try
 gone; `transform_body` refuses a body over the limit. Tests: `ratio_limit_fallback`
@@ -882,23 +1058,45 @@ number is given.
    `api.rs`, about 110 lines, Unix-specific parts): move to `main.rs`.
 2. JSON rendering (`FileInfo::to_json*`): only `mvdz info` uses it. Return the struct,
    print in the tool.
-3. `bench` is 135 of the 526 lines of `main.rs` and the reason `Info` carries stream
-   statistics and `util::par_map`, stream names and `approx_f64` are public. Replace
-   it with criterion benchmarks (`benches/`, a dev-dependency; decided 2026-11-21):
-   encode and decode at 1 and 4 threads over a fixed set of demos, with criterion's
-   statistics and baseline comparison in place of one-shot timings. The slipgate
-   rule applies: write the benchmark first, then optimize. To settle then: where the
-   benchmark demos come from (none are in the repository), and that peak memory and
-   compressed size are not criterion's job, so `compare4.sh` or a small script stays
-   for those.
+3. Done (2026-11-21, not committed): `mvdz bench` removed from `main.rs` (its
+   options `-r`, `--files`, `--streams`, `--skip-compress` with it; `--no-verify`
+   stays, `compress` reads it). In its place `benches/codec.rs`, criterion 0.8 as a
+   dev-dependency without default features (no plotters, no rayon). Groups
+   `compress` and `decompress`, each `4t` and `1t`; one iteration codes every demo
+   once, one file at a time, self-check and every decode check on; throughput in MB/s
+   (10^6 bytes); flat sampling, 10 samples, 15 s. Demos: every `*.mvd` in the
+   directory `MVDZ_BENCH_DEMOS` (like the tests' `MVDZ_TEST_DATA`); unset, it measures
+   nothing. Before timing it compresses each demo and checks the round trip. Compare
+   builds with `cargo bench --bench codec -- --save-baseline a` and `-- --baseline a`.
+   Size and peak memory stay outside criterion. Still open: which demos (set8 of
+   `benchmarks/samples/` is 18.9 MB, the old speed-table set; 6 of its 8 are in the
+   archive index); `Info::streams`, `util::par_map`, `streams::name` and `approx_f64`
+   no longer need to be public for the tool (`Info::streams` has no reader left).
+   First run (11 random archive demos, 36,183,640 bytes raw, in `/tmp/mvdz-bench-demos`,
+   not kept; MB/s, criterion's estimate): compress 4t 88.2, 1t 33.6; decompress 4t
+   341.4, 1t 104.5. A second run against that baseline: all four within 1 %, flagged
+   "no change" or "within noise". One run takes about 2 minutes.
 
 ### Paths that exist for tests or experiments
 
 1. `Config::verify`: compress is meant to take no options. Without it `Config` is a
-   thread count. The bench uses it to time encoding without the self-check.
-2. `compress_segmented`, `compress_untransformed`: with the size fixed and capped,
-   tests can use demos over 256 KiB. Removes the `target` parameter and the "0: no
-   target" case of `cut_points`.
+   thread count. Since the criterion change only the tool's undocumented
+   `compress --no-verify` uses it; the benchmark times compress with the self-check.
+2. Done (2026-11-21, not committed; Viktor chose "one segment size everywhere"):
+   `compress_segmented` is gone, `compress_untransformed` and `cut_points` lose
+   their size parameter, `cut_points` cuts at `SEGMENT` only. Tests that need
+   several segments repeat a synthetic demo past 4 x 256 KiB (`several_segments` in
+   `tests/common`); the `Cfg` test type is gone. `examples/sweep.rs` drops `-s` and
+   checks the 256 KiB file only; the fuzz target `gen_rt` loses its segment byte
+   (old corpus inputs read differently). Vectors: `duel.normal.seg64k` removed,
+   `usercmd.normal.seg8k` is now `usercmd.normal.segments`; `duel.untransformed`,
+   `demoinfo-multi` and the hostile bases now use 256 KiB segments (to regenerate
+   with the others). `r_m4_section_bookkeeping` builds its 60,000-segment file by
+   hand (one encoded one-frame segment repeated). `c_m1_segment_limit` removed: the
+   encoder's `MAX_SEGMENTS` refusal needs a 16 GiB demo now, so it is untested (the
+   check stays in `compress_inner`). Tests: 40 pass, the known 4 fail (44 tests, was
+   45); with 11 archive demos as `MVDZ_TEST_DATA/sample` the same, and `sweep` round
+   trips all 11. The tests that need the duel sample still skip on this machine.
 3. `TABLE_BITS_PER_SYM` (`rans.rs`): a global atomic nothing writes. Make it a constant.
 4. The `scalar` feature: two uses. Keep only if CI runs it (not checked).
 
@@ -957,8 +1155,9 @@ number is given.
 `CODECS=mvdz MVDZ=<binary>` for one build. The machine flips between two speed levels
 about 6 % apart (about 123/378 and 117/357 MB/s encode/decode): compare two builds by
 alternating runs, never by one run each. Output hash of the 100 files so far:
-`6b17ab94f6e5c4c2`. Criterion (see "Out of the library", 3) should replace the
-speed part of this.
+`6b17ab94f6e5c4c2`. Criterion (`benches/codec.rs`, see "Out of the library", 3) now
+does the library speed part; this script still gives size, peak memory and the
+command-line speed.
 
 Order suggested: out-of-the-library 1 and 2, then tests-and-experiments 1 and 3, then
 naming.

@@ -7,59 +7,31 @@ use mvdz::Config;
 use mvdz::format::*;
 use std::io::{Cursor, Read};
 
-/// How a test compresses: the segment size (0: the format's own, 256 KiB;
-/// other sizes give small demos several segments, through the encoder's
-/// test entry point) and the worker threads.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Cfg {
-    pub seg: usize,
-    pub threads: usize,
-}
-
-pub(crate) fn cfg(seg: usize) -> Cfg {
-    Cfg { seg, threads: 1 }
-}
-
-impl Cfg {
-    fn config(&self) -> Config {
-        Config {
-            threads: self.threads,
-            verify: true,
-        }
-    }
-}
-
 /// Compresses a demo as the library does (input that is not a demo is
-/// refused), at the test's segment size.
-pub(crate) fn compress(src: &[u8], c: &Cfg) -> mvdz::Result<Vec<u8>> {
-    compress_info(src, c).map(|x| x.0)
+/// refused), on one thread.
+pub(crate) fn compress(src: &[u8]) -> mvdz::Result<Vec<u8>> {
+    compress_info(src).map(|x| x.0)
 }
 
-pub(crate) fn compress_info(src: &[u8], c: &Cfg) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
-    if c.seg == 0 {
-        return mvdz::compress_info(src, &c.config());
-    }
-    mvdz::check_demo(src)?;
-    unchecked(src, c)
+pub(crate) fn compress_info(src: &[u8]) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
+    mvdz::compress_info(src, &Config::default())
 }
 
 /// The encoder without the input check (any bytes round-trip).
-pub(crate) fn unchecked(src: &[u8], c: &Cfg) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
-    if c.seg == 0 {
-        mvdz::encode::compress(src, &c.config())
-    } else {
-        mvdz::encode::compress_segmented(src, c.seg, &c.config())
-    }
+pub(crate) fn unchecked(src: &[u8]) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
+    mvdz::encode::compress(src, &Config::default())
 }
 
 /// Every segment coded without the transform (as DEFLATE).
-pub(crate) fn untransformed(src: &[u8], c: &Cfg) -> anyhow::Result<Vec<u8>> {
-    let seg = if c.seg == 0 {
-        mvdz::segment::SEGMENT
-    } else {
-        c.seg
-    };
-    Ok(mvdz::encode::compress_untransformed(src, seg, &c.config())?.0)
+pub(crate) fn untransformed(src: &[u8]) -> anyhow::Result<Vec<u8>> {
+    Ok(mvdz::encode::compress_untransformed(src, &Config::default())?.0)
+}
+
+/// `demo` repeated past four times [`mvdz::segment::SEGMENT`]: the encoder
+/// cuts only at that size, so a small demo of whole frames gets at least
+/// four segments this way.
+pub(crate) fn several_segments(demo: &[u8]) -> Vec<u8> {
+    demo.repeat(4 * mvdz::segment::SEGMENT / demo.len().max(1) + 1)
 }
 
 pub(crate) struct Rng(pub u64);

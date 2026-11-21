@@ -12,9 +12,14 @@ use std::assert_matches;
 use std::io::Cursor;
 use std::time::Instant;
 
-fn base(seg: usize) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let c = compress(&demo, &cfg(seg))?;
+/// A small demo and its file; `is_long`: the demo repeated to several
+/// segments.
+fn base(is_long: bool) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let mut demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
+    if is_long {
+        demo = several_segments(&demo);
+    }
+    let c = compress(&demo)?;
     Ok((demo, c))
 }
 
@@ -40,7 +45,7 @@ fn corrupt(e: &Error) -> bool {
 
 #[test]
 fn structure_rules() -> anyhow::Result<()> {
-    let (demo, c) = base(300)?;
+    let (demo, c) = base(true)?;
     assert_eq!(
         readers_agree(&c, "base").context("every reader refuses")?,
         demo
@@ -123,7 +128,7 @@ fn structure_rules() -> anyhow::Result<()> {
 /// 12; correctness F4): each is refused by a format rule or the budget.
 #[test]
 fn declared_sizes() -> anyhow::Result<()> {
-    let (_, c) = base(0)?;
+    let (_, c) = base(false)?;
     let p = parts(&c)?;
     // a segment that claims the largest raw length in 9 bytes that are
     // not DEFLATE data: its output buffer is within the budget, and
@@ -159,7 +164,7 @@ fn declared_sizes() -> anyhow::Result<()> {
     b.extend_from_slice(&p.segs[0]);
     refused(&b, "segment length", corrupt);
     // the caller's memory budget
-    let (demo, c) = base(0)?;
+    let (demo, c) = base(false)?;
     let small = mvdz::Limits {
         memory: demo.len() as u64 / 2,
         ..Default::default()
@@ -182,7 +187,7 @@ fn model_amplification() -> anyhow::Result<()> {
         return Ok(());
     };
     let demo = synthetic(&[], false);
-    let c = compress(&demo, &cfg(0))?;
+    let c = compress(&demo)?;
     let p = parts(&c)?;
     for name in ["v2model_1000.bin", "v2model_16000.bin", "v2model_65535.bin"] {
         // a model and a rANS stream body: header length, header, rANS data
@@ -225,8 +230,8 @@ fn model_amplification() -> anyhow::Result<()> {
 #[test]
 fn mutations_agree() -> anyhow::Result<()> {
     let mut rng = Rng(0x5eed);
-    for seg in [0, 300] {
-        let (_, c) = base(seg)?;
+    for is_long in [false, true] {
+        let (_, c) = base(is_long)?;
         for _ in 0..150 {
             let mut b = c.clone();
             match rng.below(3) {
@@ -287,7 +292,7 @@ fn wide_model(n: u32) -> Vec<u8> {
 #[test]
 fn large_tables() -> anyhow::Result<()> {
     let demo = usercmd_demo();
-    let c = compress(&demo, &cfg(8192))?;
+    let c = compress(&several_segments(&demo))?;
     let mut p = parts(&c)?;
     assert!(!p.models.is_empty());
     let m = wide_model(512);

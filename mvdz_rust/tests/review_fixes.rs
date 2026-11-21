@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 /// A small demo and its file.
 fn base() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let c = compress(&demo, &cfg(0))?;
+    let c = compress(&demo)?;
     Ok((demo, c))
 }
 
@@ -106,12 +106,22 @@ fn r_m3_json_limit() -> anyhow::Result<()> {
 /// sequential reader stops with a limit error instead of growing.
 #[test]
 fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
-    // one segment per frame
-    let demo = sets(60_000);
-    let f = compress(&demo, &cfg(1))?;
-    assert!(parts(&f)?.segs.len() > 60_000);
+    // one segment per frame. The encoder cuts at 256 KiB, so the file is
+    // built by hand: the segment of a one-frame demo, 60,000 times, under
+    // the header of the whole demo
+    let frame = [0, 1, 1, 0, 0, 0, 1]; // dem_read holding one svc_nop
+    let n = 60_000;
+    let demo = frame.repeat(n);
+    let one = parts(&compress(&frame)?)?;
+    assert_eq!(one.segs.len(), 1);
+    let f = Parts {
+        header: parts(&compress(&demo)?)?.header,
+        models: one.models,
+        segs: vec![one.segs[0].clone(); n],
+    }
+    .build();
     assert_eq!(mvdz::decompress(&f, 1)?, demo);
-    // the demo is 0.6 MB and a sequential reader holds one segment at a
+    // the demo is 0.4 MB and a sequential reader holds one segment at a
     // time: only the record kept per segment (64 bytes each, 3.8 MB) can
     // exceed this
     let l = Limits {
@@ -125,35 +135,6 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
     let mut r = mvdz::Reader::new(Cursor::new(&f), 1, &l)?;
     let mut out = Vec::new();
     assert!(std::io::Read::read_to_end(&mut r, &mut out).is_err());
-    Ok(())
-}
-
-/// A demo of a `dem_read` frame holding one `svc_nop`, then `n` `dem_set`
-/// frames (10 bytes each).
-fn sets(n: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(n * 10 + 7);
-    v.extend_from_slice(&[0, 1, 1, 0, 0, 0, 1]);
-    for i in 0..n {
-        v.push(1);
-        v.push(2);
-        v.extend_from_slice(&(i as u64).to_le_bytes());
-    }
-    v
-}
-
-/// C-M1, C-L2: more segments than the encoder allows is refused up front,
-/// never by writing an INDEX readers refuse.
-#[test]
-fn c_m1_segment_limit() -> anyhow::Result<()> {
-    let demo = sets(MAX_SEGMENTS + 10);
-    let t = Instant::now();
-    let refusal = compress(&demo, &cfg(1)).err();
-    assert_eq!(refusal, Some(Error::Invalid("too many segments")));
-    assert!(t.elapsed() < Duration::from_secs(5));
-    // at the limit itself, the file is written and decodes
-    let demo = sets(2000);
-    let c = compress(&demo, &cfg(1))?;
-    assert_eq!(mvdz::decompress(&c, 1)?, demo);
     Ok(())
 }
 
@@ -173,7 +154,7 @@ fn sha256_is_not_checked_on_decode() -> anyhow::Result<()> {
     assert_eq!(o, d);
     // one byte of an untransformed segment changed: the segment CRC catches it
     let demo = synthetic(&[], false);
-    let c = untransformed(&[demo, vec![0; 5000]].concat(), &cfg(0))?;
+    let c = untransformed(&[demo, vec![0; 5000]].concat())?;
     let ok = mvdz::decompress(&c, 1)?;
     let mut bad = c;
     let i = (0..bad.len())

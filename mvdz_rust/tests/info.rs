@@ -14,11 +14,11 @@ use std::io::Cursor;
 /// lengths and start times are running sums.
 #[test]
 fn header_describes_the_demo() -> anyhow::Result<()> {
-    let demo = synthetic(&[(0, "{\"x\":1}")], false);
-    let (_, ms, whole) = mvdz::segment::frame_scan(&demo);
-    assert_eq!(whole, demo.len());
-    for seg in [0, 300] {
-        let c = compress(&demo, &cfg(seg))?;
+    let small = synthetic(&[(0, "{\"x\":1}")], false);
+    for demo in [small.clone(), several_segments(&small)] {
+        let (_, ms, whole) = mvdz::segment::frame_scan(&demo);
+        assert_eq!(whole, demo.len());
+        let c = compress(&demo)?;
         let h = Header::parse(&c)?;
         assert_eq!(&c[..4], b"MVDZ");
         assert_eq!(h.size, demo.len() as u64);
@@ -29,7 +29,7 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         let fi = mvdz::read_info(Cursor::new(&c))?;
         assert_eq!(fi.header, h);
         assert_eq!(fi.file_size, c.len() as u64);
-        assert_eq!(fi.index.segs.len() > 1, seg > 0);
+        assert_eq!(fi.index.segs.len() > 1, demo.len() > mvdz::segment::SEGMENT);
         let (mut raw, mut t) = (0, 0);
         for (i, s) in fi.index.segs.iter().enumerate() {
             assert_eq!(s.raw_off, raw, "segment {i}");
@@ -68,9 +68,10 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
 /// A wrong header field makes every reader refuse the file.
 #[test]
 fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
-    let demo = synthetic(&[], false);
-    let c = compress(&demo, &cfg(300))?;
+    let demo = several_segments(&synthetic(&[], false));
+    let c = compress(&demo)?;
     let p = parts(&c)?;
+    assert!(p.segs.len() >= 3);
     assert_eq!(p.build(), c);
     #[expect(clippy::type_complexity, reason = "a table of named edits")]
     let cases: [(&str, fn(&mut Header)); 5] = [
@@ -138,9 +139,9 @@ fn demoinfo_multi_block_round_trip() -> anyhow::Result<()> {
         (2, "\"b\":4"),
         (0, "}"),
     ];
-    let demo = synthetic(&parts, false);
-    for seg in [0, 300] {
-        let c = compress(&demo, &cfg(seg))?;
+    let small = synthetic(&parts, false);
+    for demo in [small.clone(), several_segments(&small)] {
+        let c = compress(&demo)?;
         assert_eq!(
             readers_agree(&c, "demoinfo").context("every reader refuses")?,
             demo
@@ -151,9 +152,15 @@ fn demoinfo_multi_block_round_trip() -> anyhow::Result<()> {
 
 #[test]
 fn truncated_demo_round_trips() -> anyhow::Result<()> {
-    let demo = synthetic(&[], true);
-    for seg in [0, 200] {
-        let c = compress(&demo, &cfg(seg))?;
+    // the truncated frame in the last segment
+    let small = synthetic(&[], true);
+    let long = [
+        several_segments(&synthetic(&[], false)),
+        small[small.len() - 4..].to_vec(),
+    ]
+    .concat();
+    for demo in [small, long] {
+        let c = compress(&demo)?;
         assert_eq!(
             readers_agree(&c, "truncated").context("every reader refuses")?,
             demo
@@ -161,10 +168,10 @@ fn truncated_demo_round_trips() -> anyhow::Result<()> {
     }
     if let Some(d) = duel() {
         // one byte holds no frame: refused as a non-demo
-        let r = compress(&d[..1], &cfg(65536));
+        let r = compress(&d[..1]);
         assert_matches!(r, Err(mvdz::Error::NotMvd(_)), "{r:?}");
         for cut in [1000, 123_457, d.len() / 2 + 3, d.len() - 1] {
-            let c = compress(&d[..cut], &cfg(65536))?;
+            let c = compress(&d[..cut])?;
             assert_eq!(mvdz::decompress(&c, 2)?, &d[..cut], "cut {cut}");
         }
     }

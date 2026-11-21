@@ -10,9 +10,7 @@ use crate::format::{
     seg_hdr_bytes, segment_block,
 };
 use crate::proto::{Proto, frame_len};
-use crate::segment::{
-    self, DEFLATE_LEVEL, Nums, SEGMENT, StreamStat, Walked, cut_points, frame_scan,
-};
+use crate::segment::{self, DEFLATE_LEVEL, Nums, StreamStat, Walked, cut_points, frame_scan};
 use crate::util::{HAS_THREADS, crc32, par_map};
 use sha2::{Digest, Sha256};
 
@@ -167,39 +165,25 @@ pub(crate) fn transform_body(
     ((b.len() - SEG_FIELDS) as u64 <= MAX_SEG_CODED).then_some(b)
 }
 
-/// Compresses a demo into segments of [`SEGMENT`] raw bytes.
+/// Compresses a demo into segments of [`segment::SEGMENT`] raw bytes.
 pub fn compress(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    compress_inner(src, SEGMENT, cfg, false)
-}
-
-/// Compresses a demo into segments of about `segment` raw bytes (0: one
-/// segment). Every reader decodes such files, but the format's encoder
-/// writes [`SEGMENT`] only: this is for tests and test vectors, which need
-/// files of several segments from small demos.
-#[doc(hidden)]
-pub fn compress_segmented(src: &[u8], segment: usize, cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    compress_inner(src, segment, cfg, false)
+    compress_inner(src, cfg, false)
 }
 
 /// Compresses a demo with every segment coded without the transform (as
 /// DEFLATE): the layout the encoder falls back to. For test vectors.
 #[doc(hidden)]
-pub fn compress_untransformed(src: &[u8], segment: usize, cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    compress_inner(src, segment, cfg, true)
+pub fn compress_untransformed(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
+    compress_inner(src, cfg, true)
 }
 
-fn compress_inner(
-    src: &[u8],
-    segment: usize,
-    cfg: &Config,
-    force_raw: bool,
-) -> Result<(Vec<u8>, Info)> {
+fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>, Info)> {
     let threads = crate::util::threads(cfg.threads);
     // an empty demo has no segment
     let cuts = if src.is_empty() {
         vec![0]
     } else {
-        cut_points(src, segment)
+        cut_points(src)
     };
     let nseg = cuts.len() - 1;
     if nseg > MAX_SEGMENTS {

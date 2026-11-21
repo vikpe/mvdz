@@ -519,11 +519,11 @@ pub(crate) fn encode(
     Some(out)
 }
 
-/// Cut points: the first frame boundary at least `target` bytes into each
-/// segment (0: no target). Where a frame, or data that does not frame,
-/// runs past [`MAX_SEG_RAW`], the rest of the demo is cut at that length:
-/// every segment but the last is whole frames or exactly that long.
-pub(crate) fn cut_points(src: &[u8], target: usize) -> Vec<usize> {
+/// Cut points: the first frame boundary at least [`SEGMENT`] bytes into
+/// each segment. Where a frame, or data that does not frame, runs past
+/// [`MAX_SEG_RAW`], the rest of the demo is cut at that length: every
+/// segment but the last is whole frames or exactly that long.
+pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     let max_segment = MAX_SEG_RAW as usize;
     let mut cuts = vec![0];
     let mut segment_start = 0;
@@ -538,7 +538,7 @@ pub(crate) fn cut_points(src: &[u8], target: usize) -> Vec<usize> {
             }
             break;
         }
-        let is_segment_full = target > 0 && frame_end - segment_start >= target;
+        let is_segment_full = frame_end - segment_start >= SEGMENT;
         if is_segment_full && frame_end < src.len() {
             segment_start = frame_end;
             cuts.push(segment_start);

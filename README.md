@@ -151,7 +151,6 @@ mvdz attach ls  file.mvdz [name-prefix]
 mvdz attach extract file.mvdz name out
 mvdz attach rm  file.mvdz name...
 mvdz attach export in.mvdz out.mvdz [--keep name]... [--keep-prefix p]... [--drop name]... [--drop-prefix p]...
-mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--trusted] files...
 ```
 
 `compress` and `decompress` work like zstd: each output is named after its
@@ -305,6 +304,11 @@ demos they were made from). Fuzz targets are in `mvdz_rust/fuzz/` (`cargo +night
 fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
 `stream_writer`, `compress_rt` and the structure-aware `gen_rt`).
 The feature `scalar` forces the portable code paths (as on wasm).
+
+Speed: `MVDZ_BENCH_DEMOS=/path/to/demos cargo bench --bench codec` (in
+`mvdz_rust/`) times compress and decompress of every `*.mvd` in that
+directory, one file at a time at 4 threads and at 1, with criterion
+(`-- --save-baseline name` and `-- --baseline name` compare two builds).
 
 ## FAQ
 

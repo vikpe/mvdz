@@ -3,12 +3,7 @@
 
 use mvdz::Config;
 use mvdz::Limits;
-use mvdz::util::approx_f64;
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::io::{Read, Write};
-use std::time::Instant;
 
 /// `println!` that exits quietly when standard output is closed (a pipe
 /// into `head`, say) instead of panicking.
@@ -28,8 +23,6 @@ fn usage() -> ! {
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
                   game.mvdz -> game.mvd beside it
   mvdz info       file.mvdz...                     header and segments as JSON
-  mvdz bench      [-r reps] [-j threads] [--no-verify]
-                  [--skip-compress] [--files out.tsv] [--streams out.tsv] files...
 '-' as a file name is standard input or output. compress and decompress name
 each output after its input, keep the inputs (--rm deletes each one after its
 output is written), refuse to overwrite an existing file (-f overwrites), and
@@ -50,13 +43,9 @@ independently decodable segments of 256 KiB."
 )]
 struct Args {
     threads: usize,
-    reps: usize,
     max_memory: Option<u64>,
-    streams: Option<String>,
-    perfile: Option<String>,
     files: Vec<String>,
     no_verify: bool,
-    skip_compress: bool,
     any_input: bool,
     output: Option<String>,
     overwrite: bool,
@@ -79,13 +68,9 @@ fn size(s: &str) -> u64 {
 fn parse(args: &[String]) -> Args {
     let mut a = Args {
         threads: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
-        reps: 3,
         max_memory: None,
-        streams: None,
-        perfile: None,
         files: Vec::new(),
         no_verify: false,
-        skip_compress: false,
         any_input: false,
         output: None,
         overwrite: false,
@@ -102,12 +87,8 @@ fn parse(args: &[String]) -> Args {
             "-j" | "--threads" => {
                 a.threads = mvdz::util::threads(val().parse().unwrap_or_else(|_| usage()));
             }
-            "-r" | "--reps" => a.reps = val().parse().unwrap_or_else(|_| usage()),
             "--max-memory" => a.max_memory = Some(size(&val())),
-            "--streams" => a.streams = Some(val()),
-            "--files" => a.perfile = Some(val()),
             "--no-verify" => a.no_verify = true,
-            "--skip-compress" => a.skip_compress = true,
             "--allow-non-demo" => a.any_input = true,
             "-o" | "--output" => a.output = Some(val()),
             "-f" | "--force" => a.overwrite = true,
@@ -147,10 +128,6 @@ fn try_read_input(p: &str) -> Result<Vec<u8>, String> {
     } else {
         std::fs::read(p).map_err(|e| e.to_string())
     }
-}
-
-fn read_input(p: &str) -> Vec<u8> {
-    try_read_input(p).unwrap_or_else(|e| die(format!("{p}: {e}")))
 }
 
 /// Opens an input file (or standard input) to read in order.
@@ -349,169 +326,8 @@ fn main() {
     match argv[0].as_str() {
         "compress" | "c" => run_jobs(&a, true),
         "decompress" | "d" => run_jobs(&a, false),
-        "bench" => bench(&a),
         "info" => info(&a),
         _ => usage(),
-    }
-}
-
-/// (median, min, max)
-fn stats(v: &mut [f64]) -> (f64, f64, f64) {
-    if v.is_empty() {
-        return (0.0, 0.0, 0.0);
-    }
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    let med = if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        f64::midpoint(v[n / 2 - 1], v[n / 2])
-    };
-    (med, v[0], v[n - 1])
-}
-
-fn fmt(s: (f64, f64, f64)) -> String {
-    format!("{:.2} [{:.2}-{:.2}]", s.0, s.1, s.2)
-}
-
-fn loadavg() -> String {
-    std::fs::read_to_string("/proc/loadavg")
-        .map_or_default(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
-}
-
-/// In-memory library benchmark: every figure is MB/s of raw demo
-/// (MB = 10^6 bytes), the median of `reps` runs with [min-max].
-fn bench(a: &Args) {
-    let files: Vec<(String, Vec<u8>)> =
-        a.files.iter().map(|f| (f.clone(), read_input(f))).collect();
-    let raw: usize = files.iter().map(|f| f.1.len()).sum();
-    let mb = approx_f64(raw as u64) / 1e6;
-    let nt = a.threads.max(1);
-    let reps = a.reps.max(3);
-    let lim = read_limits(a);
-    let dec = |c: &[u8], t: usize| mvdz::decompress_with(c, t, &lim);
-    out!(
-        "files {}  raw {:.2} MB (10^6 bytes)  reps {}  threads {}  verify {}  loadavg {}",
-        files.len(),
-        mb,
-        reps,
-        nt,
-        !a.no_verify,
-        loadavg()
-    );
-    out!(
-        "MB/s of raw demo: median [min-max] over {reps} runs; 'batch' = files in parallel on {nt} threads, 1 thread each"
-    );
-    let mut stream_rows: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    let mut perfile = String::from("file\traw\tpacked\tsha_ok\tfallback_segments\tescaped\n");
-    let cfg = |threads: usize| Config {
-        threads,
-        verify: !a.no_verify,
-    };
-    let c1 = cfg(1);
-    let comp: Vec<(Vec<u8>, mvdz::Info)> = mvdz::util::par_map(nt, files.len(), |i| {
-        mvdz::compress_info(&files[i].1, &c1).unwrap_or_else(|e| die(e))
-    });
-    let bytes: usize = comp.iter().map(|c| c.0.len()).sum();
-    let fb: usize = comp.iter().map(|c| c.1.fallback_segments).sum();
-    let oks: Vec<bool> =
-        mvdz::util::par_map(nt, files.len(), |i| match mvdz::decompress(&comp[i].0, 1) {
-            Ok(back) => Sha256::digest(&back) == Sha256::digest(&files[i].1),
-            Err(_) => false,
-        });
-    let ok = oks.iter().filter(|&&x| x).count();
-    for (i, f) in files.iter().enumerate() {
-        let base = std::path::Path::new(&f.0)
-            .file_name()
-            .map_or_default(|s| s.to_string_lossy().to_string());
-        let _ = writeln!(
-            perfile,
-            "{base}\t{}\t{}\t{}\t{}\t{}",
-            f.1.len(),
-            comp[i].0.len(),
-            oks[i],
-            comp[i].1.fallback_segments,
-            comp[i].1.escaped
-        );
-        if !oks[i] {
-            eprintln!("ROUND TRIP FAILED: file {}", f.0);
-        }
-    }
-    for (_, info) in &comp {
-        for s in &info.streams {
-            let e = stream_rows.entry(mvdz::streams::name(s.id)).or_default();
-            e.0 += s.count;
-            e.1 += s.packed;
-        }
-    }
-    let (mut tc1, mut td1, mut tcn, mut tdn, mut tcb, mut tdb) =
-        (vec![], vec![], vec![], vec![], vec![], vec![]);
-    let cn = cfg(nt);
-    for _ in 0..reps {
-        if !a.skip_compress {
-            let t = Instant::now();
-            for f in &files {
-                std::hint::black_box(mvdz::compress(&f.1, &c1).ok());
-            }
-            tc1.push(mb / t.elapsed().as_secs_f64());
-        }
-        let t = Instant::now();
-        for c in &comp {
-            std::hint::black_box(dec(&c.0, 1).ok());
-        }
-        td1.push(mb / t.elapsed().as_secs_f64());
-        if nt > 1 && !a.skip_compress {
-            let t = Instant::now();
-            for f in &files {
-                std::hint::black_box(mvdz::compress(&f.1, &cn).ok());
-            }
-            tcn.push(mb / t.elapsed().as_secs_f64());
-            let t = Instant::now();
-            mvdz::util::par_map(nt, files.len(), |i| {
-                std::hint::black_box(mvdz::compress(&files[i].1, &c1).map(|v| v.len()).ok())
-            });
-            tcb.push(mb / t.elapsed().as_secs_f64());
-        }
-        if nt > 1 {
-            let t = Instant::now();
-            for c in &comp {
-                std::hint::black_box(dec(&c.0, nt).ok());
-            }
-            tdn.push(mb / t.elapsed().as_secs_f64());
-            let t = Instant::now();
-            mvdz::util::par_map(nt, comp.len(), |i| {
-                std::hint::black_box(dec(&comp[i].0, 1).map(|v| v.len()).ok())
-            });
-            tdb.push(mb / t.elapsed().as_secs_f64());
-        }
-    }
-    out!(
-        "bytes {bytes}  ratio {:.4}  sha ok {ok}/{}  fallback segments {fb}",
-        approx_f64(bytes as u64) / approx_f64(raw as u64),
-        files.len()
-    );
-    out!(
-        "  compress   1t {}   {nt}t {}   batch {}",
-        fmt(stats(&mut tc1)),
-        fmt(stats(&mut tcn)),
-        fmt(stats(&mut tcb))
-    );
-    out!(
-        "  decompress 1t {}   {nt}t {}   batch {}",
-        fmt(stats(&mut td1)),
-        fmt(stats(&mut tdn)),
-        fmt(stats(&mut tdb))
-    );
-    out!("loadavg after: {}", loadavg());
-    if let Some(path) = &a.perfile {
-        std::fs::write(path, &perfile).unwrap_or_else(|e| die(e));
-    }
-    if let Some(path) = &a.streams {
-        let mut s = String::from("stream\tcount\tpacked\n");
-        for (name, (count, packed)) in &stream_rows {
-            let _ = writeln!(s, "{name}\t{count}\t{packed}");
-        }
-        std::fs::write(path, s).unwrap_or_else(|e| die(e));
     }
 }
 

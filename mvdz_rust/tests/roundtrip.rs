@@ -1,5 +1,5 @@
-//! Round trips through every reader, at the format's segment size and at
-//! smaller ones; odd and non-MVD input; determinism.
+//! Round trips through every reader, in one segment and in several; odd
+//! and non-MVD input; determinism.
 
 mod common;
 use anyhow::Context as _;
@@ -7,15 +7,13 @@ use common::*;
 use std::assert_matches;
 
 fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) -> anyhow::Result<()> {
-    for seg in [0usize, 65536] {
-        let c = cfg(seg);
-        let (one, info) = unchecked(src, &c)?;
+    for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
+        let (one, info) = unchecked(&src)?;
         if expect_transform {
-            assert_eq!(info.fallback_segments, 0, "{what}: seg {seg} fell back");
+            assert_eq!(info.fallback_segments, 0, "{what} {how}: fell back");
         }
-        let back =
-            readers_agree(&one, what).with_context(|| format!("{what}: seg {seg} refused"))?;
-        assert!(back == src, "{what}: seg {seg}");
+        let back = readers_agree(&one, what).with_context(|| format!("{what} {how}: refused"))?;
+        assert!(back == src, "{what} {how}");
     }
     Ok(())
 }
@@ -56,7 +54,7 @@ fn empty_and_tiny_inputs() -> anyhow::Result<()> {
         &text,
     ];
     for src in inputs {
-        let refusal = compress(src, &cfg(0)).err();
+        let refusal = compress(src).err();
         assert_matches!(refusal, Some(mvdz::Error::NotMvd(_)), "{refusal:?}");
         // the unchecked encoder still round-trips any bytes
         check_all_ways(src, &format!("{src:?}"), false)?;
@@ -83,15 +81,16 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
     for (i, src) in inputs.iter().enumerate() {
         // the encoder refuses what is not a demo
         if mvdz::check_demo(src).is_err() {
-            let r = compress(src, &cfg(1000));
+            let r = compress(src);
             assert_matches!(r, Err(mvdz::Error::NotMvd(_)), "input {i}");
             continue;
         }
-        for seg in [1000usize, 1 << 20] {
-            let c = compress(src, &cfg(seg))?;
+        for src in [src.clone(), several_segments(src)] {
+            let c = compress(&src)?;
             assert!(
-                readers_agree(&c, "non-mvd").context("every reader refuses")? == *src,
-                "input {i} seg {seg}"
+                readers_agree(&c, "non-mvd").context("every reader refuses")? == src,
+                "input {i}, {} bytes",
+                src.len()
             );
         }
     }
@@ -108,11 +107,10 @@ fn nop_flood_round_trips() -> anyhow::Result<()> {
         d.frame(0, 1, &[1u8; 10_000]);
     }
     let src = d.0;
-    for seg in [0usize, 1 << 20] {
-        let (c, info) = compress_info(&src, &cfg(seg))?;
-        assert_eq!(info.fallback_segments, 0);
-        assert!(readers_agree(&c, "nop").context("every reader refuses")? == src);
-    }
+    let (c, info) = compress_info(&src)?;
+    assert!(info.segments > 1);
+    assert_eq!(info.fallback_segments, 0);
+    assert!(readers_agree(&c, "nop").context("every reader refuses")? == src);
     Ok(())
 }
 
@@ -130,7 +128,7 @@ fn segments_are_capped() -> anyhow::Result<()> {
         ("unframed", unframed, 3),
         ("oversized frame", oversized.0, 2),
     ] {
-        let (file, info) = unchecked(&src, &cfg(0))?;
+        let (file, info) = unchecked(&src)?;
         assert!(
             info.segments >= segments,
             "{what}: {} segments",
@@ -183,13 +181,12 @@ fn edited_demos_round_trip() -> anyhow::Result<()> {
                 _ => d.truncate(i),
             }
         }
-        let seg = [0, 4096, 65536][case % 3];
         // an edit that destroys the first frame makes it a non-demo
         if mvdz::check_demo(&d).is_err() {
             refused += 1;
             continue;
         }
-        let c = compress(&d, &cfg(seg))?;
+        let c = compress(&d)?;
         assert!(mvdz::decompress(&c, 1)? == d, "case {case}");
         assert!(mvdz::decompress(&c, 2)? == d, "case {case}, 2 threads");
     }
@@ -228,36 +225,30 @@ fn constructed_demos() -> anyhow::Result<()> {
         // frame): refused, and still round-trip through the unchecked
         // encoder
         if mvdz::check_demo(&src).is_err() {
-            assert_matches!(compress(&src, &cfg(0)), Err(mvdz::Error::NotMvd(_)));
-            let (c, _) = unchecked(&src, &cfg(50_000))?;
+            assert_matches!(compress(&src), Err(mvdz::Error::NotMvd(_)));
+            let (c, _) = unchecked(&src)?;
             assert!(mvdz::decompress(&c, 2)? == src, "{name}");
             continue;
         }
-        for seg in [0usize, 50_000] {
-            let c = compress(&src, &cfg(seg))?;
-            assert!(mvdz::decompress(&c, 2)? == src, "{name} seg {seg}");
-            assert!(
-                mvdz::decompress(&c, 1)? == src,
-                "{name} seg {seg}, 1 thread"
-            );
-        }
+        let c = compress(&src)?;
+        assert!(mvdz::decompress(&c, 2)? == src, "{name}");
+        assert!(mvdz::decompress(&c, 1)? == src, "{name}, 1 thread");
     }
     Ok(())
 }
 
 #[test]
 fn deterministic_output() -> anyhow::Result<()> {
-    let src = duel().unwrap_or_else(|| synthetic(&[(0, "{}")], false));
-    for seg in [0usize, 30_000] {
-        let a = compress(&src, &cfg(seg))?;
-        let b = compress(
-            &src,
-            &Cfg {
-                threads: 3,
-                ..cfg(seg)
-            },
-        )?;
-        assert!(a == b, "seg {seg}: threads change the output");
+    let small = synthetic(&[(0, "{}")], false);
+    let src = duel().unwrap_or_else(|| several_segments(&small));
+    for src in [small, src] {
+        let threads = |threads| mvdz::Config {
+            threads,
+            ..Default::default()
+        };
+        let a = mvdz::compress(&src, &threads(1))?;
+        let b = mvdz::compress(&src, &threads(3))?;
+        assert!(a == b, "{} bytes: threads change the output", src.len());
     }
     Ok(())
 }
@@ -269,12 +260,14 @@ fn deterministic_output() -> anyhow::Result<()> {
 fn file_tables() -> anyhow::Result<()> {
     let src = usercmd_demo();
     let has = |c: &[u8]| anyhow::Ok(!parts(c)?.models.is_empty());
-    let (seg, info) = compress_info(&src, &cfg(8192))?;
+    let (seg, info) = compress_info(&several_segments(&src))?;
     assert!(info.segments > 2);
     assert!(has(&seg)?, "models");
     assert_eq!(info.fallback_segments, 0, "every segment is transformed");
-    assert!(readers_agree(&seg, "tables").context("every reader refuses")? == src);
-    let one = compress(&src, &cfg(0))?;
+    assert!(
+        readers_agree(&seg, "tables").context("every reader refuses")? == several_segments(&src)
+    );
+    let one = compress(&src)?;
     assert_eq!(parts(&one)?.segs.len(), 1);
     assert!(has(&one)?, "a file of one segment has its models there too");
     Ok(())

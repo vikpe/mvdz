@@ -6,10 +6,11 @@ mod common;
 use common::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-fn demo() -> Option<Vec<u8>> {
-    let mut d = duel()?;
-    d.truncate(200_000); // keep it quick; the cut goes to the raw tail
-    Some(d)
+/// The duel cut short to keep it quick (the cut goes to the raw tail): one
+/// segment and several.
+fn demos() -> Option<[Vec<u8>; 2]> {
+    let d = duel()?;
+    Some([200_000, 800_000].map(|n| d[..n.min(d.len())].to_vec()))
 }
 
 fn no_panic(b: &[u8]) {
@@ -42,13 +43,13 @@ fn garbage_never_panics() {
 
 #[test]
 fn mutated_streams_never_panic() -> anyhow::Result<()> {
-    let Some(src) = demo() else {
+    let Some(demos) = demos() else {
         eprintln!("no demo available, skipping");
         return Ok(());
     };
     let mut rng = Rng(0xdead_beef_cafe_f00d);
-    for seg in [0usize, 50_000] {
-        let (c, info) = compress_info(&src, &cfg(seg))?;
+    for src in demos {
+        let (c, info) = compress_info(&src)?;
         assert_eq!(info.fallback_segments, 0);
         assert_eq!(mvdz::decompress(&c, 1)?, src);
         for _ in 0..200 {
