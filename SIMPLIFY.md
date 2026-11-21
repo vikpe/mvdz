@@ -7,9 +7,8 @@ MVDZ is a proposal with no files in the wild, so there is no compatibility burde
 Resume point: "After steps B and C" in the Handoff below. Five format decisions on
 2026-11-21; steps A (149c415), B (d1a8c06) and C (3fedb9d, every integer a u32) are
 done. Open questions 6, 13 and 14 decided later the same day (see Decisions); the
-self-check switch is removed (uncommitted at the time of writing). Open: 9 (needs a new
-probe) and 12 (Viktor: re-measure every stream model first; plan under "After steps B
-and C"). Then "Suggestions (2026-11-21)" near the end of this file. Tests
+self-check switch is removed (f0c2019). 12 decided: every stream model stays (see
+Measurements and Decisions). Open: 9 (needs a new probe). Then "Suggestions (2026-11-21)" near the end of this file. Tests
 (`cargo nextest run --release` in `mvdz_rust/`): 40 pass, 4 fail (the known four).
 `cargo clippy --all-targets -- -D warnings` is clean.
 
@@ -41,8 +40,8 @@ Whole session against `master`: see "Whole session" under Results per change.
 
 Next, in this order (nothing below is started):
 
-1. The open questions that can still change the file format: 9 and 12 (4, 13 and 14
-   are decided).
+1. The open question that can still change the file format: 9 (4, 12, 13 and 14 are
+   decided).
 2. The other open question, 11 (5, 6, 7 and 10 are decided).
 3. Finishing work, once the format no longer changes: regenerate the test vectors
    (clears the 4 failing tests), rewrite FORMAT.md and README, update BENCHMARKS.md.
@@ -263,15 +262,15 @@ Theoretical maxima are from mvdsv's code (70f1135); headroom is ours divided by 
 Decided 2026-11-21 (night): 6 (self-check always on, switch removed), 13 (`te.f`,
 `snd.f` stay blobs), 14 (edge inputs: specify the code as is). Left: 9, 12 and 11.
 
-For 12 Viktor asked for a re-measurement of every stream model before deciding. Plan:
-a real rebuild per stream, not the old per-stream estimate. A stream becomes a blob by
-adding its id to `PLAIN` (`src/streams.rs`); encoder and decoder read the same list, so
-each build round-trips. One build per modelled stream (20 lazy, 18 numeric), size on
-stratified (379 demos in `/tmp/mvdz-strat/demos`, `/tmp/mvdz-strat/size.sh BIN DIR`),
-against the step-C baseline 211,736,432 bytes, then one build with every stream that
-came out at or below zero. `PLAIN_MASK` is a u64: ids 64 to 66 (`pe.fy`, `pe.fz`,
-`uc.a`) need it widened to u128 for the experiment. `uc` and `uc.a` have no archive
-demo with usercmd blocks: unmeasurable on real data unless such demos are found.
+For 12 Viktor asked for a re-measurement of every stream model before deciding. Done
+2026-11-21 (see "what each stream model is worth, rebuilt codec" under Measurements):
+34 modelled streams (16 structural, 18 numeric), one run each. Note for whoever
+repeats it: the `PLAIN` list alone does not switch a stream, the walker's calls per
+stream are hard-coded (`p8`/`pn`/`copy_blob` for plain, `b8`/`r8`/`bn` for modelled),
+so the experiment diverts at the symbol sinks (`EncIO::byte`, `DecIO::byte`,
+`NumEnc`/`NumDecIO::code`) with a run-time id list. Result: every model pays except
+`pi.ar`. Viktor first chose to drop `pi.ar`, then reverted it the same day for
+simplicity (see Decisions). Question 12 closed: every stream model stays.
 
 Then the open questions 9 and 11; then the Suggestions in the
 order given there (out-of-the-library 1 and 2, tests-and-experiments 1 and 3, naming),
@@ -313,6 +312,7 @@ All implemented unless marked.
 | General-purpose compressor | Raw DEFLATE (RFC 1951) replaces zstd | +0.41 % size and +0.24 % decode time; zstd was 26 % of compression time; DEFLATE is in the Go, Python, Java and Node standard libraries and in browsers |
 | Blob layout | One DEFLATE stream per chunk holds all blob streams | Blob decode 1.7 times faster than one stream each; one inflate call per chunk; 0.08 % larger |
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
+| Stream models, open question 12 (2026-11-21) | Every one of the 34 stays, `pi.ar` included | Measured with a rebuilt codec per stream: every model pays except `pi.ar`, -0.004 % (8,951 bytes on 379 demos) without it. Dropping it was implemented and reverted the same day: it saved no function, and made roll an exception to "the three angles are coded alike" in the walker's byte layout and in the specification. The uniform rule is the simpler one |
 | Chunk codings (2026-11-21, step B, d1a8c06) | One: the transform. A chunk the transform cannot code is written as all tail; the `coding` byte and coding 1 (raw DEFLATE) go; chunk header 16 bytes | Coding 1 was used in 0 of 9,109 segments of 525 archive demos and 0 of 5 damaged copies; a 1 MiB segment of junk already codes as all tail and round-trips |
 | Ratio rule (2026-11-21, step A, 149c415) | Removed (`raw_len <= 1024 * len + 4096`, the two constants, the reader check, the "stored blocks" fallback). In its place a reader rule: a chunk's `len` is at most 2 MiB (`MAX_SEG_CODED`), checked at the length field before anything is read | Largest `raw_len / len` in 9,109 segments is 118.39, so the rule had 8.7 times headroom; the 1 MiB raw cap already bounds output. The largest coded segment seen is 110,888 bytes; 1 MiB of junk codes to about 1 MiB + 0.5 KiB, so 2 MiB is 2 times the possible maximum |
 | Models block limit | Stays 16 MiB | Once per file; largest seen 47,608 bytes (352 times headroom); the cost is reader memory, not file bytes |
@@ -433,10 +433,9 @@ All Viktor's to decide. Of those left, 9 and 12 can change the file format.
     measured on this branch).
 11. Compression speed further: the walk is single-threaded (17.7 % of compression before
     the speed changes; not profiled since). Peak memory rose with changes 4 and 5.
-12. `pi.ar` (-0.002 %) is low value, but it is the third axis of the angle predictor, so
-    dropping it removes no code. `uc` and `uc.a` are not measured (none of the 2,000
-    demos has usercmd blocks). Viktor, 2026-11-21: re-measure every stream model first
-    (plan under "After steps B and C" in the Handoff).
+12. Decided 2026-11-21: every stream model stays (see Decisions and "what each
+    stream model is worth, rebuilt codec" under Measurements). `uc` and `uc.a` cannot
+    be measured on the archive (no usercmd blocks) and stay.
 13. Decided 2026-11-21: `te.f` and `snd.f` stay blobs (see Decisions).
 14. Decided 2026-11-21: specified as the code is (see Decisions); the FORMAT.md text
     is written with the rewrite (Remaining implementation 2).
@@ -1066,6 +1065,67 @@ estimates, not a rebuilt codec. Change in file size if the model is dropped:
 - Float origins (`pi.f*`, `pe.f*`) occur in 457 demos and are worth 7.5 % of the whole
   sample's output.
 
+### Done: what each stream model is worth, rebuilt codec (2026-11-21, f0c2019)
+
+Open question 12, at Viktor's request. Not the estimate above: a real build per stream.
+The stream loses its model and its bytes join the segment's DEFLATE blob; encoder and
+decoder agree, the self-check is on in every run, and the baseline binary refuses the
+files (the stream id changed kind). Sample: stratified, 379 demos, 968,979,765 bytes
+raw; baseline 211,736,432 bytes (step C figure, re-run first: identical). Done with a
+temporary patch, not committed (`/tmp/mvdz-strat/plain-exp.patch`; `MVDZ_PLAIN=<ids>`
+names the streams at run time, one binary for all runs; results
+`/tmp/mvdz-strat/per_stream.tsv`, `per_stream_num.tsv`; `/tmp` does not survive a
+reboot). A structural byte goes to the blob as itself; a numeric residual as 4 bytes
+little-endian, so a numeric row says "model against a plain blob of its residuals", not
+against a cleverer blob. Change in output if the model is dropped:
+
+| Stream | Bytes | Change |
+|---|---|---|
+| `pi.ar` | -8,727 | -0.004 % |
+| `uc`, `uc.a` | 0 | no usercmd block in the sample: unmeasurable here |
+| `pe.fy`, `pe.fz`, `pe.fx` | +36,491 to +38,873 | +0.017 to +0.018 % |
+| `pi.fz` | +43,392 | +0.020 % |
+| `pi.fy`, `pi.fx` | +108,158, +110,546 | +0.051 %, +0.052 % |
+| `te.type` | +177,961 | +0.084 % |
+| `pe.more` | +264,432 | +0.125 % |
+| `pe.ent` | +335,153 | +0.158 % |
+| `pi.wframe` | +423,900 | +0.200 % |
+| `st.idx` | +430,227 | +0.203 % |
+| `pe.a` | +466,698 | +0.220 % |
+| `st.val` | +813,076 | +0.384 % |
+| `snd.num` | +977,023 | +0.461 % |
+| `type` | +996,013 | +0.470 % |
+| `snd.ch` | +1,025,640 | +0.484 % |
+| `pe.bits` | +1,555,026 | +0.734 % |
+| `time` | +2,374,790 | +1.122 % |
+| `snd.o` | +3,161,697 | +1.493 % |
+| `pi.frame` | +3,289,888 | +1.554 % |
+| `cmd` | +3,629,005 | +1.714 % |
+| `te.o` | +4,349,487 | +2.054 % |
+| `pi.flags` | +4,717,916 | +2.228 % |
+| `pe.oy`, `pe.oz` | +6,927,806, +7,016,983 | +3.27 %, +3.31 % |
+| `pe.ox` | +8,284,492 | +3.91 % |
+| `pi.oz` | +9,061,010 | +4.28 % |
+| `pi.oy`, `pi.ox` | +16,759,962, +16,845,469 | +7.92 %, +7.96 % |
+| `pi.ap` | +18,260,513 | +8.62 % |
+| `pi.ay` | +22,240,480 | +10.50 % |
+
+- Only `pi.ar` is at or below zero, so the "every stream at or below zero together"
+  build is that row. It is the roll axis of the player angle: rarely sent, so its
+  stream is a fixed cost per segment plus a model per file.
+- The float origins (`pi.f*`, `pe.f*`) are worth 0.017 to 0.052 % each on this
+  sample; how many of the 379 demos use float coordinates was not counted. The
+  earlier estimate gave 7.5 % for all six on the 2,000 (457 float demos), so the
+  figure depends on the share of float demos.
+- `uc` and `uc.a`: output identical to the baseline in both runs, which confirms no
+  demo of the sample has usercmd blocks.
+- First attempt failed silently: the diverted numeric bytes sat in a blob the walker
+  never read, the end-of-walk "every blob consumed" check failed, and the self-check
+  wrote every segment as all tail (output 2.8 times the baseline, decodable by the
+  baseline binary). Caught by the identical sizes for `pi.ox`, `pi.oy`, `pi.oz`. The
+  numeric rows above are from the corrected binary; the structural rows from the
+  first, whose structural path was the same (unset, both give the baseline bytes).
+
 ### To do
 
 Not measured yet:
@@ -1159,8 +1219,23 @@ number is given.
 2. Decode-side concurrency: the walker and the numeric groups run at the same time on
    a shared record buffer with a spin-wait reader (`RecBuf`, `WAVE1_PIPE`); most of the
    `unsafe` is here. The encoder runs the same steps in sequence. Sequential decode
-   per segment would remove it; whole-file decode already runs segments in parallel.
-   Costs single-file decode speed at several threads: measure.
+   per segment would remove it. What it costs depends on the path (checked in the
+   code 2026-11-21):
+   - Whole-file `decompress` (`decode.rs`): with at least as many segments as
+     threads, one segment per thread and the pipeline off (`inner = 1`). At 1 MiB
+     segments any demo over about 4 MiB at 4 threads already decodes without it.
+     Nothing lost; multi-core stays faster through segment parallelism.
+   - Streaming `decompress_stream` (`stream.rs`), which the CLI uses: one segment
+     at a time, all threads inside the pipeline. Without it `mvdz decompress` of one
+     file is single-threaded whatever `-j` says. Batch (one file per thread)
+     unaffected.
+   - Worth of the pipeline inside a segment: unmeasured. From the 4a20f89 profile
+     (walk 25.05 s, wave 1 27.64 s summed) the overlap can save at most about half
+     the segment time.
+   Suggested: do it together with "Possible later, larger" 2 (a whole-file decoder
+   that writes a window of segments), which gives the CLI path segment parallelism
+   and leaves the pipeline no job. Measure first: streaming decode of one large demo
+   at 1 and 4 threads with the pipeline branch forced off.
 3. The work budget (`Limits::work_per_byte` and its accounting): with segments at
    1 MiB and models at 16 MiB the work a file can demand is bounded by its size. Maybe
    only the memory limit is needed. Check what the hostile-file tests rely on first.
@@ -1196,7 +1271,9 @@ number is given.
    drops by the raw size. 250 MB works today at about 410 MiB.
 2. Single-file decode at several threads is slower since the CLI streams (282 MB demo,
    4 threads: 0.80 s to 1.40 s; 1 thread and batch unchanged). Fix: a whole-file decoder
-   that writes a window of segments at a time, or accept it.
+   that writes a window of segments at a time, or accept it. Pairs with Structure 2:
+   the windowed decoder is what keeps the CLI multi-threaded once the segment pipeline
+   goes.
 
 ### Measuring
 
