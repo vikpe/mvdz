@@ -27,7 +27,7 @@ use crate::error::{Error, Result, bad};
 use crate::util::Rd;
 
 pub(crate) const MAGIC: &[u8; 4] = b"MVDZ";
-pub(crate) const VERSION: u32 = 2;
+pub const VERSION: u32 = 2;
 pub const HEADER_LEN: usize = 64;
 /// Bytes of a length field (of the models block, of a segment).
 pub const LEN: usize = 4;

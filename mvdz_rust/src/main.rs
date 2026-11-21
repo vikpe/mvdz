@@ -321,14 +321,44 @@ fn main() {
     }
 }
 
-fn info(a: &Args) {
-    for f in &a.files {
-        let r = std::fs::File::open(f).unwrap_or_else(|e| die(e));
-        match mvdz::read_info(std::io::BufReader::new(r)) {
-            Ok(fi) => out!("{}", fi.to_json()),
-            Err(e) => die(format!("{f}: {e}")),
+fn info(args: &Args) {
+    for path in &args.files {
+        let file = std::fs::File::open(path).unwrap_or_else(|error| die(error));
+        match mvdz::read_info(std::io::BufReader::new(file)) {
+            Ok(file_info) => out!("{}", info_json(&file_info)),
+            Err(error) => die(format!("{path}: {error}")),
         }
     }
+}
+
+/// One object: `version`, `file_size`, `size`, `duration_ms`, `crc32` and `sha256`
+/// (hexadecimal) and `segments`, a list of `{t_start_ms, raw_offset, raw_len}`.
+fn info_json(file_info: &mvdz::FileInfo) -> String {
+    use std::fmt::Write as _;
+    let header = &file_info.header;
+    // numbers and hexadecimal strings only: nothing needs escaping
+    let mut json = format!(
+        "{{\"version\":{},\"file_size\":{},\"size\":{},\"duration_ms\":{},\"crc32\":\"{:08x}\",\"sha256\":\"",
+        mvdz::format::VERSION,
+        file_info.file_size,
+        header.size,
+        header.duration_ms,
+        header.crc,
+    );
+    for byte in header.sha256 {
+        let _ = write!(json, "{byte:02x}");
+    }
+    json.push_str("\",\"segments\":[");
+    for (index, segment) in file_info.index.segs.iter().enumerate() {
+        let separator = if index > 0 { "," } else { "" };
+        let _ = write!(
+            json,
+            "{separator}{{\"t_start_ms\":{},\"raw_offset\":{},\"raw_len\":{}}}",
+            segment.t_start, segment.raw_off, segment.raw_len
+        );
+    }
+    json.push_str("]}");
+    json
 }
 
 #[cfg(test)]
@@ -348,6 +378,34 @@ mod tests {
         assert!(failed.is_err());
         assert!(!path.exists());
         std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn info_json_describes_the_file() -> anyhow::Result<()> {
+        use std::fmt::Write as _;
+        let demo = vec![7u8; 3 * mvdz::segment::SEGMENT];
+        let (file, _) = mvdz::encode::compress(&demo, &mvdz::Config::default())?;
+        let file_info = mvdz::read_info(std::io::Cursor::new(&file))?;
+        let json: serde_json::Value = serde_json::from_str(&info_json(&file_info))?;
+        let header = &file_info.header;
+        let sha256 = header.sha256.iter().fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+        assert_eq!(json["version"], mvdz::format::VERSION);
+        assert_eq!(json["file_size"], file.len());
+        assert_eq!(json["size"], demo.len());
+        assert_eq!(json["duration_ms"], header.duration_ms);
+        assert_eq!(json["crc32"], format!("{:08x}", header.crc));
+        assert_eq!(json["sha256"], sha256);
+        let segments = json["segments"].as_array().context("a segment list")?;
+        assert_eq!(segments.len(), file_info.index.segs.len());
+        for (segment, entry) in file_info.index.segs.iter().zip(segments) {
+            assert_eq!(entry["t_start_ms"], segment.t_start);
+            assert_eq!(entry["raw_offset"], segment.raw_off);
+            assert_eq!(entry["raw_len"], segment.raw_len);
+        }
         Ok(())
     }
 }

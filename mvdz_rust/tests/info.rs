@@ -45,18 +45,6 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
             assert!(!part.is_empty());
         }
         assert_eq!(raw, h.size);
-        // the JSON rendering
-        let json: serde_json::Value = serde_json::from_str(&fi.to_json())?;
-        assert_eq!(json["version"], 2);
-        assert_eq!(json["size"], demo.len());
-        assert_eq!(json["duration_ms"], ms);
-        assert_eq!(json["sha256"], hex(&h.sha256));
-        assert_eq!(json["crc32"], format!("{:08x}", h.crc));
-        assert_eq!(json["file_size"], c.len());
-        assert_eq!(
-            json["segments"].as_array().context("a segment list")?.len(),
-            fi.index.segs.len()
-        );
         assert_eq!(
             readers_agree(&c, "header").context("every reader refuses")?,
             demo

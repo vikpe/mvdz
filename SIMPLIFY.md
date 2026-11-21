@@ -1294,8 +1294,14 @@ number is given.
    `write_file_atomic` and `write_file_atomic_with`. New unit test
    `failed_output_is_removed`. Checked by hand: an overwrite keeps mode 640, a cut
    file leaves no output, `-o /dev/null` and `-` work.
-2. JSON rendering (`FileInfo::to_json*`): only `mvdz info` uses it. Return the struct,
-   print in the tool.
+2. Done 2026-11-21 (not committed): JSON rendering moved from the library to
+   `main.rs` (`info_json`, with the hex of the SHA-256); `mvdz info` output is byte
+   for byte the same (checked on three files). Gone with it: `FileInfo::to_json`,
+   `to_json_with` and its size cap (R-M3, for library callers; the tool's output is
+   bounded by the reader's memory budget), the test `r_m3_json_limit`, the JSON step
+   of the `read_info` fuzz target and its `serde_json` dependency. `format::VERSION`
+   is `pub` for the tool. The JSON checks of `tests/info.rs` are now the unit test
+   `info_json_describes_the_file` in `main.rs`.
 3. Done (2026-11-21, not committed): `mvdz bench` removed from `main.rs` (its
    options `-r`, `--files`, `--streams`, `--skip-compress` with it; `--no-verify`
    stays, `compress` reads it). In its place `benches/codec.rs`, criterion 0.8 as a
@@ -1415,7 +1421,8 @@ After the format decisions (open questions 4, 9, 12, 13):
    chunk" becomes "scan back from the last segment".
    From "No unsafe code" (3f737db): FORMAT.md:668 ("wave 1, in parallel") describes the
    removed decode waves; the README's fuzz target list names removed targets
-   (`read_metadata`, `attachments`, `stream_writer`).
+   (`read_metadata`, `attachments`, `stream_writer`); FORMAT.md:357 names
+   `api.rs:FileInfo::to_json`, now `info_json` in `main.rs`.
 3. BENCHMARKS.md from the final measurements. Its "Fuzzing and Miri" section says Miri
    tests "the pipelined decoder's raw-pointer writer": gone with every `unsafe`
    (3f737db), so Miri has nothing left to check and can be dropped.

@@ -1,15 +1,11 @@
 #![no_main]
-//! Reading the header and the segment headers, and the JSON rendering
-//! (which must parse).
+//! Reading the header and the segment headers of arbitrary input.
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let l = mvdz::Limits {
+    let limits = mvdz::Limits {
         memory: 256 << 20,
         ..Default::default()
     };
-    if let Ok(fi) = mvdz::read_info_with(std::io::Cursor::new(data), &l) {
-        let j = fi.to_json();
-        assert!(serde_json::from_str::<serde_json::Value>(&j).is_ok());
-    }
+    let _ = mvdz::read_info_with(std::io::Cursor::new(data), &limits);
 });

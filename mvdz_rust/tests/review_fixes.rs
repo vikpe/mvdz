@@ -88,20 +88,6 @@ fn r_m2_padded_model() {
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
 }
 
-/// R-M3: the JSON rendering can be capped.
-#[test]
-fn r_m3_json_limit() -> anyhow::Result<()> {
-    let (_, f) = base()?;
-    let fi = mvdz::read_info(Cursor::new(&f))?;
-    let j = fi.to_json();
-    assert_eq!(fi.to_json_with(j.len())?, j);
-    assert_eq!(
-        fi.to_json_with(j.len() - 1).err(),
-        Some(Error::Limit("file information rendering"))
-    );
-    Ok(())
-}
-
 /// R-M4: a long run of tiny segments is charged to the budget: a
 /// sequential reader stops with a limit error instead of growing.
 #[test]
