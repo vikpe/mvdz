@@ -2,14 +2,25 @@
 
 MVDZ is a proposal with no files in the wild, so there is no compatibility burden.
 
-## Status (2026-11-20, evening)
+## Status (2026-11-21, end of day)
+
+Resume point: "Suggestions (2026-11-21)" near the end of this file. Tree clean at
+82bcd89, 38 commits on `master`. Tests (`cargo nextest run --release` in `mvdz_rust/`):
+41 pass, 4 fail (the known four). `cargo clippy --all-targets -- -D warnings` is clean.
+
+Done on 2026-11-21: two-pass encoder and the memory work, CLI decompress streams,
+gzip, mimalloc, the seeking reader, the C interface and the Go decoder removed, crate
+moved to `mvdz_rust/`, slipgate lint set, visibility, anyhow in tests, Rust 1.100,
+segments capped at 1 MiB. See Decisions.
+
+The paragraphs below are the status of 2026-11-20 and are partly superseded.
 
 Since 2026-11-21 the Rust implementation is in `mvdz_rust/` (the crate is still named
 `mvdz`): paths in this file such as `src/...`, `tests/...` and `fuzz/...` are relative to
 that directory. The specification, this file and the benchmarks stay at the root.
 
-Branch `feature/simplify`, 15 commits on `master` (rc.4, a9ac8fc), last commit 4e297d1.
-The working tree is clean; this file is untracked. Viktor commits each change himself.
+Branch `feature/simplify` on `master` (rc.4, a9ac8fc). Viktor commits each change
+himself.
 
 Done: the new container, DEFLATE in place of zstd, the 20 low-value stream models
 dropped, attachments, metadata, index, trailer, streaming writer, levels, chunk-size
@@ -19,7 +30,7 @@ container fields, five speed changes. See Decisions and Results per change.
 Also done: one fallback (ad53e50; see "One fallback" under Results per change), and
 measured at 1, 4 and 12 threads and in WebAssembly (see "Threads and WebAssembly").
 
-Tests (`cargo nextest run`): 40 pass, 4 fail, all four on the list under "Known failing tests".
+Tests: the four failures are listed under "Known failing tests".
 
 Whole session against `master`: see "Whole session" under Results per change.
 
@@ -766,6 +777,118 @@ Not measured yet:
 4. rayon on the final code (optional).
 5. The count of bits that can be flipped unnoticed, after the fallback change (the
    probe was lost with `/tmp/blobplan`).
+
+## Suggestions (2026-11-21)
+
+Not started. Each was checked to exist in the code; effects are estimates unless a
+number is given.
+
+### Guideline steps left (slipgate `AGENTS.md`, `rust/AGENTS.md`)
+
+1. Naming, module by module. The code should be obvious: spell names out unless the
+   abbreviation is well known (`crc`, `id`, `ms`). Examples: `dur` to `duration`,
+   `durs` to `durations`, `Sec`/`sec` to `Section`/`section`; the same goes for `seg`,
+   `hdr`, `wk`, `st`, `gi`, `sid`, `ctx`, `cfg`, `tm`, `nums`, `recs`, `lay`, `chk` and
+   their kind, in variables, fields, functions and types. Also: about 620
+   single-letter names, about 20 booleans without an `is_`/`has_` prefix, 7 bit
+   constants written as hex. Delete each comment the new
+   name makes redundant (about 800 of 7,680 source lines are comments). Removes the
+   last temporary allow, `many_single_char_names`. No logic changes in the same commit.
+2. `unsafe`: 20 occurrences (walker 9, predictors 6, parallel map 3, rANS 2). Not linted
+   yet. Decide: hard rule, or allowed where a benchmark shows it pays. One site at a
+   time, measured.
+3. `main.rs` allows `clippy::exit` for the whole file: return `ExitCode` from `main`.
+4. `pretty_assertions` in tests.
+5. Truncating casts: 86 in the library under one stated allow. About 37 are positions
+   narrowed from `usize` to `u32`; a walker cursor held as `u32` would remove them. Hot
+   loop: measure.
+
+### Out of the library (not the codec)
+
+1. Atomic file writing (`write_file_atomic*`, `replace_locked`, `temp_name`, `gid` in
+   `api.rs`, about 110 lines, Unix-specific parts): move to `main.rs`.
+2. JSON rendering (`FileInfo::to_json*`): only `mvdz info` uses it. Return the struct,
+   print in the tool.
+3. `bench` is 135 of the 526 lines of `main.rs` and the reason `Info` carries stream
+   statistics and `util::par_map`, stream names and `approx_f64` are public. Replace
+   it with criterion benchmarks (`benches/`, a dev-dependency; decided 2026-11-21):
+   encode and decode at 1 and 4 threads over a fixed set of demos, with criterion's
+   statistics and baseline comparison in place of one-shot timings. The slipgate
+   rule applies: write the benchmark first, then optimize. To settle then: where the
+   benchmark demos come from (none are in the repository), and that peak memory and
+   compressed size are not criterion's job, so `compare4.sh` or a small script stays
+   for those.
+
+### Paths that exist for tests or experiments
+
+1. `Config::verify`: compress is meant to take no options. Without it `Config` is a
+   thread count. The bench uses it to time encoding without the self-check.
+2. `compress_segmented`, `compress_untransformed`: with the size fixed and capped,
+   tests can use demos over 256 KiB. Removes the `target` parameter and the "0: no
+   target" case of `cut_points`.
+3. `TABLE_BITS_PER_SYM` (`rans.rs`): a global atomic nothing writes. Make it a constant.
+4. The `scalar` feature: two uses. Keep only if CI runs it (not checked).
+
+### Structure
+
+1. Eight `#[doc(hidden)] pub` modules (`coder`, `deflate`, `encode`, `format`, `proto`,
+   `segment`, `streams`, `util`) are public only for tests that build files by hand.
+   Moving those tests into the crate as unit tests lets every module be private.
+2. Decode-side concurrency: the walker and the numeric groups run at the same time on
+   a shared record buffer with a spin-wait reader (`RecBuf`, `WAVE1_PIPE`); most of the
+   `unsafe` is here. The encoder runs the same steps in sequence. Sequential decode
+   per segment would remove it; whole-file decode already runs segments in parallel.
+   Costs single-file decode speed at several threads: measure.
+3. The work budget (`Limits::work_per_byte` and its accounting): with segments at
+   1 MiB and models at 16 MiB the work a file can demand is bounded by its size. Maybe
+   only the memory limit is needed. Check what the hostile-file tests rely on first.
+4. Pass 2 of the encoder is an inline closure with block comments; pass 1 is a named
+   function (`train`). Name pass 2.
+
+### Format, enabled by the 1 MiB cap
+
+1. `MAX_SEGMENTS` (65,536) is now only a demo-size limit: state it as 16 GiB.
+2. The fallback tries DEFLATE level 9 and falls back to stored blocks when the ratio
+   rule breaks. With the cap one rule may do; whether the ratio rule is still needed
+   for a 1 MiB segment is not worked out.
+3. FORMAT.md still gives the old segment limit (4 GiB) and the old rule (only the last
+   segment may end inside a frame). New rule: a segment is at most 1 MiB; every
+   segment but the last is whole frames or exactly 1 MiB.
+4. Open since the two-pass encoder: may the models block list a model no segment
+   uses? The decoder has no check against it (not tested). Saying yes in FORMAT.md
+   keeps an encoder free to write segments as it codes them.
+
+### API gaps found on the way
+
+1. Part of a file (a time range, the last segment for ktxstats) cannot be decoded from
+   outside the crate since `decode` became private. If wanted: one public function,
+   and each segment's starting protocol state exposed for parsers.
+2. `Reader::header` is public and has no test.
+3. No regression test for the `Budget::unlimited()` bug (work limit of 2^20 with no
+   input recorded; a demo with large models failed the self-check). Needs a demo whose
+   models take more than 2^20 decisions to build.
+
+### Possible later, larger
+
+1. Streaming input for the encoder (read the demo twice instead of holding it): peak
+   drops by the raw size. 250 MB works today at about 410 MiB.
+2. Single-file decode at several threads is slower since the CLI streams (282 MB demo,
+   4 threads: 0.80 s to 1.40 s; 1 thread and batch unchanged). Fix: a whole-file decoder
+   that writes a window of segments at a time, or accept it.
+
+### Measuring
+
+`~/dev/mvdz-bench/scripts/compare4.sh` (not in the repository): 100 demos from
+`rand500`, gzip, zstd and mvdz, speed, ratio, peak memory, output hash. Use
+`CPUS=0,2,4,6` (four physical cores; `0-3` is two cores with hyperthreads) and
+`CODECS=mvdz MVDZ=<binary>` for one build. The machine flips between two speed levels
+about 6 % apart (about 123/378 and 117/357 MB/s encode/decode): compare two builds by
+alternating runs, never by one run each. Output hash of the 100 files so far:
+`6b17ab94f6e5c4c2`. Criterion (see "Out of the library", 3) should replace the
+speed part of this.
+
+Order suggested: out-of-the-library 1 and 2, then tests-and-experiments 1 and 3, then
+naming.
 
 ## Remaining implementation
 
