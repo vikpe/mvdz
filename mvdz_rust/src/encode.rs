@@ -1,16 +1,15 @@
 //! Compression: walk, code, assemble, and check that the file decodes to
-//! the input (falling back per segment to DEFLATE).
+//! the input (falling back per segment to all tail).
 
 use crate::budget::Budget;
 use crate::coder::rans::Shared;
 use crate::decode::{DemoCheck, SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::{
-    C_DEFLATE, C_TRANSFORM, Header, MAX_SEG_CODED, MAX_SEGMENTS, SEG_FIELDS, models_block,
-    seg_hdr_bytes, segment_block,
+    Header, MAX_SEG_CODED, MAX_SEGMENTS, SEG_FIELDS, models_block, seg_hdr_bytes, segment_block,
 };
 use crate::proto::{Proto, frame_len};
-use crate::segment::{self, DEFLATE_LEVEL, Nums, StreamStat, Walked, cut_points, frame_scan};
+use crate::segment::{self, Nums, StreamStat, Walked, cut_points, frame_scan};
 use crate::util::{HAS_THREADS, crc32, par_map};
 use sha2::{Digest, Sha256};
 
@@ -19,8 +18,9 @@ use sha2::{Digest, Sha256};
 pub struct Config {
     /// Worker threads (0: one per logical core).
     pub threads: usize,
-    /// Decode the result and compare (falling back per segment on a
-    /// mismatch). On by default; off only for experiments.
+    /// Decode the result and compare (a segment that does not decode to
+    /// its input is written as all tail). On by default; off only for
+    /// experiments.
     pub verify: bool,
 }
 
@@ -37,8 +37,6 @@ impl Default for Config {
 #[derive(Clone, Debug, Default)]
 pub struct Info {
     pub segments: usize,
-    /// Segments coded as DEFLATE instead of the transform.
-    pub fallback_segments: usize,
     /// Input bytes the transform stored raw (escapes and unframeable tail).
     pub escaped: usize,
     pub streams: Vec<StreamStat>,
@@ -138,16 +136,6 @@ fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize
     t
 }
 
-/// The body of a segment coded without the transform: the whole segment
-/// as one raw DEFLATE stream. DEFLATE grows data it cannot compress by a
-/// fraction of a percent, so the largest segment stays far below the
-/// largest coded length.
-pub(crate) fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
-    let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s), C_DEFLATE);
-    b.extend_from_slice(&crate::deflate::compress(s, DEFLATE_LEVEL));
-    b
-}
-
 /// The body of a walked segment with numeric values `nums`, or None if one
 /// of its streams has no model in `shared` (the file's models) or it is
 /// longer than a coded segment may be.
@@ -160,7 +148,7 @@ pub(crate) fn transform_body(
     st: &mut Vec<StreamStat>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
-    let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s), C_TRANSFORM);
+    let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s));
     b.extend_from_slice(&segment::encode(wk, nums, threads, st, shared)?);
     ((b.len() - SEG_FIELDS) as u64 <= MAX_SEG_CODED).then_some(b)
 }
@@ -170,14 +158,14 @@ pub fn compress(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
     compress_inner(src, cfg, false)
 }
 
-/// Compresses a demo with every segment coded without the transform (as
-/// DEFLATE): the layout the encoder falls back to. For test vectors.
+/// Compresses a demo with every segment coded as all tail: the layout the
+/// encoder falls back to. For tests and test vectors.
 #[doc(hidden)]
-pub fn compress_untransformed(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
+pub fn compress_all_tail(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
     compress_inner(src, cfg, true)
 }
 
-fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>, Info)> {
+fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, Info)> {
     let threads = crate::util::threads(cfg.threads);
     // an empty demo has no segment
     let cuts = if src.is_empty() {
@@ -198,7 +186,7 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
     // the demo's checksum and SHA-256 are computed beside it
     let hashes = || (crc32(src), <[u8; 32]>::from(Sha256::digest(src)));
     let train = || {
-        if force_raw {
+        if all_tail {
             Trained {
                 shared: Vec::new(),
                 protos: vec![Proto::default(); nseg],
@@ -228,66 +216,81 @@ fn compress_inner(src: &[u8], cfg: &Config, force_raw: bool) -> Result<(Vec<u8>,
     // the second pass: every segment is walked again, from the protocol
     // state it starts in, and coded with the models (segments in parallel,
     // each holding its own walk only). One the transform cannot code is
-    // DEFLATE
-    let mut bodies: Vec<Body> = par_map(outer, nseg, |i| {
+    // all tail
+    let tail_body = |i: usize| {
         let s = &src[cuts[i]..cuts[i + 1]];
-        if let Some((wk, _)) = t.walked[i].then(|| segment::walk(s, t.protos[i])).flatten() {
-            let nums = segment::numerics(s, &wk, inner);
-            let mut st = Vec::new();
-            if let Some(b) = transform_body(s, &wk, &nums, t.durs[i], inner, &mut st, &t.shared) {
-                return Body {
-                    bytes: b,
-                    fallback: false,
-                    escaped: wk.escaped(),
-                    streams: st,
-                };
-            }
+        Body::new(
+            s,
+            &segment::walk_tail(s, t.protos[i]),
+            t.durs[i],
+            inner,
+            &[],
+            true,
+        )
+    };
+    let bodies: Vec<Result<Body>> = par_map(outer, nseg, |i| {
+        let s = &src[cuts[i]..cuts[i + 1]];
+        if let Some((wk, _)) = t.walked[i].then(|| segment::walk(s, t.protos[i])).flatten()
+            && let Ok(b) = Body::new(s, &wk, t.durs[i], inner, &t.shared, false)
+        {
+            return Ok(b);
         }
-        Body::raw(s, t.durs[i])
+        tail_body(i)
     });
-    let shared = t.shared;
-    for _round in 0..2 {
-        let (out, info) = assemble(&header, &shared, &bodies);
+    let mut bodies = bodies.into_iter().collect::<Result<Vec<Body>>>()?;
+    let shared = &t.shared;
+    let fails = || Error::Internal("the encoder's output does not decode to its input");
+    loop {
+        let (out, info) = assemble(&header, shared, &bodies);
         if !cfg.verify {
             return Ok((out, info));
         }
-        let bad = failing_segments(&out, src, &cuts, threads);
-        match bad {
-            Some(b) if b.iter().all(|&x| !x) => return Ok((out, info)),
-            Some(b) => {
-                for i in 0..nseg {
-                    if b[i] && !bodies[i].fallback {
-                        bodies[i] = Body::raw(&src[cuts[i]..cuts[i + 1]], t.durs[i]);
-                    }
-                }
+        // None: the container itself does not decode, nothing to fall back to
+        let bad = failing_segments(&out, src, &cuts, threads).ok_or_else(fails)?;
+        if !bad.contains(&true) {
+            return Ok((out, info));
+        }
+        for i in (0..nseg).filter(|&i| bad[i]) {
+            if bodies[i].is_all_tail {
+                return Err(fails());
             }
-            // the container itself does not decode: nothing to fall back to
-            None => break,
+            bodies[i] = tail_body(i)?;
         }
     }
-    Err(Error::Internal(
-        "the encoder's output does not decode to its input",
-    ))
 }
 
 /// One coded segment.
 struct Body {
     bytes: Vec<u8>,
-    /// coded as DEFLATE instead of the transform
-    fallback: bool,
+    /// coded as all tail
+    is_all_tail: bool,
     /// input bytes the transform stored raw
     escaped: usize,
     streams: Vec<StreamStat>,
 }
 
 impl Body {
-    fn raw(s: &[u8], dur_ms: u64) -> Self {
-        Self {
-            bytes: raw_body(s, dur_ms),
-            fallback: true,
-            escaped: 0,
-            streams: Vec::new(),
-        }
+    /// Codes segment `s` from its walk `wk`. An error if a stream has no
+    /// model in `shared` or the body is longer than a coded segment may be
+    /// (an all-tail body has neither problem).
+    fn new(
+        s: &[u8],
+        wk: &Walked,
+        dur_ms: u64,
+        threads: usize,
+        shared: &[Option<Shared>],
+        is_all_tail: bool,
+    ) -> Result<Self> {
+        let nums = segment::numerics(s, wk, threads);
+        let mut streams = Vec::new();
+        let bytes = transform_body(s, wk, &nums, dur_ms, threads, &mut streams, shared)
+            .ok_or(Error::Internal("a segment that cannot be coded"))?;
+        Ok(Self {
+            bytes,
+            is_all_tail,
+            escaped: wk.escaped(),
+            streams,
+        })
     }
 }
 
@@ -313,7 +316,6 @@ fn assemble(header: &Header, shared: &[Option<Shared>], bodies: &[Body]) -> (Vec
     };
     for b in bodies {
         segment_block(&mut out, &b.bytes);
-        info.fallback_segments += usize::from(b.fallback);
         info.escaped += b.escaped;
         info.streams.extend(b.streams.iter().cloned());
     }

@@ -13,7 +13,7 @@
 //!
 //! A structural or numeric stream is rANS with its model in the file's
 //! models block; a segment with such a stream that has no model there is
-//! not transform-coded (the encoder deflates it whole).
+//! not transform-coded (the encoder writes it as all tail).
 //! The blob streams have no bodies of their own: their bytes, concatenated
 //! in table order, are one raw DEFLATE stream, the blob body. Without blob
 //! streams `blob_len` is 0 and there is no blob body.
@@ -38,8 +38,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// or after this many bytes.
 pub const SEGMENT: usize = 256 * 1024;
 
-/// DEFLATE level of the blob body and of segments that fall back to
-/// DEFLATE.
+/// DEFLATE level of the blob body.
 pub(crate) const DEFLATE_LEVEL: u32 = 9;
 
 /// Per-stream statistics for reporting. The blob streams of a segment
@@ -245,6 +244,22 @@ pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
         },
         pend,
     ))
+}
+
+/// One segment as all tail, starting in protocol state `proto`: no frame
+/// is walked and every byte goes to the [`TAIL`] blob stream. Any bytes
+/// can be coded this way; the protocol state after it is `proto`.
+pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked {
+    let mut io = EncIO::new();
+    io.blobs[TAIL] = src.to_vec();
+    let recs = Recs::growable(0);
+    recs.finish();
+    Walked {
+        io,
+        recs,
+        tail: src.len(),
+        proto0: proto,
+    }
 }
 
 #[derive(Clone, Copy)]

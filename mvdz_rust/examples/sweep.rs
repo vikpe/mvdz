@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
     let res = mvdz::util::par_map(4, args.len(), |i| {
         let src = std::fs::read(&args[i]).with_context(|| args[i].clone())?;
         let want = Sha256::digest(&src);
-        let (c, info) = mvdz::compress_info(&src, &mvdz::Config::default())?;
+        let c = mvdz::compress(&src, &mvdz::Config::default())?;
         let is_whole_ok = mvdz::decompress(&c, 1).is_ok_and(|d| Sha256::digest(&d) == want);
         let mut d = Vec::new();
         let is_sequential_ok =
@@ -23,21 +23,20 @@ fn main() -> anyhow::Result<()> {
         if !is_sequential_ok {
             fails.push("sequential reader");
         }
-        anyhow::Ok((args[i].clone(), src.len(), fails, info.fallback_segments))
+        anyhow::Ok((args[i].clone(), src.len(), fails))
     });
-    let (mut n, mut raw, mut bad, mut fbs) = (0, 0usize, 0, 0);
+    let (mut n, mut raw, mut bad) = (0, 0usize, 0);
     for file in res {
-        let (f, len, fails, fb) = file?;
+        let (f, len, fails) = file?;
         n += 1;
         raw += len;
-        fbs += fb;
         if !fails.is_empty() {
             bad += 1;
             println!("FAIL {f}: {fails:?}");
         }
     }
     println!(
-        "files {n}  raw {:.1} MB  round trips {}  failed files {bad}  fallback segments {fbs}",
+        "files {n}  raw {:.1} MB  round trips {}  failed files {bad}",
         mvdz::util::approx_f64(raw as u64) / 1e6,
         n * 2
     );

@@ -186,12 +186,7 @@ fn transform_body(
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
     let (_, ms, _) = mvdz::segment::frame_scan(demo);
     let crc = mvdz::util::crc32(demo);
-    let mut b = seg_hdr_bytes(
-        u32::try_from(demo.len())?,
-        u32::try_from(ms)?,
-        crc,
-        C_TRANSFORM,
-    );
+    let mut b = seg_hdr_bytes(u32::try_from(demo.len())?, u32::try_from(ms)?, crc);
     b.extend_from_slice(body);
     Ok(Parts {
         header: Header {
@@ -268,11 +263,8 @@ fn hostile(v: &mut Vec<Vector>) -> anyhow::Result<()> {
         "one bit of the second segment's CRC-32 flipped",
     );
     let mut q = p.clone();
-    q.segs[1][h.body_off - 1] = 2;
-    add("segment-coding", q.build(), "a segment with coding 2");
-    let mut q = p.clone();
     q.segs
-        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_DEFLATE));
+        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[])));
     add("segment-empty", q.build(), "an empty segment");
     let mut q = p.clone();
     q.segs[0].resize(SEG_FIELDS + usize::try_from(MAX_SEG_CODED)? + 1, 0);
@@ -281,32 +273,17 @@ fn hostile(v: &mut Vec<Vector>) -> anyhow::Result<()> {
         q.build(),
         "the first segment padded with zeros to one byte over the largest coded length (2 MiB)",
     );
-    // a DEFLATE segment whose header claims 1 ms more than its frames hold
-    // (the header's duration raised with it)
-    let plain = synthetic(&[], false);
-    let (_, ms, _) = mvdz::segment::frame_scan(&plain);
-    let crc = mvdz::util::crc32(&plain);
-    let mut b = seg_hdr_bytes(
-        u32::try_from(plain.len())?,
-        u32::try_from(ms + 1)?,
-        crc,
-        C_DEFLATE,
-    );
-    b.extend_from_slice(&mvdz::deflate::compress(&plain, 9));
+    // a segment whose header claims 1 ms more than its frames hold (the
+    // header's duration raised with it)
+    let mut q = parts(&compress(&synthetic(&[], false))?)?;
+    assert_eq!(q.segs.len(), 1);
+    let dur = u32::from_le_bytes(q.segs[0][4..8].try_into()?);
+    q.segs[0][4..8].copy_from_slice(&(dur + 1).to_le_bytes());
+    q.header.duration_ms += 1;
     add(
         "segment-duration",
-        Parts {
-            header: Header {
-                size: plain.len() as u64,
-                duration_ms: ms + 1,
-                crc,
-                sha256: Sha256::digest(&plain).into(),
-            },
-            models: Vec::new(),
-            segs: vec![b],
-        }
-        .build(),
-        "a DEFLATE segment whose dur_ms is 1 more than its frame times",
+        q.build(),
+        "a segment whose dur_ms is 1 more than its frame times",
     );
     let mut x = base[..HEADER_LEN].to_vec();
     x.extend_from_slice(&(256u32 << 20).to_le_bytes());
@@ -549,13 +526,6 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         &duel,
         &format!("{src}; compress"),
     );
-    let fb = untransformed(&duel)?;
-    add(
-        "duel.untransformed.mvdz",
-        fb,
-        &duel,
-        &format!("{src}; every segment DEFLATE (the fallback layout)"),
-    );
     add(
         "duel-truncated.normal.mvdz",
         one(&duel[..150_000])?,
@@ -596,12 +566,12 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         &random,
         "3000 random bytes (no frame: all tail)",
     );
-    let rs = untransformed(&random)?;
+    let framed = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     add(
-        "random.deflate.mvdz",
-        rs,
-        &random,
-        "the same, untransformed: one DEFLATE segment",
+        "framed-as-tail.mvdz",
+        all_tail(&framed)?.0,
+        &framed,
+        "synthetic demo with demoinfo, written as all tail (the encoder's fallback layout)",
     );
     add("empty.normal.mvdz", one(b"")?, b"", "an empty demo");
     let uc = usercmd_demo();

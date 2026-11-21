@@ -5,8 +5,8 @@ use crate::budget::{Budget, Charge, Limits, zeroed};
 use crate::coder::rans::FileTables;
 use crate::error::{Error, Result, bad};
 use crate::format::{
-    C_DEFLATE, C_TRANSFORM, HEADER_LEN, LEN, Layout, MAX_SEG_RAW, SEG_FIELDS, Sec, SegHdr,
-    TABLES_MAX, check_coded_len, len_field, parse_seg_hdr,
+    HEADER_LEN, LEN, Layout, MAX_SEG_RAW, SEG_FIELDS, Sec, SegHdr, TABLES_MAX, check_coded_len,
+    len_field, parse_seg_hdr,
 };
 use crate::segment::{self, frame_scan};
 use crate::util::{Crc, crc32, par_map, usz};
@@ -161,17 +161,8 @@ pub(crate) fn decode_segment(
     let coded = body
         .get(h.body_off..)
         .ok_or(Error::Corrupt("segment header"))?;
-    match h.coding {
-        C_TRANSFORM => {
-            let th = segment::parse_header(coded, dst.len())?;
-            segment::decode(coded, &th, dst, tables, threads, budget)?;
-        }
-        C_DEFLATE => {
-            let _c = budget.alloc(u64::from(h.raw_len))?;
-            dst.copy_from_slice(&crate::deflate::decompress(coded, dst.len())?);
-        }
-        _ => return Err(Error::Format("unknown segment coding")),
-    }
+    let th = segment::parse_header(coded, dst.len())?;
+    segment::decode(coded, &th, dst, tables, threads, budget)?;
     if crc32(dst) != h.crc {
         return bad("segment checksum");
     }

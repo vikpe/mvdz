@@ -65,7 +65,7 @@ fn r_m2_padded_model() {
         put_uv(&mut body, v);
     }
     body.extend_from_slice(&st);
-    let mut b = seg_hdr_bytes(raw_len, 0, 0, C_TRANSFORM);
+    let mut b = seg_hdr_bytes(raw_len, 0, 0);
     b.extend_from_slice(&body);
     let f = Parts {
         header: Header {
@@ -152,9 +152,9 @@ fn sha256_is_not_checked_on_decode() -> anyhow::Result<()> {
     let mut o = Vec::new();
     std::io::Read::read_to_end(&mut r, &mut o)?;
     assert_eq!(o, d);
-    // one byte of an untransformed segment changed: the segment CRC catches it
+    // one byte of a segment changed: decoding refuses it
     let demo = synthetic(&[], false);
-    let c = untransformed(&[demo, vec![0; 5000]].concat())?;
+    let c = compress(&[demo, vec![0; 5000]].concat())?;
     let ok = mvdz::decompress(&c, 1)?;
     let mut bad = c;
     let i = (0..bad.len())

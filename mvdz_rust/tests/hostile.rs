@@ -86,17 +86,10 @@ fn structure_rules() -> anyhow::Result<()> {
     refused(&b, "trailing byte", |e| {
         *e == Error::Corrupt("trailing bytes")
     });
-    // a segment of a coding this version does not know
-    let mut q = p.clone();
-    let h = parse_seg_hdr(&q.segs[1])?;
-    q.segs[1][h.body_off - 1] = 9;
-    refused(&q.build(), "unknown coding", |e| {
-        matches!(e, Error::Format(_))
-    });
     // an empty segment in between
     let mut q = p.clone();
     q.segs
-        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_DEFLATE));
+        .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[])));
     refused(&q.build(), "empty segment", corrupt);
     // the models block missing
     let mut b = c[..HEADER_LEN].to_vec();
@@ -131,10 +124,10 @@ fn declared_sizes() -> anyhow::Result<()> {
     let (_, c) = base(false)?;
     let p = parts(&c)?;
     // a segment that claims the largest raw length in 9 bytes that are
-    // not DEFLATE data: its output buffer is within the budget, and
+    // not a transform body: its output buffer is within the budget, and
     // decoding refuses it
     let mut q = p.clone();
-    let mut b = seg_hdr_bytes(u32::try_from(MAX_SEG_RAW)?, 0, 0, C_DEFLATE);
+    let mut b = seg_hdr_bytes(u32::try_from(MAX_SEG_RAW)?, 0, 0);
     b.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
     q.header.size = MAX_SEG_RAW;
     q.segs = vec![b];
@@ -214,7 +207,6 @@ fn model_amplification() -> anyhow::Result<()> {
             u32::try_from(demo.len())?,
             u32::try_from(p.header.duration_ms)?,
             mvdz::util::crc32(&demo),
-            C_TRANSFORM,
         );
         b.extend_from_slice(&body);
         let mut q = p.clone();

@@ -283,18 +283,12 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
     } else {
         mvdz::compress_info(&src, &cfg)
     };
-    let (out, info) = r.map_err(|e| match e {
+    let (out, _) = r.map_err(|e| match e {
         mvdz::Error::NotMvd(s) if !s.starts_with("gzip") => {
             format!("{e} (--allow-non-demo compresses it anyway, mostly stored)")
         }
         _ => e.to_string(),
     })?;
-    if info.fallback_segments > 0 {
-        eprintln!(
-            "note: {i}: {} of {} segments coded as DEFLATE, without the transform",
-            info.fallback_segments, info.segments
-        );
-    }
     try_write_output(o, &out).map_err(|e| format!("{o}: {e}"))
 }
 

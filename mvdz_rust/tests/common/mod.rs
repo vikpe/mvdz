@@ -22,9 +22,9 @@ pub(crate) fn unchecked(src: &[u8]) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
     mvdz::encode::compress(src, &Config::default())
 }
 
-/// Every segment coded without the transform (as DEFLATE).
-pub(crate) fn untransformed(src: &[u8]) -> anyhow::Result<Vec<u8>> {
-    Ok(mvdz::encode::compress_untransformed(src, &Config::default())?.0)
+/// Every segment coded as all tail: no frames, every byte in the tail.
+pub(crate) fn all_tail(src: &[u8]) -> mvdz::Result<(Vec<u8>, mvdz::Info)> {
+    mvdz::encode::compress_all_tail(src, &Config::default())
 }
 
 /// `demo` repeated past four times [`mvdz::segment::SEGMENT`]: the encoder

@@ -7,8 +7,8 @@
 //! header  := "MVDZ" | version u32 | size u64 | duration_ms u64
 //!            | crc u64 | sha256[32]                                (64 bytes)
 //! models  := len u32 | body[len]
-//! segment := len u32 | raw_len u32 | dur_ms u32 | crc u32 | coding u8
-//!            | coded[len]                              (17 bytes, then coded)
+//! segment := len u32 | raw_len u32 | dur_ms u32 | crc u32
+//!            | coded[len]                              (16 bytes, then coded)
 //! ```
 //!
 //! Every integer is little-endian and of fixed width.
@@ -17,7 +17,9 @@
 //! 0) and its SHA-256. `models` holds the shared rANS models (`len` 0:
 //! none). A segment's raw offset and start time are the sums of `raw_len`
 //! and `dur_ms` of the segments before it. The file is complete when the
-//! `raw_len` of its segments sum to `size`; it ends there.
+//! `raw_len` of its segments sum to `size`; it ends there. A segment's
+//! coded data is the transform ([`crate::segment`]); a segment the
+//! transform cannot code is written as all tail.
 
 use crate::budget::{Budget, Charge};
 use crate::coder::rans::FileTables;
@@ -29,11 +31,6 @@ pub(crate) const VERSION: u32 = 2;
 pub const HEADER_LEN: usize = 64;
 /// Bytes of a length field (of the models block, of a segment).
 pub const LEN: usize = 4;
-
-/// Segment codings.
-pub const C_TRANSFORM: u8 = 0;
-/// The whole segment as one raw DEFLATE stream: the encoder's fallback.
-pub const C_DEFLATE: u8 = 1;
 
 /// Largest raw length of one segment: what a reader holds at most per
 /// segment. The encoder cuts at a frame boundary well below it and at
@@ -194,25 +191,22 @@ pub struct SegHdr {
     /// the segment's frame time: the sum of its frame time bytes
     pub(crate) dur_ms: u32,
     pub(crate) crc: u32,
-    pub(crate) coding: u8,
     /// offset of the coded data in the segment body
     pub body_off: usize,
 }
 
-/// The header fields of a segment body: `raw_len`, `dur_ms`, `crc`,
-/// `coding`.
-pub fn seg_hdr_bytes(raw_len: u32, dur_ms: u32, crc: u32, coding: u8) -> Vec<u8> {
+/// The header fields of a segment body: `raw_len`, `dur_ms`, `crc`.
+pub fn seg_hdr_bytes(raw_len: u32, dur_ms: u32, crc: u32) -> Vec<u8> {
     let mut b = Vec::with_capacity(SEG_FIELDS);
     b.extend_from_slice(&raw_len.to_le_bytes());
     b.extend_from_slice(&dur_ms.to_le_bytes());
     b.extend_from_slice(&crc.to_le_bytes());
-    b.push(coding);
     b
 }
 
 /// Bytes of a segment's header fields after its length field: the coded
 /// data starts here in a segment body.
-pub const SEG_FIELDS: usize = 4 + 4 + 4 + 1;
+pub const SEG_FIELDS: usize = 4 + 4 + 4;
 
 /// Parses a segment's header fields from the first [`SEG_FIELDS`] bytes of
 /// its body.
@@ -222,10 +216,6 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
     let raw_len = r.u32le().ok_or(e)?;
     let dur_ms = r.u32le().ok_or(e)?;
     let crc = r.u32le().ok_or(e)?;
-    let coding = r.u8().ok_or(e)?;
-    if !matches!(coding, C_TRANSFORM | C_DEFLATE) {
-        return Err(Error::Format("unknown segment coding"));
-    }
     if raw_len == 0 {
         return bad("empty segment");
     }
@@ -238,7 +228,6 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
         t_start: 0,
         dur_ms,
         crc,
-        coding,
         body_off: SEG_FIELDS,
     })
 }

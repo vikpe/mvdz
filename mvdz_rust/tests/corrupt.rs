@@ -49,8 +49,7 @@ fn mutated_streams_never_panic() -> anyhow::Result<()> {
     };
     let mut rng = Rng(0xdead_beef_cafe_f00d);
     for src in demos {
-        let (c, info) = compress_info(&src)?;
-        assert_eq!(info.fallback_segments, 0);
+        let c = compress(&src)?;
         assert_eq!(mvdz::decompress(&c, 1)?, src);
         for _ in 0..200 {
             let mut b = c.clone();

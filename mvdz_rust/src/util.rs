@@ -48,11 +48,6 @@ impl<'a> Rd<'a> {
     pub(crate) fn u32v(&mut self) -> Option<u32> {
         u32::try_from(self.uv()?).ok()
     }
-    pub(crate) fn u8(&mut self) -> Option<u8> {
-        let v = *self.b.get(self.i)?;
-        self.i += 1;
-        Some(v)
-    }
     pub(crate) fn u32le(&mut self) -> Option<u32> {
         let s = self.take(4)?;
         Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))

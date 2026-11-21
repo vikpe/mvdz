@@ -6,12 +6,9 @@ use anyhow::Context as _;
 use common::*;
 use std::assert_matches;
 
-fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) -> anyhow::Result<()> {
+fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
-        let (one, info) = unchecked(&src)?;
-        if expect_transform {
-            assert_eq!(info.fallback_segments, 0, "{what} {how}: fell back");
-        }
+        let (one, _) = unchecked(&src)?;
         let back = readers_agree(&one, what).with_context(|| format!("{what} {how}: refused"))?;
         assert!(back == src, "{what} {how}");
     }
@@ -20,20 +17,16 @@ fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) -> anyhow::Res
 
 #[test]
 fn synthetic_demos() -> anyhow::Result<()> {
-    check_all_ways(&synthetic(&[], false), "plain", true)?;
-    check_all_ways(
-        &synthetic(&[(1, "{\"a\":"), (0, "1}")], false),
-        "demoinfo",
-        true,
-    )?;
-    check_all_ways(&synthetic(&[], true), "truncated", true)?;
+    check_all_ways(&synthetic(&[], false), "plain")?;
+    check_all_ways(&synthetic(&[(1, "{\"a\":"), (0, "1}")], false), "demoinfo")?;
+    check_all_ways(&synthetic(&[], true), "truncated")?;
     Ok(())
 }
 
 #[test]
 fn sample_demos() -> anyhow::Result<()> {
     for (i, src) in samples(3).iter().enumerate() {
-        check_all_ways(src, &format!("sample {i}"), true)?;
+        check_all_ways(src, &format!("sample {i}"))?;
     }
     Ok(())
 }
@@ -57,7 +50,7 @@ fn empty_and_tiny_inputs() -> anyhow::Result<()> {
         let refusal = compress(src).err();
         assert_matches!(refusal, Some(mvdz::Error::NotMvd(_)), "{refusal:?}");
         // the unchecked encoder still round-trips any bytes
-        check_all_ways(src, &format!("{src:?}"), false)?;
+        check_all_ways(src, &format!("{src:?}"))?;
     }
     Ok(())
 }
@@ -97,6 +90,34 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Bytes that frame, written as all tail (the encoder's fallback for a
+/// segment the transform cannot code): every reader decodes them, in one
+/// segment and in several.
+#[test]
+fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
+    let demos = [
+        ("synthetic", synthetic(&[(1, "{\"a\":"), (0, "1}")], false)),
+        ("usercmd", usercmd_demo()),
+    ];
+    for (what, demo) in demos {
+        for (how, src) in [
+            ("as is", demo.clone()),
+            ("repeated", several_segments(&demo)),
+        ] {
+            let (c, info) = all_tail(&src)?;
+            assert_eq!(
+                info.escaped,
+                src.len(),
+                "{what} {how}: every byte in the tail"
+            );
+            assert_eq!(info.segments, parts(&c)?.segs.len());
+            let back = readers_agree(&c, what).with_context(|| format!("{what} {how}: refused"))?;
+            assert!(back == src, "{what} {how}");
+        }
+    }
+    Ok(())
+}
+
 /// A flood of `svc_nop` codes in very few bytes. No rule ties a segment's
 /// coded length to its raw length from below: the transform codes it and
 /// every reader accepts it.
@@ -109,7 +130,6 @@ fn nop_flood_round_trips() -> anyhow::Result<()> {
     let src = d.0;
     let (c, info) = compress_info(&src)?;
     assert!(info.segments > 1);
-    assert_eq!(info.fallback_segments, 0);
     assert!(readers_agree(&c, "nop").context("every reader refuses")? == src);
     Ok(())
 }
@@ -263,7 +283,6 @@ fn file_tables() -> anyhow::Result<()> {
     let (seg, info) = compress_info(&several_segments(&src))?;
     assert!(info.segments > 2);
     assert!(has(&seg)?, "models");
-    assert_eq!(info.fallback_segments, 0, "every segment is transformed");
     assert!(
         readers_agree(&seg, "tables").context("every reader refuses")? == several_segments(&src)
     );

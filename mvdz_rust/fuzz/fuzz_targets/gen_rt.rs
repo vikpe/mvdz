@@ -1,7 +1,7 @@
 #![no_main]
 //! Review target: a structure-aware demo; (1) the transform alone, with
 //! verification off, must round-trip (else the encoder relies on its
-//! fallback: a transform bug); (2) the normal path (verify on) must
+//! all-tail fallback: a transform bug); (2) the normal path (verify on) must
 //! succeed and round-trip at any thread count.
 use libfuzzer_sys::fuzz_target;
 mod mgen;
