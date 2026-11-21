@@ -236,15 +236,30 @@ fn compress_inner(
     } else {
         Vec::new()
     };
-    // segments the transform could not code: raw from the start
-    let mut raw: Vec<bool> = plans
-        .iter()
-        .map(|p| force_raw || p.walked.is_none())
-        .collect();
+    // every segment's body; one the transform cannot code is DEFLATE
+    let mut bodies: Vec<Body> = par_map(outer, nseg, |i| {
+        let s = &src[cuts[i]..cuts[i + 1]];
+        let p = &plans[i];
+        if let (Some(wk), Some(nums)) = (&p.walked, &p.nums) {
+            let mut st = Vec::new();
+            if let Some(b) = transform_body(s, wk, nums, p.dur_ms, inner, &mut st, &shared) {
+                return Body {
+                    bytes: b,
+                    fallback: false,
+                    escaped: wk.escaped(),
+                    streams: st,
+                };
+            }
+        }
+        Body::raw(s, p.dur_ms)
+    });
+    // the walks and the numeric values are not needed again (a segment
+    // that fails the check below is coded again as DEFLATE): freed before
+    // the check, which decodes
+    let durs: Vec<u64> = plans.iter().map(|p| p.dur_ms).collect();
+    drop(plans);
     for _round in 0..2 {
-        let (out, info) = assemble(
-            src, &cuts, &plans, &raw, &header, &shared, outer, inner,
-        );
+        let (out, info) = assemble(&header, &shared, &bodies);
         if !cfg.verify {
             return Ok((out, info));
         }
@@ -252,8 +267,10 @@ fn compress_inner(
         match bad {
             Some(b) if b.iter().all(|&x| !x) => return Ok((out, info)),
             Some(b) => {
-                for (r, x) in raw.iter_mut().zip(b) {
-                    *r |= x;
+                for i in 0..nseg {
+                    if b[i] && !bodies[i].fallback {
+                        bodies[i] = Body::raw(&src[cuts[i]..cuts[i + 1]], durs[i]);
+                    }
                 }
             }
             // the container itself does not decode: nothing to fall back to
@@ -265,35 +282,33 @@ fn compress_inner(
     ))
 }
 
-/// Builds the file from the plans; `raw[i]` codes segment i without the
-/// transform.
-#[allow(clippy::too_many_arguments)]
-fn assemble(
-    src: &[u8],
-    cuts: &[usize],
-    plans: &[Planned],
-    raw: &[bool],
-    header: &Header,
-    shared: &[Option<Shared>],
-    outer: usize,
-    inner: usize,
-) -> (Vec<u8>, Info) {
-    let nseg = plans.len();
-    let bodies: Vec<(Vec<u8>, bool, Vec<StreamStat>)> = par_map(outer, nseg, |i| {
-        let s = &src[cuts[i]..cuts[i + 1]];
-        let mut st = Vec::new();
-        if let (Some(wk), Some(nums), false) = (&plans[i].walked, &plans[i].nums, raw[i]) {
-            let p = &plans[i];
-            if let Some(b) = transform_body(s, wk, nums, p.dur_ms, inner, &mut st, shared) {
-                return (b, false, st);
-            }
+/// One coded segment.
+struct Body {
+    bytes: Vec<u8>,
+    /// coded as DEFLATE instead of the transform
+    fallback: bool,
+    /// input bytes the transform stored raw
+    escaped: usize,
+    streams: Vec<StreamStat>,
+}
+
+impl Body {
+    fn raw(s: &[u8], dur_ms: u64) -> Body {
+        Body {
+            bytes: raw_body(s, dur_ms),
+            fallback: true,
+            escaped: 0,
+            streams: Vec::new(),
         }
-        (raw_body(s, plans[i].dur_ms), true, Vec::new())
-    });
+    }
+}
+
+/// Builds the file from its segments' bodies.
+fn assemble(header: &Header, shared: &[Option<Shared>], bodies: &[Body]) -> (Vec<u8>, Info) {
     let mut out = header.bytes().to_vec();
     // the models: the shared model of every stream some segment codes with it
     let mut used = vec![false; shared.len()];
-    for st in bodies.iter().flat_map(|b| &b.2) {
+    for st in bodies.iter().flat_map(|b| &b.streams) {
         if st.id != crate::streams::BLOB_BODY && !crate::streams::is_blob(st.id) {
             used[st.id] = true;
         }
@@ -305,18 +320,14 @@ fn assemble(
         models_block(&mut out, &segment::tables_body(shared, &ids));
     }
     let mut info = Info {
-        segments: nseg,
+        segments: bodies.len(),
         ..Default::default()
     };
-    for (i, (b, fb, st)) in bodies.into_iter().enumerate() {
-        segment_block(&mut out, &b);
-        info.fallback_segments += fb as usize;
-        info.escaped += plans[i]
-            .walked
-            .as_ref()
-            .filter(|_| !fb)
-            .map_or(0, |w| w.escaped());
-        info.streams.extend(st);
+    for b in bodies {
+        segment_block(&mut out, &b.bytes);
+        info.fallback_segments += b.fallback as usize;
+        info.escaped += b.escaped;
+        info.streams.extend(b.streams.iter().cloned());
     }
     (out, info)
 }
