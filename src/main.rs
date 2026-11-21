@@ -18,10 +18,10 @@ fn usage() -> ! {
         "usage:
   mvdz compress   [-j threads] [--allow-non-demo]
                   [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
-                  game.mvd or game.mvd.gz -> game.mvdz beside it
-  mvdz decompress [-j threads] [--max-memory size] [--gzip | --no-gzip]
+                  game.mvd -> game.mvdz beside it
+  mvdz decompress [-j threads] [--max-memory size]
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
-                  game.mvdz -> game.mvd (game.mvd.gz with --gzip) beside it
+                  game.mvdz -> game.mvd beside it
   mvdz info       file.mvdz...                     header and segments as JSON
   mvdz bench      [-r reps] [-j threads] [--no-verify]
                   [--skip-compress] [--files out.tsv] [--streams out.tsv] files...
@@ -30,11 +30,10 @@ each output after its input, keep the inputs (--rm deletes each one after its
 output is written), refuse to overwrite an existing file (-f overwrites), and
 with several files work on -j of them at once; two names where the second is
 an output (compress: *.mvdz or -; decompress: not *.mvdz) are input and
-output, as is -o. compress takes gzip input (.mvd.gz), decompressed first;
-input that is not an MVD demo is refused (--allow-non-demo stores it anyway).
-decompress --gzip writes the demo gzip-compressed (the default for an output
-named *.gz; --no-gzip writes it raw). Sizes take K, M, G suffixes
-(binary: 1M = 1048576). Compression has no settings: the demo is cut into
+output, as is -o. compress takes a raw demo: input that is not an MVD demo
+is refused (--allow-non-demo stores it anyway), and a .mvd.gz is to be
+decompressed first (gzip -dc game.mvd.gz | mvdz compress - game.mvdz).
+Sizes take K, M, G suffixes (binary: 1M = 1048576). Compression has no settings: the demo is cut into
 independently decodable segments of 256 KiB."
     );
     std::process::exit(2)
@@ -49,7 +48,6 @@ struct Args {
     files: Vec<String>,
     no_verify: bool,
     skip_compress: bool,
-    gzip: Option<bool>,
     any_input: bool,
     output: Option<String>,
     overwrite: bool,
@@ -81,7 +79,6 @@ fn parse(args: &[String]) -> Args {
         files: Vec::new(),
         no_verify: false,
         skip_compress: false,
-        gzip: None,
         any_input: false,
         output: None,
         overwrite: false,
@@ -104,8 +101,6 @@ fn parse(args: &[String]) -> Args {
             "--files" => a.perfile = Some(val()),
             "--no-verify" => a.no_verify = true,
             "--skip-compress" => a.skip_compress = true,
-            "--gzip" => a.gzip = Some(true),
-            "--no-gzip" => a.gzip = Some(false),
             "--allow-non-demo" => a.any_input = true,
             "-o" | "--output" => a.output = Some(val()),
             "-f" | "--force" => a.overwrite = true,
@@ -151,31 +146,17 @@ fn read_input(p: &str) -> Vec<u8> {
     try_read_input(p).unwrap_or_else(|e| die(format!("{p}: {e}")))
 }
 
-/// Reads a raw demo: gzip input (`.mvd.gz`) is decompressed.
-fn read_demo(p: &str) -> Vec<u8> {
-    let b = read_input(p);
-    if !mvdz::is_gzip(&b) {
-        return b;
-    }
-    mvdz::gunzip(&b, Limits::default().memory).unwrap_or_else(|e| die(format!("{p}: {e}")))
-}
-
-/// Writes `data`, gzip-compressed if `gzip`, to `w`.
-fn put(w: &mut impl Write, data: &[u8], gzip: bool) -> std::io::Result<()> {
-    if gzip {
-        mvdz::write_gzip(data, &mut *w)?;
-    } else {
-        w.write_all(data)?;
-    }
+/// Writes `data` to `w`.
+fn put(w: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
+    w.write_all(data)?;
     w.flush()
 }
 
-/// Writes an output (gzip-compressed if `gzip`): standard output, a
-/// device or pipe directly, a regular file atomically (temporary file and
-/// rename).
-fn try_write_output(p: &str, data: &[u8], gzip: bool) -> Result<(), String> {
+/// Writes an output: standard output, a device or pipe directly, a regular
+/// file atomically (temporary file and rename).
+fn try_write_output(p: &str, data: &[u8]) -> Result<(), String> {
     if p == "-" {
-        put(&mut std::io::stdout().lock(), data, gzip).unwrap_or_else(|e| stdout_failed(e));
+        put(&mut std::io::stdout().lock(), data).unwrap_or_else(|e| stdout_failed(e));
         return Ok(());
     }
     let path = std::path::Path::new(p);
@@ -185,9 +166,9 @@ fn try_write_output(p: &str, data: &[u8], gzip: bool) -> Result<(), String> {
                 .write(true)
                 .open(path)
                 .map_err(|e| e.to_string())?;
-            put(&mut f, data, gzip).map_err(|e| e.to_string())
+            put(&mut f, data).map_err(|e| e.to_string())
         }
-        _ => api::write_file_atomic_with(path, |f| put(f, data, gzip)).map_err(|e| e.to_string()),
+        _ => api::write_file_atomic_with(path, |f| put(f, data)).map_err(|e| e.to_string()),
     }
 }
 
@@ -197,9 +178,9 @@ fn has_suffix(name: &str, suf: &str) -> bool {
         && name.as_bytes()[name.len() - suf.len()..].eq_ignore_ascii_case(suf.as_bytes())
 }
 
-/// The output named after input `i`: game.mvd / game.mvd.gz -> game.mvdz;
-/// game.mvdz -> game.mvd (game.mvd.gz if `gzip`).
-fn output_name(i: &str, compress: bool, gzip: bool) -> Result<String, String> {
+/// The output named after input `i`: game.mvd -> game.mvdz; game.mvdz ->
+/// game.mvd.
+fn output_name(i: &str, compress: bool) -> Result<String, String> {
     if i == "-" {
         return Ok("-".into());
     }
@@ -207,20 +188,14 @@ fn output_name(i: &str, compress: bool, gzip: bool) -> Result<String, String> {
         if has_suffix(i, ".mvdz") {
             return Err("already .mvdz".into());
         }
-        let stem = if has_suffix(i, ".mvd.gz") {
-            &i[..i.len() - 7]
-        } else if has_suffix(i, ".mvd") {
+        let stem = if has_suffix(i, ".mvd") {
             &i[..i.len() - 4]
         } else {
             i
         };
         Ok(format!("{stem}.mvdz"))
     } else if has_suffix(i, ".mvdz") {
-        Ok(format!(
-            "{}.mvd{}",
-            &i[..i.len() - 5],
-            if gzip { ".gz" } else { "" }
-        ))
+        Ok(format!("{}.mvd", &i[..i.len() - 5]))
     } else {
         Err("not named *.mvdz (-o names the output)".into())
     }
@@ -249,7 +224,7 @@ fn jobs(a: &Args, compress: bool) -> Vec<(String, Result<String, String>)> {
     let mut seen = std::collections::HashMap::new();
     f.iter()
         .map(|i| {
-            let o = output_name(i, compress, a.gzip == Some(true)).and_then(|o| {
+            let o = output_name(i, compress).and_then(|o| {
                 match seen.insert(o.clone(), i.clone()) {
                     Some(prev) => Err(format!("{o} is also the output of {prev}")),
                     None => Ok(o),
@@ -297,7 +272,7 @@ fn run_jobs(a: &Args, compress: bool) {
 }
 
 fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
-    // gzip input is decompressed and non-demos refused by the library
+    // non-demos are refused by the library
     let src = try_read_input(i)?;
     let cfg = Config {
         threads,
@@ -305,17 +280,12 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
     };
     let r = if a.any_input {
         // store whatever it is (it still round-trips)
-        let raw = if mvdz::is_gzip(&src) {
-            mvdz::gunzip(&src, Limits::default().memory)
-        } else {
-            Ok(src)
-        };
-        raw.and_then(|r| mvdz::encode::compress(&r, &cfg))
+        mvdz::encode::compress(&src, &cfg)
     } else {
         api::compress_info(&src, &cfg)
     };
     let (out, info) = r.map_err(|e| match e {
-        mvdz::Error::NotMvd(s) if !s.starts_with("corrupt gzip") => {
+        mvdz::Error::NotMvd(s) if !s.starts_with("gzip") => {
             format!("{e} (--allow-non-demo compresses it anyway, mostly stored)")
         }
         _ => e.to_string(),
@@ -326,16 +296,14 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
             info.fallback_segments, info.segments
         );
     }
-    try_write_output(o, &out, false).map_err(|e| format!("{o}: {e}"))
+    try_write_output(o, &out).map_err(|e| format!("{o}: {e}"))
 }
 
 fn decompress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
     let src = try_read_input(i)?;
     let out = api::decompress_with(&src, threads, &read_limits(a)).map_err(|e| e.to_string())?;
     drop(src);
-    // gzip output when asked, or by default for an output named .gz
-    let gzip = a.gzip.unwrap_or(has_suffix(o, ".gz"));
-    try_write_output(o, &out, gzip).map_err(|e| format!("{o}: {e}"))
+    try_write_output(o, &out).map_err(|e| format!("{o}: {e}"))
 }
 
 fn read_limits(a: &Args) -> Limits {
@@ -389,7 +357,7 @@ fn loadavg() -> String {
 /// In-memory library benchmark: every figure is MB/s of raw demo
 /// (MB = 10^6 bytes), the median of `reps` runs with [min-max].
 fn bench(a: &Args) {
-    let files: Vec<(String, Vec<u8>)> = a.files.iter().map(|f| (f.clone(), read_demo(f))).collect();
+    let files: Vec<(String, Vec<u8>)> = a.files.iter().map(|f| (f.clone(), read_input(f))).collect();
     let raw: usize = files.iter().map(|f| f.1.len()).sum();
     let mb = raw as f64 / 1e6;
     let nt = a.threads.max(1);

@@ -137,7 +137,7 @@ pub extern "C" fn mvdz_strerror(code: c_int) -> *const c_char {
         MVDZ_E_IO => b"i/o error\0",
         MVDZ_E_PANIC => b"internal error\0",
         MVDZ_E_LIMIT => b"memory or work limit exceeded\0",
-        MVDZ_E_NOTMVD => b"input is not an MVD demo (or is corrupt gzip)\0",
+        MVDZ_E_NOTMVD => b"input is not an MVD demo\0",
         _ => b"unknown error\0",
     };
     s.as_ptr() as *const c_char

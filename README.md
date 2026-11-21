@@ -72,10 +72,11 @@ build (musl's allocator).
 ## Quickstart
 
 ```
-mvdz compress game.mvd.gz                    # -> game.mvdz (normal level, one segment)
-mvdz compress *.mvd.gz                       # every file, several at once
+mvdz compress game.mvd                       # -> game.mvdz (normal level, one segment)
+mvdz compress *.mvd                          # every file, several at once
+gzip -dc game.mvd.gz | mvdz compress - game.mvdz   # from a .mvd.gz
 mvdz compress --fast -s 1M game.mvd          # faster both ways, seekable segments
-mvdz decompress game.mvdz                    # -> game.mvd (--gzip: game.mvd.gz)
+mvdz decompress game.mvdz                    # -> game.mvd
 mvdz info game.mvdz | jq .sha256             # metadata, without decoding
 ```
 
@@ -148,7 +149,7 @@ settings and what they give up are in
 ```
 mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--allow-non-demo]
                 [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
-mvdz decompress [-j threads] [--max-memory size] [--trusted] [--gzip | --no-gzip]
+mvdz decompress [-j threads] [--max-memory size] [--trusted]
                 [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
 mvdz info       file.mvdz...                 metadata, index, attachments as JSON
 mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd / .mvd.gz files
@@ -161,8 +162,8 @@ mvdz bench      [--levels normal,fast] [-s size] [-r reps] [-j threads] [--trust
 ```
 
 `compress` and `decompress` work like zstd: each output is named after its
-input and written beside it (`game.mvd` or `game.mvd.gz` gives `game.mvdz`;
-`game.mvdz` gives `game.mvd`, or `game.mvd.gz` with `--gzip`). Inputs are
+input and written beside it (`game.mvd` gives `game.mvdz`; `game.mvdz`
+gives `game.mvd`). Inputs are
 kept; `--rm` deletes each one after its output is written. An existing
 output is not overwritten without `-f`. With several files, `-j` of them
 run at once (one thread each), a file that fails is reported and the rest
@@ -189,24 +190,25 @@ error. `info` prints the JSON described in FORMAT.md §3.2, including
 ```
 mvdz compress game.mvd
 mvdz compress --fast -s 1M -o game.fast.mvdz game.mvd
-mvdz decompress --gzip demos/*.mvdz
+mvdz decompress demos/*.mvdz
 mvdz info game.mvdz | jq .map
 mvdz attach add game.mvdz analysis/result.json result.json --mime application/json --meta x-tool=mvda
 mvdz attach export game.mvdz - --drop-prefix rec/ > download.mvdz
 ```
 
-**gzip.** `compress` takes a raw `.mvd` or a gzip-compressed one
-(`.mvd.gz`, as most archives serve them; every gzip member, as `gunzip`
-reads them), and so do the library and the C `mvdz_compress`. The file
-holds the raw demo: the output is byte for byte the same as from the raw
-`.mvd`, its identity is the SHA-256 of the raw demo (not of the `.gz`),
-and decompressing gives the raw `.mvd` back. Corrupt gzip (a bad CRC, a
-truncated file) is an error. `decompress --gzip` writes the demo
-gzip-compressed instead (level 6), also to `-`; an output name ending in
-`.gz` does the same unless `--no-gzip` is given. That `.gz` is not the
-same bytes as the archive's original `.gz` (another compressor and
-level), but the demo inside is identical. The streaming writer takes raw
-MVD only.
+**gzip.** mvdz reads and writes raw demos only. A `.mvd.gz`, as most
+archives serve them, is decompressed first, and a demo can be gzipped
+again on the way out; both work through pipes (`-` is standard input or
+output):
+
+```
+gzip -dc game.mvd.gz | mvdz compress - game.mvdz
+mvdz decompress game.mvdz - | gzip > game.mvd.gz
+```
+
+The file holds the raw demo and its identity is the SHA-256 of the raw
+demo (not of a `.gz`). A gzip file given to `compress` is refused with a
+message saying so.
 
 **Input that is not a demo is refused**: empty input, and input whose
 first frame is not a whole MVD frame carrying messages that parse (or, if
@@ -402,4 +404,4 @@ MIT, see [LICENSE](LICENSE). Dependencies (all permissive): `zstd`, `zstd-safe`,
 `zstd-sys` (MIT/Apache-2.0; bundled libzstd BSD-3-Clause), `ruzstd`
 (MIT, wasm and the `pure-zstd` feature), `sha2` and RustCrypto
 dependencies, `serde` and `serde_json` (MIT/Apache-2.0), `flate2` and
-`miniz_oxide` (MIT/Apache-2.0, pure Rust; gzip input).
+`miniz_oxide` (MIT/Apache-2.0, pure Rust).

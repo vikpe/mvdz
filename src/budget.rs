@@ -68,8 +68,13 @@ impl Budget {
         }))
     }
 
+    /// No limits, whatever input is recorded.
     pub fn unlimited() -> Budget {
-        Budget::new(&Limits::unlimited())
+        let b = Budget::new(&Limits::unlimited());
+        // the work limit is per input byte: without any it would be the
+        // fixed allowance alone
+        b.input(1);
+        b
     }
 
     /// Records `n` more bytes of input (raises the work limit).

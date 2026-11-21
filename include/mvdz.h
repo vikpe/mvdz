@@ -66,7 +66,7 @@ extern "C" {
 #define MVDZ_E_IO       -4  /* a callback or file operation failed */
 #define MVDZ_E_PANIC    -6  /* internal error */
 #define MVDZ_E_LIMIT    -7  /* memory or work limit exceeded */
-#define MVDZ_E_NOTMVD   -8  /* input to compress is not an MVD demo, or corrupt gzip */
+#define MVDZ_E_NOTMVD   -8  /* input to compress is not an MVD demo */
 
 /* Callbacks for reading through the engine's own VFS.
  * read: fill buf with up to n bytes; return the count, 0 at end of file,
@@ -88,13 +88,11 @@ void mvdz_free(void *ptr, size_t len);
 /* 1 if buf (at least 5 bytes) starts like an MVDZ file this library reads. */
 int mvdz_is_mvdz(const void *buf, size_t n);
 
-/* Whole-buffer operations. mvdz_compress takes a raw .mvd or a
- * gzip-compressed one (.mvd.gz, decompressed first, every member); the
- * file holds the raw demo (its identity is the raw demo's SHA-256, and
- * decoding gives the raw .mvd). Input that is not an MVD demo (empty, or
- * no whole first frame that parses; see check_demo in the Rust API), and
- * corrupt gzip, give MVDZ_E_NOTMVD. Compression has no settings: the demo
- * is cut into independently decodable segments of 256 KiB. */
+/* Whole-buffer operations. mvdz_compress takes a raw .mvd (a .mvd.gz is
+ * to be decompressed first). Input that is not an MVD demo (empty, gzip
+ * data, or no whole first frame that parses; see check_demo in the Rust
+ * API) gives MVDZ_E_NOTMVD. Compression has no settings: the demo is cut
+ * into independently decodable segments of 256 KiB. */
 int mvdz_decompress(const void *in, size_t n, int threads, uint64_t max_memory, unsigned char **out,
                     size_t *out_n);
 int mvdz_compress(const void *in, size_t n, int threads, unsigned char **out, size_t *out_n);

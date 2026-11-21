@@ -10,23 +10,14 @@ use std::io::{Read, Seek, Write};
 pub use crate::encode::{Config, Info};
 pub use crate::format::{Header, Index};
 
-/// Compresses a demo: a raw `.mvd`, or a gzip-compressed one (`.mvd.gz`),
-/// which is decompressed first. The file holds the raw demo: its identity
-/// is the raw demo's SHA-256 and decompressing gives the raw `.mvd` back.
-/// Input that is not an MVD demo is `Error::NotMvd` (see `check_demo`).
+/// Compresses a demo (a raw `.mvd`). Input that is not an MVD demo is
+/// `Error::NotMvd` (see `check_demo`).
 pub fn compress(src: &[u8], cfg: &Config) -> Result<Vec<u8>> {
     compress_info(src, cfg).map(|r| r.0)
 }
 
 /// Compresses a demo (as `compress`) and reports what the encoder did.
 pub fn compress_info(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    let raw;
-    let src = if is_gzip(src) {
-        raw = gunzip(src, Limits::default().memory)?;
-        &raw[..]
-    } else {
-        src
-    };
     check_demo(src)?;
     crate::encode::compress(src, cfg)
 }
@@ -36,14 +27,16 @@ pub fn compress_info(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
 /// and parse without an escape (FORMAT.md §6.2). Real demos start with
 /// the server data; a truncated or partly damaged demo passes as long as
 /// its start is intact, and what does not parse later is stored raw as
-/// always. Empty input, gzip data and other files fail with
-/// `Error::NotMvd`.
+/// always. Empty input and other files fail with `Error::NotMvd`; so does
+/// a gzip-compressed demo (`.mvd.gz`), which is to be decompressed first.
 pub fn check_demo(src: &[u8]) -> Result<()> {
     if src.is_empty() {
         return Err(Error::NotMvd("empty input"));
     }
-    if is_gzip(src) {
-        return Err(Error::NotMvd("gzip-compressed data"));
+    // the gzip magic (RFC 1952), for a clear message: most archives hand
+    // out .mvd.gz
+    if src.starts_with(&[0x1f, 0x8b]) {
+        return Err(Error::NotMvd("gzip-compressed data (decompress it first)"));
     }
     if !crate::encode::starts_like_mvd(src) {
         return Err(Error::NotMvd("the first frame does not parse"));
@@ -55,29 +48,6 @@ pub fn check_demo(src: &[u8]) -> Result<()> {
 /// reads (needs 8 bytes).
 pub fn is_mvdz(b: &[u8]) -> bool {
     b.len() >= 8 && &b[..4] == MAGIC && b[4..8] == VERSION.to_le_bytes()
-}
-
-/// True if `b` starts with the gzip magic (RFC 1952: `1f 8b`), as the
-/// `.mvd.gz` files of most demo archives do.
-pub fn is_gzip(b: &[u8]) -> bool {
-    b.starts_with(&[0x1f, 0x8b])
-}
-
-/// Decompresses gzip data (every member, as `gzip -d` does), refusing
-/// output over `max` bytes. A bad CRC, a truncated stream or anything
-/// else gzip refuses is `Error::NotMvd`, never a partial result.
-pub fn gunzip(b: &[u8], max: u64) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    flate2::read::MultiGzDecoder::new(b)
-        .take(max.saturating_add(1))
-        .read_to_end(&mut out)
-        .map_err(|_| Error::NotMvd("corrupt gzip data (bad CRC, truncated or damaged)"))?;
-    if out.len() as u64 > max {
-        return Err(Error::Limit(
-            "gzip data decompresses to more than the limit",
-        ));
-    }
-    Ok(out)
 }
 
 /// Decompresses a whole file with up to `threads` threads (0: one per
@@ -309,15 +279,6 @@ pub fn write_file_atomic_with(
         }
     };
     replace_locked(path, fill, perm, group)
-}
-
-/// Writes `data` gzip-compressed (level 6) to `w`, streamed. The gzip
-/// bytes differ from other gzip tools' output; the demo inside is the
-/// same.
-pub fn write_gzip<W: Write>(data: &[u8], w: W) -> std::io::Result<W> {
-    let mut e = flate2::write::GzEncoder::new(w, flate2::Compression::new(6));
-    e.write_all(data)?;
-    e.finish()
 }
 
 /// The original demo, read sequentially (any reader).

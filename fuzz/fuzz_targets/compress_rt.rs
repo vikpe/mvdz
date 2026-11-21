@@ -38,11 +38,8 @@ fuzz_target!(|data: &[u8]| {
     let (c, _) = mvdz::encode::compress(demo, &cfg).expect("compress");
     assert!(mvdz::decompress(&c, 2).unwrap() == demo);
     // the checked entry point: refuses exactly what check_demo refuses
-    // (gzip input is decompressed first)
-    if !mvdz::is_gzip(demo) {
-        match mvdz::compress(demo, &cfg) {
-            Err(mvdz::Error::NotMvd(_)) => assert!(mvdz::check_demo(demo).is_err()),
-            r => assert!(r.expect("compress") == c),
-        }
+    match mvdz::compress(demo, &cfg) {
+        Err(mvdz::Error::NotMvd(_)) => assert!(mvdz::check_demo(demo).is_err()),
+        r => assert!(r.expect("compress") == c),
     }
 });

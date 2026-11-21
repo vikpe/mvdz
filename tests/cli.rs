@@ -1,5 +1,5 @@
-//! The command-line tool: gzip input and output, inputs that are not
-//! demos, and a closed standard output.
+//! The command-line tool: inputs that are not demos, output names, and a
+//! closed standard output.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,46 +37,14 @@ fn run(args: &[&Path]) -> std::process::Output {
     Command::new(BIN).args(args).output().unwrap()
 }
 
-#[test]
-fn gzip_input_is_the_raw_demo() {
-    let d = tmp("gzip");
-    let raw = demo("duel.normal.mvdz");
-    let half = raw.len() / 2;
-    // a single member, and two members (as `cat a.gz b.gz` makes)
-    let mut two = gzip(&raw[..half]);
-    two.extend_from_slice(&gzip(&raw[half..]));
-    let inputs = [
-        ("duel.mvd", raw.clone()),
-        ("duel.mvd.gz", gzip(&raw)),
-        ("two.mvd.gz", two),
-    ];
-    let mut outs = Vec::new();
-    for (name, bytes) in &inputs {
-        let (i, o) = (d.join(name), d.join(format!("{name}.mvdz")));
-        std::fs::write(&i, bytes).unwrap();
-        let r = run(&[Path::new("compress"), &i, &o]);
-        assert!(r.status.success(), "{name}: {r:?}");
-        outs.push(std::fs::read(&o).unwrap());
-    }
-    // the same file from every input: the identity is the raw demo's
-    assert!(outs.iter().all(|o| *o == outs[0]));
-    assert_eq!(mvdz::decompress(&outs[0], 1).unwrap(), raw);
-    let _ = std::fs::remove_dir_all(&d);
-}
-
-/// Input that is not a demo, plain or gzipped, and corrupt gzip: an
-/// error, and no output file (not even a temporary one).
+/// Input that is not a demo, or a gzip-compressed one (to be decompressed
+/// first): an error, and no output file (not even a temporary one).
 #[test]
 fn non_demos_are_refused() {
     let d = tmp("notdemo");
     let raw = demo("duel.normal.mvdz");
-    let mut cut_gzip = gzip(&raw);
-    cut_gzip.truncate(cut_gzip.len() / 2);
-    let mut bad_crc = gzip(&raw);
-    let n = bad_crc.len();
-    bad_crc[n - 6] ^= 1;
     let tiff = b"II*\x00\x08\x00\x00\x00".repeat(200);
-    let cases: [(&str, Vec<u8>, &str); 7] = [
+    let cases: [(&str, Vec<u8>, &str); 4] = [
         ("empty.mvd", Vec::new(), "not an MVD demo"),
         (
             "text.mvd",
@@ -84,10 +52,7 @@ fn non_demos_are_refused() {
             "not an MVD demo",
         ),
         ("tiff.mvd", tiff.clone(), "not an MVD demo"),
-        ("tiff.mvd.gz", gzip(&tiff), "not an MVD demo"),
-        ("empty.mvd.gz", gzip(b""), "not an MVD demo"),
-        ("cut.mvd.gz", cut_gzip, "corrupt gzip"),
-        ("crc.mvd.gz", bad_crc, "corrupt gzip"),
+        ("duel.mvd.gz", gzip(&raw), "decompress it first"),
     ];
     for (name, bytes, msg) in &cases {
         let (i, o) = (d.join(name), d.join(format!("{name}.mvdz")));
@@ -125,78 +90,6 @@ fn non_demos_are_refused() {
         assert!(out.is_null() && n == 0);
     }
     let _ = std::fs::remove_dir_all(&d);
-}
-
-/// gzip input through the C interface gives the same file as the raw demo.
-#[test]
-fn c_compress_gzip() {
-    let raw = demo("duel.normal.mvdz");
-    let c = |b: &[u8]| unsafe {
-        let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
-        let rc =
-            mvdz::capi::mvdz_compress(b.as_ptr() as *const _, b.len(), 1, &mut out, &mut n);
-        assert_eq!(rc, 0);
-        let v = std::slice::from_raw_parts(out, n).to_vec();
-        mvdz::capi::mvdz_free(out as *mut _, n);
-        v
-    };
-    assert_eq!(c(&raw), c(&gzip(&raw)));
-}
-
-/// decompress --gzip (and an output named .gz) writes the demo gzipped:
-/// compress from .mvd.gz, decompress to .gz, gunzip: the raw demo.
-#[test]
-fn gzip_output() {
-    let d = tmp("gzout");
-    let raw = demo("duel.normal.mvdz");
-    let gz_in = d.join("in.mvd.gz");
-    std::fs::write(&gz_in, gzip(&raw)).unwrap();
-    let z = d.join("in.mvdz");
-    assert!(run(&[Path::new("compress"), &gz_in, &z]).status.success());
-    let gunz = |b: &[u8]| mvdz::gunzip(b, 1 << 30).unwrap();
-    // inferred from the name, and explicit
-    let o1 = d.join("out.mvd.gz");
-    assert!(run(&[Path::new("decompress"), &z, &o1]).status.success());
-    assert_eq!(gunz(&std::fs::read(&o1).unwrap()), raw);
-    let o2 = d.join("out2.bin");
-    assert!(
-        run(&[Path::new("decompress"), Path::new("--gzip"), &z, &o2])
-            .status
-            .success()
-    );
-    assert_eq!(gunz(&std::fs::read(&o2).unwrap()), raw);
-    // --no-gzip wins over the name
-    let o3 = d.join("raw.gz");
-    assert!(
-        run(&[Path::new("decompress"), Path::new("--no-gzip"), &z, &o3])
-            .status
-            .success()
-    );
-    assert_eq!(std::fs::read(&o3).unwrap(), raw);
-    // to standard output; raw without the flag
-    let r = run(&[
-        Path::new("decompress"),
-        Path::new("--gzip"),
-        &z,
-        Path::new("-"),
-    ]);
-    assert!(r.status.success());
-    assert_eq!(gunz(&r.stdout), raw);
-    let r = run(&[Path::new("decompress"), &z, Path::new("-")]);
-    assert_eq!(r.stdout, raw);
-    let _ = std::fs::remove_dir_all(&d);
-}
-
-#[test]
-fn gunzip_limit() {
-    let raw = demo("duel.normal.mvdz");
-    let gz = gzip(&raw);
-    assert!(mvdz::is_gzip(&gz) && !mvdz::is_gzip(&raw));
-    assert_eq!(mvdz::gunzip(&gz, raw.len() as u64).unwrap(), raw);
-    assert!(matches!(
-        mvdz::gunzip(&gz, raw.len() as u64 - 1),
-        Err(mvdz::Error::Limit(_))
-    ));
 }
 
 /// Every command that writes to standard output stops quietly when the
@@ -238,9 +131,9 @@ fn closed_stdout_is_quiet() {
 fn outputs_named_after_inputs() {
     let d = tmp("names");
     let raw = demo("duel.normal.mvdz");
-    let (a, b) = (d.join("a.mvd"), d.join("b.MVD.gz"));
+    let (a, b) = (d.join("a.mvd"), d.join("b.MVD"));
     std::fs::write(&a, &raw).unwrap();
-    std::fs::write(&b, gzip(&raw)).unwrap();
+    std::fs::write(&b, &raw).unwrap();
     let r = run(&[
         Path::new("compress"),
         Path::new("-j"),
@@ -263,16 +156,15 @@ fn outputs_named_after_inputs() {
     assert!(r.status.success(), "{r:?}");
     assert_eq!(std::fs::read(&a).unwrap(), raw);
 
-    // --gzip names the output .mvd.gz; --rm deletes the input once written
+    // --rm deletes the input once written
     let r = run(&[
         Path::new("decompress"),
-        Path::new("--gzip"),
+        Path::new("-f"),
         Path::new("--rm"),
         &bz,
     ]);
     assert!(r.status.success(), "{r:?}");
-    let back = std::fs::read(d.join("b.mvd.gz")).unwrap();
-    assert_eq!(mvdz::gunzip(&back, 1 << 30).unwrap(), raw);
+    assert_eq!(std::fs::read(d.join("b.mvd")).unwrap(), raw);
     assert!(!bz.exists(), "--rm deleted the input");
 
     // -o names the output; the two-name form still works
@@ -298,8 +190,8 @@ fn outputs_named_after_inputs() {
     let r = run(&[Path::new("decompress"), &o, &az]);
     assert_eq!(r.status.code(), Some(1), "{r:?}");
     assert!(String::from_utf8_lossy(&r.stderr).contains("not named *.mvdz"));
-    let c = d.join("a.mvd.gz");
-    std::fs::write(&c, gzip(&raw)).unwrap();
+    let c = d.join("a.MVD");
+    std::fs::write(&c, &raw).unwrap();
     std::fs::remove_file(&az).unwrap();
     let r = run(&[Path::new("compress"), &a, &c]);
     assert_eq!(r.status.code(), Some(1), "{r:?}");

@@ -18,7 +18,7 @@ pub enum Error {
     Io(std::io::ErrorKind),
     /// The encoder could not produce a file that decodes to its input.
     Internal(&'static str),
-    /// The input to compress is not an MVD demo (or is corrupt gzip).
+    /// The input to compress is not an MVD demo.
     NotMvd(&'static str),
 }
 

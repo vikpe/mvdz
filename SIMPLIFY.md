@@ -15,7 +15,7 @@ container fields, five speed changes. See Decisions and Results per change.
 Also done: one fallback (ad53e50; see "One fallback" under Results per change), and
 measured at 1, 4 and 12 threads and in WebAssembly (see "Threads and WebAssembly").
 
-Tests: 45 pass, 9 fail, all nine on the list under "Known failing tests".
+Tests: 45 pass, 5 fail, all five on the list under "Known failing tests".
 
 Whole session against `master`: see "Whole session" under Results per change.
 
@@ -67,6 +67,7 @@ All implemented unless marked.
 | Live QTV streams | Not compressed | 4-11 KB/s raw does not justify it |
 | QWD demos | Not supported; MVD only | Needs a second frame walker and a second playerinfo model in every port; 75 of 2,200 archive files (3.4 %) |
 | Streaming writer | Removed; finished `.mvd` only | One encoder path; shared models always available |
+| Gzip input and output | Removed (2026-11-21): library, C interface and tool take and give raw demos; a gzip file is refused with a message | Not part of the format; every user has gzip (`gzip -dc x.mvd.gz \| mvdz compress - x.mvdz`); one input type for every port |
 | Structural transform | Keep | Most of the compression (zstd -19 alone: 0.553 of raw) |
 | rANS | Keep | Best ratio (0.218 of raw at 256K) |
 | General-purpose compressor | Raw DEFLATE (RFC 1951) replaces zstd | +0.41 % size and +0.24 % decode time; zstd was 26 % of compression time; DEFLATE is in the Go, Python, Java and Node standard libraries and in browsers |
@@ -167,7 +168,7 @@ All Viktor's to decide. Of those left, 4, 9, 12 and 13 can change the file forma
 5. The C interface: keep it here, move it to its own crate, or remove it. 659 lines and
    60 of the 85 `unsafe` occurrences; whether any engine links it is not known.
 6. Encoder self-check default: on (as now) or off like `flac -V`. Recommended: on.
-7. Gzip input (`.mvd.gz`) accepted by compress?
+7. Gzip input (`.mvd.gz`) accepted by compress? Decided: no (see Decisions).
 8. Thread count: decided and implemented (see Decisions).
 9. Bits that can be flipped without changing the decoded demo: 784 of 30,696 in the
    probe's small file (256 are the header's SHA-256, 80 in the models block, 448 in the
@@ -627,7 +628,7 @@ keys, unknown sections, demoinfo sharing).
 
 | Tests | Passed on rc.4 | Why they fail | Resolved by |
 |---|---|---|---|
-| `c_compress_gzip`, `closed_stdout_is_quiet`, `gunzip_limit`, `gzip_input_is_the_raw_demo`, `gzip_output`, `non_demos_are_refused`, `outputs_named_after_inputs` (cli), `vectors_decode` | yes | read the vectors in `tests/vectors/`, written by rc.4 in the old format | regenerating the vectors after the last format change |
+| `closed_stdout_is_quiet`, `non_demos_are_refused`, `outputs_named_after_inputs` (cli), `vectors_decode` | yes | read the vectors in `tests/vectors/`, written by rc.4 in the old format | regenerating the vectors after the last format change |
 | `c_example_builds_and_runs` | no | fails on unmodified rc.4 | outside this work |
 
 Off the list since: `r_m2_padded_model` and `trusted_mode` (rewritten for the new

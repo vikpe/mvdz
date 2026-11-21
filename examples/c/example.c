@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
     printf("garbage: %s\n", r ? "opened?!" : mvdz_strerror(err));
     if (r) mvdz_close(r);
 
-    /* 6. whole-buffer API (.mvd or .mvd.gz input); input that is not a
+    /* 6. whole-buffer API (raw .mvd input); input that is not a
      * demo is refused */
     unsigned char *z; size_t z_n;
     rc = mvdz_compress(demo, (size_t)n, 4, &z, &z_n);
