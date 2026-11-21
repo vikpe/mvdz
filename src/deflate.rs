@@ -1,53 +1,32 @@
 //! Raw DEFLATE (RFC 1951): the format's general-purpose compressor, through
-//! the pure-Rust `flate2`/`miniz_oxide` on every target.
+//! the pure-Rust `miniz_oxide` on every target.
 //!
 //! Wherever the format stores DEFLATE data it is one raw stream: no zlib or
 //! gzip wrapper, no preset dictionary. It ends with its final block, the
 //! stored bytes hold nothing after it, and it decodes to exactly the
-//! declared length (or, where the length is only bounded, to at most the
-//! bound). Empty data is not a stream and is an error.
+//! declared length. Empty data is not a stream and is an error.
 
-use crate::budget::with_capacity;
+use crate::budget::zeroed;
 use crate::error::{Error, Result};
-use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
+use miniz_oxide::inflate::TINFLStatus;
+use miniz_oxide::inflate::core::{DecompressorOxide, decompress as inflate, inflate_flags};
 
 /// Compresses `b` at `level` (1-9; 0: stored blocks) into one raw DEFLATE
 /// stream. Never empty.
 pub fn compress(b: &[u8], level: u32) -> Vec<u8> {
-    let mut c = Compress::new(Compression::new(level), false);
-    // room for incompressible input as stored blocks (5 bytes per 65535)
-    let mut out = Vec::with_capacity(b.len() + b.len() / 65535 * 5 + 64);
-    loop {
-        let st = c
-            .compress_vec(&b[c.total_in() as usize..], &mut out, FlushCompress::Finish)
-            .expect("deflate compression");
-        if st == Status::StreamEnd {
-            return out;
-        }
-        out.reserve(out.capacity().max(64));
-    }
+    miniz_oxide::deflate::compress_to_vec(b, level as u8)
 }
 
 /// Decompresses `b` to exactly `n` bytes. The caller has charged `n` bytes
 /// to its budget.
 pub fn decompress(b: &[u8], n: usize) -> Result<Vec<u8>> {
-    let out = decompress_upto(b, n)?;
-    if out.len() != n {
-        return Err(Error::Corrupt("deflate data"));
-    }
-    Ok(out)
-}
-
-/// Decompresses `b` to at most `max` bytes (more is an error).
-pub fn decompress_upto(b: &[u8], max: usize) -> Result<Vec<u8>> {
-    let bad = Error::Corrupt("deflate data");
-    let mut out = with_capacity(max)?;
-    let mut d = Decompress::new(false);
+    let mut out = zeroed(n)?;
     // one call: with the whole output space at hand the stream either ends
-    // or does not fit; it writes only into the reserved capacity
-    match d.decompress_vec(b, &mut out, FlushDecompress::Finish) {
-        Ok(Status::StreamEnd) if d.total_in() as usize == b.len() => Ok(out),
-        _ => Err(bad),
+    // or does not fit
+    let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
+    match inflate(&mut DecompressorOxide::new(), b, &mut out, 0, flags) {
+        (TINFLStatus::Done, read, written) if read == b.len() && written == n => Ok(out),
+        _ => Err(Error::Corrupt("deflate data")),
     }
 }
 
@@ -60,7 +39,6 @@ mod tests {
             let z = super::compress(&a, level);
             assert_eq!(z.len() < a.len(), level > 0);
             assert_eq!(super::decompress(&z, a.len()).unwrap(), a);
-            assert_eq!(super::decompress_upto(&z, a.len() + 9).unwrap(), a);
             assert!(super::decompress(&z, a.len() - 1).is_err());
             assert!(super::decompress(&z, a.len() + 1).is_err());
             // nothing may follow the final block

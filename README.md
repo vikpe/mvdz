@@ -400,8 +400,6 @@ and answers for them are closed.
 
 ## Licence and dependencies
 
-MIT, see [LICENSE](LICENSE). Dependencies (all permissive): `zstd`, `zstd-safe`,
-`zstd-sys` (MIT/Apache-2.0; bundled libzstd BSD-3-Clause), `ruzstd`
-(MIT, wasm and the `pure-zstd` feature), `sha2` and RustCrypto
-dependencies, `serde` and `serde_json` (MIT/Apache-2.0), `flate2` and
-`miniz_oxide` (MIT/Apache-2.0, pure Rust).
+MIT, see [LICENSE](LICENSE). Dependencies (all permissive, all pure
+Rust): `sha2` and its RustCrypto dependencies, `crc32fast` and
+`miniz_oxide` (MIT/Apache-2.0); the tests also use `serde_json`.

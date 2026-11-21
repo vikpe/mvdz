@@ -1,7 +1,7 @@
 //! The command-line tool: inputs that are not demos, output names, and a
 //! closed standard output.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -19,10 +19,9 @@ fn demo(name: &str) -> Vec<u8> {
     mvdz::decompress(&vector(name), 1).unwrap()
 }
 
+/// Data that starts like a gzip file (RFC 1952: magic, DEFLATE, no flags).
 fn gzip(b: &[u8]) -> Vec<u8> {
-    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    e.write_all(b).unwrap();
-    e.finish().unwrap()
+    [&[0x1f, 0x8b, 8, 0][..], b].concat()
 }
 
 /// A fresh, empty directory for one test.

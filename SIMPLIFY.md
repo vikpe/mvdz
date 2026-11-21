@@ -89,7 +89,7 @@ All implemented unless marked.
 | SHA-256 on decode | Never recomputed; the trusted mode, `ReadOptions` and the C `flags` argument are gone | 9.1 % of a 4-thread decode with SHA instructions, 19.7 % of a batch decode without; a decoder needs no SHA-256 |
 | Size, duration, hashes | Fixed 64-byte header at the head | One read; completeness without an end record |
 | Checksum and SHA-256 in the header | Both stay (decided 2026-11-20) | Cheap to write: for a 10 MB demo the checksum is 0.8 ms and SHA-256 4.5 ms (28 ms without SHA instructions), once, at compress time |
-| Dependencies | `serde` and `serde_json` dropped from the library (JSON written by hand); `sha2` and `flate2` remain | 13 crates in the default build, from 24 |
+| Dependencies | `serde` and `serde_json` dropped from the library (JSON written by hand); `sha2`, `crc32fast` and `miniz_oxide` remain (`flate2`, a wrapper around `miniz_oxide`, replaced by it, 2026-11-21) | 11 crates in the default build, from 24 |
 | rayon | Not used; the 28-line `par_map` stays | No gain that repeats; 6 more crates; one parallel call costs 59 us |
 | Speed changes | Models block read once; models built on all threads; symbols counted per stream in parallel; predictors run once | See "Speed changes" |
 | Test vectors, Go decoder, FORMAT.md | Updated once, after the last format change (not done) | Each step would otherwise regenerate them |
@@ -716,7 +716,7 @@ on the same sample (Baseline): compress 76.3 s, decompress 20.9 s.
   `mvdz compress`. 8 are plain QWD (75.4 MB; 0.288 of raw with `--allow-non-demo`,
   gzip 0.327); 67 are QWZ, already compressed (0.994).
 
-DEFLATE figures are miniz_oxide through `flate2`. The wasm build is not measured. The
+DEFLATE figures are miniz_oxide through `flate2` (since replaced by `miniz_oxide` directly: the same bytes). The wasm build is not measured. The
 experiment code is not in the repository.
 
 ### Done: what each stream model is worth

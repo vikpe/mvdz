@@ -18,11 +18,11 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 sha2 = "0.10"
-# the CRC-32 of zlib; flate2 depends on it already
+# the CRC-32 of zlib
 crc32fast = "1"
-# raw DEFLATE, the format's general-purpose compressor: the pure-Rust
-# miniz_oxide back end, so no C code and the same on wasm
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# raw DEFLATE, the format's general-purpose compressor: pure Rust, so no C
+# code and the same on wasm
+miniz_oxide = "0.9"
 
 # the tests parse the JSON of `mvdz info`
 [dev-dependencies]
