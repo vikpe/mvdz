@@ -19,7 +19,7 @@ use crate::budget::{Budget, Charge, with_capacity};
 use crate::error::{Error, Result};
 use crate::numeric::NCtx;
 use crate::streams::{N_STREAMS, PE_OX, PI_AP, PI_OX, SND_O, TE_O, UC_A, is_lazy, is_num};
-use crate::util::{Rd, approx_f64, par_map, put_uv};
+use crate::util::{Rd, approx_f64, par_map, put_u32};
 use std::sync::Arc;
 
 pub(crate) const SCALE: u32 = 12;
@@ -800,12 +800,12 @@ fn rans_encode(model: &Model, syms: &[u8], ctxs: &[u16]) -> Vec<u8> {
     e.finish()
 }
 
-/// Appends `rans_len uv | rans | extra`: a stream body after its model
+/// Appends `rans_len u32 | rans | extra`: a stream body after its model
 /// header.
 fn put_body(out: &mut Vec<u8>, model: &Model, syms: &[u8], ctxs: &[u16], extra: &[u8]) {
     let body = rans_encode(model, syms, ctxs);
     out.reserve(body.len() + extra.len() + 4);
-    put_uv(out, body.len() as u64);
+    put_u32(out, body.len());
     out.extend_from_slice(&body);
     out.extend_from_slice(extra);
 }
@@ -823,7 +823,7 @@ fn header(model: &Model) -> Option<Vec<u8>> {
     (decisions <= (hdr.len() as u64) * DEC_PER_BYTE + DEC_BASE).then_some(hdr)
 }
 
-/// A stream body: `rans_len uv | rans | extra`.
+/// A stream body: `rans_len u32 | rans | extra`.
 struct Unpacked<'a> {
     rans: &'a [u8],
     extra: &'a [u8],
@@ -879,20 +879,20 @@ impl FileTables {
     }
 }
 
-/// Reads `n uv | n x { sid uv | len uv | model }`: ids strictly increasing,
+/// Reads `n u32 | n x { sid u32 | len u32 | model }`: ids strictly increasing,
 /// each model a structural or numeric stream's (§8.3, M1 without a count).
 /// The models do not depend on each other: they are built in parallel.
 fn read_tables(b: &[u8], threads: usize, budget: &Budget) -> Result<Models> {
     let e = Error::Corrupt("tables");
     let mut r = Rd::new(b);
-    let n = r.uz().ok_or(e)?;
+    let n = r.u32z().ok_or(e)?;
     if n == 0 {
         return Err(e);
     }
     // (stream id, alphabet, model header)
     let mut ents: Vec<(usize, usize, &[u8])> = Vec::new();
     for _ in 0..n {
-        let sid = r.uz().ok_or(e)?;
+        let sid = r.u32z().ok_or(e)?;
         if ents.last().is_some_and(|p| sid <= p.0) {
             return Err(e);
         }

@@ -2,12 +2,13 @@
 
 MVDZ is a proposal with no files in the wild, so there is no compatibility burden.
 
-## Status (2026-11-21, evening)
+## Status (2026-11-21, late evening)
 
-Resume point: "Handoff" below. Five format decisions on 2026-11-21; step A committed
-(149c415), steps B and C to do. After them, "Suggestions (2026-11-21)" near the end of
-this file. 40 commits on `master`. Tests (`cargo nextest run --release` in `mvdz_rust/`):
-41 pass, 4 fail (the known four). `cargo clippy --all-targets -- -D warnings` is clean.
+Resume point: "After steps B and C" in the Handoff below. Five format decisions on
+2026-11-21; steps A (149c415), B (d1a8c06) and C (every integer a u32) are done. Next:
+the open questions, then "Suggestions (2026-11-21)" near the end of this file. Tests
+(`cargo nextest run --release` in `mvdz_rust/`): 40 pass, 4 fail (the known four).
+`cargo clippy --all-targets -- -D warnings` is clean.
 
 Done on 2026-11-21: two-pass encoder and the memory work, CLI decompress streams,
 gzip, mimalloc, the seeking reader, the C interface and the Go decoder removed, crate
@@ -60,8 +61,9 @@ a reboot); it was:
 
 ## Handoff (written 2026-11-21 for the next session)
 
-Read this section first. Everything needed to finish steps B and C is here; the rest of
-the file is history and measurements.
+Read this section first. Steps B and C are done (their plans below are kept as the
+record); the next work is under "After steps B and C". The rest of the file is history
+and measurements.
 
 ### Working rules
 
@@ -85,8 +87,13 @@ the file is history and measurements.
 ### Where things are
 
 - Code: `mvdz_rust/` (crate `mvdz`). Paths below are relative to it.
-- Step A is committed: 149c415 "Replace the ratio rule with a 2 MiB cap on a segments
-  coded length". Step B starts from there, on branch `feature/simplify`.
+- Steps A, B and C are done on branch `feature/simplify`: 149c415 "Replace the ratio
+  rule with a 2 MiB cap on a segments coded length", d1a8c06 "One segment coding: drop
+  coding 1 and the coding byte", then step C.
+- The 500-demo list (`~/dev/mvdz-bench/rand500.txt`) and `~/dev/qwdemos` are not on
+  this machine. Step C was measured on `stratified` instead (379 demos, in
+  `/tmp/mvdz-strat/demos`, with `/tmp/mvdz-strat/size.sh BIN DIR`, which sums the
+  `mvdz compress` output; `/tmp` does not survive a reboot).
 - Demos for measuring: set8, sample40 and stratified of `benchmarks/samples/`, unpacked
   (`<sha256>.mvd`), from `https://dev.quake.world/mvdz/<set>.tar.gz`;
   `scripts/fetch_samples.sh <set> <dir>` downloads one and checks every SHA-256. They
@@ -107,6 +114,7 @@ segment := len u32 | raw_len u32 | dur_ms u32 | crc u32 | coded[len]   (16 bytes
 coded   := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
            | n x { id u32 | count u32 | [len u32 if id is not a blob stream] }
            | blob_len u32 | stream bodies in table order | one raw DEFLATE stream of blob_len bytes
+stream body := rans_len u32 | rans[rans_len] | extra (rest of the body)
 ```
 
 Every integer is little-endian; every integer is a u32 except the three u64 fields of
@@ -117,7 +125,11 @@ stream (id 81). Limits: `raw_len` 1 to 1 MiB (`MAX_SEG_RAW`); `len` at most 2 Mi
 but the last is whole frames or exactly 1 MiB. `version` stays 2 until the vectors are
 regenerated (the old vectors fail anyway).
 
-### Step B: one segment coding (decided, not started)
+### Step B: one segment coding (done, d1a8c06)
+
+Result: implemented as planned (`segment::walk_tail`, `encode::compress_all_tail`). The
+500-demo size check below was not run: the sample is not on this machine. Measured on
+stratified at ebe25b3 (after B): 210,244,777 bytes, the baseline for step C.
 
 Goal: delete coding 1 (whole segment as DEFLATE) and the `coding` byte. Write the test
 first: a segment of bytes that *do* frame, written as all tail, must round-trip through
@@ -178,7 +190,27 @@ Tests:
 Measure after B: the 500-demo output size must be unchanged to the byte except for the
 missing coding byte (5,649 segments: 278,553,572 - 5,649 = 278,547,923 bytes). Report.
 
-### Step C: every integer a u32 (decided, not started)
+### Step C: every integer a u32 (done)
+
+Result: every integer in a segment, the models block and a stream body is a
+little-endian u32. Beyond the list below, `rans_len` at the head of each structural and
+numeric stream body is a u32 too (decided by Viktor, 2026-11-21: no variable-length
+reader left in the file). `put_uv`, `Rd::uv`, `Rd::uz`, `Rd::u32v` and `uv_limits` are
+gone; `util::put_u32` and `Rd::u32z` are new; `Rd::bytes` takes a u32 length. The test
+`model_amplification` reads the reviewer's `poc/v2model_*.bin` header length with a
+local LEB128 reader (their format); it skips without `MVDZ_TEST_DATA`. Size on
+stratified (379 demos, 968,979,765 bytes raw), self-check on:
+
+| Build | Output, bytes | Change |
+|---|---|---|
+| ebe25b3 (step B) | 210,244,777 | - |
+| Step C, `rans_len` left variable-length | 211,524,887 | +0.61 % |
+| Step C | 211,736,432 | +0.71 % |
+
+`rans_len` as a u32 costs 211,545 bytes (0.10 %). All 379 round-trip through both
+readers (`examples/sweep`). Speed not measured. The escape lengths inside the `ESCLEN`
+stream (`walk.rs`, `escape`) are still 7-bit groups: they are coded symbols, not file
+fields.
 
 Goal: no variable-length integers in the file. Expected cost: +0.66 % of output on the
 500 (arithmetic from the entry counts; measure the real figure).
@@ -265,10 +297,10 @@ All implemented unless marked.
 | General-purpose compressor | Raw DEFLATE (RFC 1951) replaces zstd | +0.41 % size and +0.24 % decode time; zstd was 26 % of compression time; DEFLATE is in the Go, Python, Java and Node standard libraries and in browsers |
 | Blob layout | One DEFLATE stream per chunk holds all blob streams | Blob decode 1.7 times faster than one stream each; one inflate call per chunk; 0.08 % larger |
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
-| Chunk codings (2026-11-21, step B, not done) | One: the transform. A chunk the transform cannot code is written as all tail; the `coding` byte and coding 1 (raw DEFLATE) go; chunk header 16 bytes | Coding 1 was used in 0 of 9,109 segments of 525 archive demos and 0 of 5 damaged copies; a 1 MiB segment of junk already codes as all tail and round-trips |
+| Chunk codings (2026-11-21, step B, d1a8c06) | One: the transform. A chunk the transform cannot code is written as all tail; the `coding` byte and coding 1 (raw DEFLATE) go; chunk header 16 bytes | Coding 1 was used in 0 of 9,109 segments of 525 archive demos and 0 of 5 damaged copies; a 1 MiB segment of junk already codes as all tail and round-trips |
 | Ratio rule (2026-11-21, step A, 149c415) | Removed (`raw_len <= 1024 * len + 4096`, the two constants, the reader check, the "stored blocks" fallback). In its place a reader rule: a chunk's `len` is at most 2 MiB (`MAX_SEG_CODED`), checked at the length field before anything is read | Largest `raw_len / len` in 9,109 segments is 118.39, so the rule had 8.7 times headroom; the 1 MiB raw cap already bounds output. The largest coded segment seen is 110,888 bytes; 1 MiB of junk codes to about 1 MiB + 0.5 KiB, so 2 MiB is 2 times the possible maximum |
 | Models block limit | Stays 16 MiB | Once per file; largest seen 47,608 bytes (352 times headroom); the cost is reader memory, not file bytes |
-| Integers inside a chunk and in the models index (2026-11-21, step C, not done) | Every number a little-endian u32: the chunk's protocol flags, tail, stream count, each stream entry (id, count, length), the blob body length, and the models block index (count, id, length). No variable-length integers anywhere | Simplicity over the margin (Viktor, 2026-11-21): one integer type in the file, no variable-length reader and its three edge rules in any port, no padded encodings. Measured cost +0.66 % of output on 500 random archive demos, +1.31 % on the 25 largest and longest (arithmetic from the entry counts, not a rebuilt encoder). Open question 4 closed |
+| Integers inside a chunk and in the models index (2026-11-21, step C, done) | Every number a little-endian u32: the chunk's protocol flags, tail, stream count, each stream entry (id, count, length), the blob body length, the models block index (count, id, length) and the rANS length at the head of each stream body. No variable-length integers anywhere | Simplicity over the margin (Viktor, 2026-11-21): one integer type in the file, no variable-length reader and its three edge rules in any port, no padded encodings. Estimated +0.66 % of output on 500 random archive demos, +1.31 % on the 25 largest and longest (arithmetic from the entry counts, without the rANS length). Measured after the change: +0.71 % on stratified (379 demos), of which the rANS length is 0.10 %. Open question 4 closed |
 | Header fields | Stay u64 (`size`, `duration_ms`, `crc`), 64-byte header; `MAX_SEGMENTS` stays | Once per file, 12 bytes; the rule of 2026-11-21: a single-place field may be generous if cheap, a repeated one gets about 100 times the real maximum |
 | Fallback (2026-11-20, superseded by "Chunk codings" above) | One: a chunk the transform cannot code is one raw DEFLATE stream. A modelled stream is always rANS with the file's model; the per-stream back-end id, the store and DEFLATE back ends and the `stored` chunk coding are gone | Two chunk codings, one coder per stream kind; -0.056 % size |
 | Model over the decision limit (rule M2) | The encoder makes it smaller (own contexts with the fewest symbols join the fallback table) instead of dropping it | Without this a stream with no model sends every chunk of its file to DEFLATE: one demo in 500 grew 3.6 times, the output 1.9 % |
@@ -278,7 +310,7 @@ All implemented unless marked.
 | Model step size | One value, 2 | Trying 4 as well was worth 77 bytes in 1.68 GB |
 | Model stored in a chunk | Removed; models only in the models block, also for one-chunk files | Costs 0.004 %; one model path |
 | The next ten stream models | Keep | Dropping all ten costs 2.70 % |
-| Container fields | Fixed width: 17-byte chunk header, 4-byte models length | Costs 0.005 %; no variable-length integers to decode there |
+| Container fields | Fixed width: 16-byte chunk header (17 until step B), 4-byte models length | Costs 0.005 %; no variable-length integers to decode there |
 | Encoder self-check | On by default; the switch that turns it off stays | Every file written is proven to decode; it is a third of compression time, so experiments and benchmarks can skip it |
 | Per-chunk checksum | Keep | Subsets of a demo are decoded for analytics |
 | Checksum algorithm | The CRC-32 of zlib (73bd49b) | In every standard library that has DEFLATE; `crc32fast` was already in the build; 80 lines of hand-written CRC-32C gone, one `unsafe` function with them |
@@ -301,7 +333,12 @@ cheap. A typical demo is about 10 chunks, a 4on4 a few dozen.
 file   := header | models | chunk*
 header := "MVDZ" | version u32 | size u64 | duration_ms u64 | crc u64 | sha256[32]   (64 bytes)
 models := len u32 | body[len]
-chunk  := len u32 | raw_len u32 | dur_ms u32 | crc u32 | coding u8 | coded[len]      (17 bytes, then coded)
+chunk  := len u32 | raw_len u32 | dur_ms u32 | crc u32 | coded[len]                 (16 bytes, then coded)
+coded  := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
+          | n x { id u32 | count u32 | [len u32 if id is not a blob stream] }
+          | blob_len u32 | stream bodies in table order | blob body (blob_len bytes)
+stream body := rans_len u32 | rans[rans_len] | extra (rest of the body)
+models body := n u32 | n x { id u32 | len u32 | model[len] }             (ids strictly increasing)
 ```
 
 Every integer is little-endian and of fixed width. The code calls a chunk a segment.
@@ -328,23 +365,19 @@ Rules:
   it; a consumer that must authenticate it hashes the output.
 - `models` holds one rANS model per modelled stream that some chunk codes with it
   (`len` 0: none). It is read once, when the file is opened, and built on all threads.
-- Chunk `coding`: 0 transform, 1 the whole chunk as raw DEFLATE (the encoder's only
-  fallback). Any other value is refused.
-- A transformed chunk: protocol state, a stream table, the stream bodies, then one raw
+- One chunk coding, the transform. A chunk the transform cannot code is written with
+  `tail = raw_len`: no frames, every byte in the `TAIL` blob stream.
+- A chunk: protocol state, a stream table, the stream bodies, then one raw
   DEFLATE stream holding all blob streams in table order (no zlib or gzip wrapper, no
   preset dictionary; it decodes to exactly the sum of their byte counts and nothing
   follows its final block). A modelled stream is rANS with the file's model; its table
   entry is id, count, length (a blob stream's: id, count). A modelled stream without a
-  model in the models block is an error. The stream table inside a chunk still uses
-  variable-length integers.
+  model in the models block is an error.
 - Each chunk decodes on its own, given the models block. Protocol state at the chunk
   start is in the chunk, so map changes decode as before.
 - KTX demoinfo blocks stay in their chunk; the shared demoinfo store is gone.
 - Limits: a chunk is at most 1 MiB raw and its coded data (`len`) at most 2 MiB (step A;
   the ratio rule of 1024 times plus 4096 is gone); the models block is at most 16 MiB.
-  Steps B and C (chunk coding, u32 integers) are decided but not implemented: the
-  grammar above still shows `coding u8` and the chunk's stream table is still
-  variable-length.
 
 What consumers do without META:
 
@@ -880,6 +913,9 @@ became `nop_flood_round_trips` (no fallback expected), the "4 GiB segment" hosti
 is now refused by DEFLATE rather than the ratio rule, a new case pads a segment to one
 byte over 2 MiB, vector `segment-ratio` became `segment-length` (vectors not
 regenerated). 41 pass, the known 4 fail; clippy clean.
+
+Step B (d1a8c06) and step C: see their sections in the Handoff. After C: 40 pass (the
+test `uv_limits` went with the variable-length integers), the known 4 fail; clippy clean.
 
 ### Known failing tests
 

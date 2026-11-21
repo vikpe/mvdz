@@ -12,7 +12,7 @@ mod common;
 use anyhow::Context as _;
 use common::*;
 use mvdz::format::*;
-use mvdz::util::put_uv;
+use mvdz::util::put_u32;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
@@ -116,9 +116,9 @@ fn amplifying_model(n: u32) -> Vec<u8> {
     }
     let hdr = e.finish();
     let mut b = Vec::new();
-    put_uv(&mut b, hdr.len() as u64);
+    put_u32(&mut b, hdr.len());
     b.extend_from_slice(&hdr);
-    put_uv(&mut b, 16);
+    put_u32(&mut b, 16);
     b.extend_from_slice(&[0; 16]);
     b
 }
@@ -147,26 +147,26 @@ fn transform_body(
         models[*id] = Some(m);
         ids.push(*id);
     }
-    let lazy: Vec<(usize, u64, &[u8])> = lazy
+    let lazy: Vec<(usize, usize, &[u8])> = lazy
         .iter()
         .zip(&bodies)
-        .map(|((id, syms), b)| (*id, syms.len() as u64, &b[..]))
+        .map(|((id, syms), b)| (*id, syms.len(), &b[..]))
         .collect();
     let lazy = &lazy;
     let mut body = Vec::new();
     // fte, fte2, mvd1, tail; the number of streams
-    for x in [0, 0, 0, 0, (lazy.len() + blobs.len()) as u64] {
-        put_uv(&mut body, x);
+    for x in [0, 0, 0, 0, lazy.len() + blobs.len()] {
+        put_u32(&mut body, x);
     }
     for (id, count, b) in lazy {
-        for x in [*id as u64, *count, b.len() as u64] {
-            put_uv(&mut body, x);
+        for x in [*id, *count, b.len()] {
+            put_u32(&mut body, x);
         }
     }
     let mut all = Vec::new();
     for (id, b) in blobs {
-        put_uv(&mut body, *id as u64);
-        put_uv(&mut body, b.len() as u64);
+        put_u32(&mut body, *id);
+        put_u32(&mut body, b.len());
         all.extend_from_slice(b);
     }
     let z = if all.is_empty() {
@@ -174,7 +174,7 @@ fn transform_body(
     } else {
         mvdz::deflate::compress(&all, 9)
     };
-    put_uv(&mut body, z.len() as u64);
+    put_u32(&mut body, z.len());
     for (_, _, b) in lazy {
         body.extend_from_slice(b);
     }
@@ -469,9 +469,9 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
 /// The entries (stream id, model) of a models block.
 fn tables_entries(b: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
     let mut r = mvdz::util::Rd::new(b);
-    let n = r.uz().context("the entry count")?;
+    let n = r.u32z().context("the entry count")?;
     (0..n)
-        .map(|_| Some((r.uz()?, r.bytes()?.to_vec())))
+        .map(|_| Some((r.u32z()?, r.bytes()?.to_vec())))
         .collect::<Option<_>>()
         .context("a models entry")
 }
@@ -479,10 +479,10 @@ fn tables_entries(b: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
 /// A models block from its entries.
 fn tables_body(e: &[(usize, Vec<u8>)]) -> Vec<u8> {
     let mut b = Vec::new();
-    put_uv(&mut b, e.len() as u64);
+    put_u32(&mut b, e.len());
     for (sid, m) in e {
-        put_uv(&mut b, *sid as u64);
-        put_uv(&mut b, m.len() as u64);
+        put_u32(&mut b, *sid);
+        put_u32(&mut b, m.len());
         b.extend_from_slice(m);
     }
     b

@@ -8,7 +8,7 @@ use common::*;
 use mvdz::Error;
 use mvdz::Limits;
 use mvdz::format::*;
-use mvdz::util::put_uv;
+use mvdz::util::put_u32;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
@@ -50,19 +50,19 @@ fn r_m2_padded_model() {
     );
     // the models block: one model, the time stream's
     let mut models = Vec::new();
-    for v in [1, 0, hdr.len() as u64] {
-        put_uv(&mut models, v);
+    for v in [1, 0, hdr.len()] {
+        put_u32(&mut models, v);
     }
     models.extend_from_slice(&hdr);
     // an empty rANS body
     let mut st = Vec::new();
-    put_uv(&mut st, 0);
+    put_u32(&mut st, 0);
     let raw_len = n + 100;
     // a transform body whose only stream is a time stream: fte, fte2,
     // mvd1, tail; one entry (id 0, count, length); no blob body
     let mut body = Vec::new();
-    for v in [0u64, 0, 0, 0, 1, 0, u64::from(n) + 16, st.len() as u64, 0] {
-        put_uv(&mut body, v);
+    for v in [0, 0, 0, 0, 1, 0, n as usize + 16, st.len(), 0] {
+        put_u32(&mut body, v);
     }
     body.extend_from_slice(&st);
     let mut b = seg_hdr_bytes(raw_len, 0, 0);

@@ -2,14 +2,16 @@
 //! the stream bodies (FORMAT.md, "Transform segment body").
 //!
 //! ```text
-//! fte uv | fte2 uv | mvd1 uv | tail uv
-//! nstreams uv | nstreams x entry | blob_len uv
+//! fte u32 | fte2 u32 | mvd1 u32 | tail u32
+//! nstreams u32 | nstreams x entry | blob_len u32
 //! bodies of the structural and numeric streams, in table order
 //! blob body: blob_len bytes
 //!
-//! entry := id uv, count uv, len uv     structural, numeric
-//!          id uv, count uv             blob
+//! entry := id u32, count u32, len u32     structural, numeric
+//!          id u32, count u32              blob
 //! ```
+//!
+//! Every integer is little-endian.
 //!
 //! A structural or numeric stream is rANS with its model in the file's
 //! models block; a segment with such a stream that has no model there is
@@ -29,7 +31,7 @@ use crate::streams::{
     BLOB_BODY, N_LAZY, N_STREAMS, PE_BITS, PI_NUM, RAW, SND_NUM, TAIL, TE_TYPE, UC, UC_MIN_SYMS,
     is_blob, is_lazy, is_num,
 };
-use crate::util::{HAS_THREADS, Rd, par_map, put_uv};
+use crate::util::{HAS_THREADS, Rd, par_map, put_u32};
 use crate::walk::{Recs, SymIO, Walker};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -403,11 +405,11 @@ impl Trainer {
 /// (ascending, each with a model).
 pub fn tables_body(models: &[Option<rans::Shared>], ids: &[usize]) -> Vec<u8> {
     let mut t = Vec::new();
-    put_uv(&mut t, ids.len() as u64);
+    put_u32(&mut t, ids.len());
     for &sid in ids {
         let h = &models[sid].as_ref().expect("a model").hdr;
-        put_uv(&mut t, sid as u64);
-        put_uv(&mut t, h.len() as u64);
+        put_u32(&mut t, sid);
+        put_u32(&mut t, h.len());
         t.extend_from_slice(h);
     }
     t
@@ -494,16 +496,16 @@ pub(crate) fn encode(
         None => &[],
     };
     let mut out = Vec::new();
-    put_uv(&mut out, u64::from(wk.proto0.fte));
-    put_uv(&mut out, u64::from(wk.proto0.fte2));
-    put_uv(&mut out, u64::from(wk.proto0.mvd1));
-    put_uv(&mut out, wk.tail as u64);
-    put_uv(&mut out, (ids.len() + blobs.len()) as u64);
+    for flags in [wk.proto0.fte, wk.proto0.fte2, wk.proto0.mvd1] {
+        out.extend_from_slice(&flags.to_le_bytes());
+    }
+    put_u32(&mut out, wk.tail);
+    put_u32(&mut out, ids.len() + blobs.len());
     for &i in &ids {
         let body = &packed[i];
-        put_uv(&mut out, jobs[i].0 as u64);
-        put_uv(&mut out, count(i) as u64);
-        put_uv(&mut out, body.len() as u64);
+        put_u32(&mut out, jobs[i].0);
+        put_u32(&mut out, count(i));
+        put_u32(&mut out, body.len());
         stats.push(StreamStat {
             id: jobs[i].0,
             count: count(i),
@@ -511,15 +513,15 @@ pub(crate) fn encode(
         });
     }
     for &sid in &blobs {
-        put_uv(&mut out, sid as u64);
-        put_uv(&mut out, wk.io.blobs[sid].len() as u64);
+        put_u32(&mut out, sid);
+        put_u32(&mut out, wk.io.blobs[sid].len());
         stats.push(StreamStat {
             id: sid,
             count: wk.io.blobs[sid].len(),
             packed: 0,
         });
     }
-    put_uv(&mut out, blob_body.len() as u64);
+    put_u32(&mut out, blob_body.len());
     if blob_job.is_some() {
         stats.push(StreamStat {
             id: BLOB_BODY,
@@ -594,11 +596,11 @@ pub(crate) struct Header {
 pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
     let e = Error::Corrupt("segment header");
     let mut r = Rd::new(body);
-    let fte = r.u32v().ok_or(e)?;
-    let fte2 = r.u32v().ok_or(e)?;
-    let mvd1 = r.u32v().ok_or(e)?;
-    let tail = r.uz().ok_or(e)?;
-    let n = r.uz().ok_or(e)?;
+    let fte = r.u32le().ok_or(e)?;
+    let fte2 = r.u32le().ok_or(e)?;
+    let mvd1 = r.u32le().ok_or(e)?;
+    let tail = r.u32z().ok_or(e)?;
+    let n = r.u32z().ok_or(e)?;
     if tail > raw_len {
         return bad("tail length");
     }
@@ -611,13 +613,13 @@ pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
     let mut total = 0usize;
     let mut blob_total = 0usize;
     for _ in 0..n {
-        let id = r.uz().ok_or(te)?;
+        let id = r.u32z().ok_or(te)?;
         if id >= N_STREAMS || !(is_lazy(id) || is_num(id) || is_blob(id)) {
             return bad("stream id");
         }
         // a blob stream has no body of its own
-        let count = r.uz().ok_or(te)?;
-        let len = if is_blob(id) { 0 } else { r.uz().ok_or(te)? };
+        let count = r.u32z().ok_or(te)?;
+        let len = if is_blob(id) { 0 } else { r.u32z().ok_or(te)? };
         if is_blob(id) {
             blob_total = blob_total.checked_add(count).ok_or(te)?;
         }
@@ -632,7 +634,7 @@ pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         total = total.checked_add(len).ok_or(te)?;
         ents.push((id, count, len));
     }
-    let blob_len = r.uz().ok_or(te)?;
+    let blob_len = r.u32z().ok_or(te)?;
     // a blob body exactly when there are blob bytes
     if (blob_total == 0) != (blob_len == 0) {
         return bad("blob body");

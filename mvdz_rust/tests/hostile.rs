@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use common::*;
 use mvdz::Error;
 use mvdz::format::*;
-use mvdz::util::put_uv;
+use mvdz::util::put_u32;
 use std::assert_matches;
 use std::io::Cursor;
 use std::time::Instant;
@@ -171,6 +171,18 @@ fn declared_sizes() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An unsigned LEB128 at the start of `b` and its length in bytes.
+fn leb128(b: &[u8]) -> Option<(usize, usize)> {
+    let mut v = 0usize;
+    for (k, &x) in b.iter().enumerate().take(5) {
+        v |= usize::from(x & 0x7f) << (7 * k);
+        if x < 0x80 {
+            return Some((v, k + 1));
+        }
+    }
+    None
+}
+
 /// The reviewer's amplifying v2 model headers (robustness 5: a 2.3 KB
 /// header took 1.3 GB and 3.6 s) in the models block: refused at once by
 /// the model rules (decisions <= 128 per header byte + 1024).
@@ -183,24 +195,25 @@ fn model_amplification() -> anyhow::Result<()> {
     let c = compress(&demo)?;
     let p = parts(&c)?;
     for name in ["v2model_1000.bin", "v2model_16000.bin", "v2model_65535.bin"] {
-        // a model and a rANS stream body: header length, header, rANS data
+        // a model and a rANS stream body: header length (LEB128, the
+        // reviewer's format), header, rANS data
         let Ok(st) = std::fs::read(dir.join(name)) else {
             continue;
         };
-        let mut r = mvdz::util::Rd::new(&st);
-        let hdr = r.bytes().context("the model's header")?;
-        let rest = r.rest();
+        let (hdr_len, at) = leb128(&st).context("the model's header length")?;
+        let hdr = st.get(at..at + hdr_len).context("the model's header")?;
+        let rest = &st[at + hdr_len..];
         // the models block: one model, the time stream's
         let mut models = Vec::new();
-        for v in [1, 0, hdr.len() as u64] {
-            put_uv(&mut models, v);
+        for v in [1, 0, hdr.len()] {
+            put_u32(&mut models, v);
         }
         models.extend_from_slice(hdr);
         // a segment whose only stream is a time stream: fte, fte2, mvd1,
         // tail; one entry (id 0, count, length); no blob body
         let mut body = Vec::new();
-        for v in [0u64, 0, 0, 0, 1, 0, demo.len() as u64, rest.len() as u64, 0] {
-            put_uv(&mut body, v);
+        for v in [0, 0, 0, 0, 1, 0, demo.len(), rest.len(), 0] {
+            put_u32(&mut body, v);
         }
         body.extend_from_slice(rest);
         let mut b = seg_hdr_bytes(
@@ -293,10 +306,10 @@ fn large_tables() -> anyhow::Result<()> {
     let lazy: Vec<usize> = (0..mvdz::streams::N_LAZY)
         .filter(|&sid| mvdz::streams::is_lazy(sid))
         .collect();
-    put_uv(&mut t, lazy.len() as u64);
+    put_u32(&mut t, lazy.len());
     for sid in lazy {
-        put_uv(&mut t, sid as u64);
-        put_uv(&mut t, m.len() as u64);
+        put_u32(&mut t, sid);
+        put_u32(&mut t, m.len());
         t.extend_from_slice(&m);
     }
     p.models = t;

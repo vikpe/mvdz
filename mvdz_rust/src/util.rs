@@ -1,16 +1,16 @@
-//! Shared helpers: LEB128 varints, checked integer conversions, CRC-32,
-//! a scoped parallel map.
+//! Shared helpers: little-endian u32 fields, checked integer conversions,
+//! CRC-32, a scoped parallel map.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// ---------------------------------------------------------------- varints
+// ----------------------------------------------------------------- fields
 
-pub fn put_uv(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+/// Appends `v` as a little-endian u32, the one integer type inside a
+/// segment and the models block. Every caller's value is bounded by the
+/// 1 MiB segment, the 2 MiB coded segment or the 16 MiB models block.
+pub fn put_u32(out: &mut Vec<u8>, v: usize) {
+    debug_assert!(u32::try_from(v).is_ok(), "{v} does not fit in a u32");
+    out.extend_from_slice(&(v as u32).to_le_bytes());
 }
 
 /// Byte cursor over a buffer. Every read is bounds-checked.
@@ -23,43 +23,23 @@ impl<'a> Rd<'a> {
     pub fn new(b: &'a [u8]) -> Self {
         Rd { b, i: 0 }
     }
-    /// Unsigned LEB128, at most 10 bytes. A value that does not fit in 64
-    /// bits (bits set above bit 63 in the 10th byte) is an error.
-    pub(crate) fn uv(&mut self) -> Option<u64> {
-        let mut v = 0u64;
-        for k in 0..10 {
-            let b = *self.b.get(self.i)?;
-            self.i += 1;
-            if k == 9 && b > 1 {
-                return None;
-            }
-            v |= u64::from(b & 0x7f) << (7 * k);
-            if b < 0x80 {
-                return Some(v);
-            }
-        }
-        None
-    }
-    /// A `uv` that must fit in a `usize`.
-    pub fn uz(&mut self) -> Option<usize> {
-        usize::try_from(self.uv()?).ok()
-    }
-    /// A `uv` that must fit in a `u32`.
-    pub(crate) fn u32v(&mut self) -> Option<u32> {
-        u32::try_from(self.uv()?).ok()
-    }
     pub(crate) fn u32le(&mut self) -> Option<u32> {
         let s = self.take(4)?;
         Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+    /// A little-endian u32 as a count or length; `None` where it does not
+    /// fit in a `usize` (a 16-bit target).
+    pub fn u32z(&mut self) -> Option<usize> {
+        usize::try_from(self.u32le()?).ok()
     }
     pub(crate) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let s = self.b.get(self.i..self.i.checked_add(n)?)?;
         self.i += n;
         Some(s)
     }
-    /// A length-prefixed byte string (`uv` length, bytes).
+    /// A length-prefixed byte string (u32 length, bytes).
     pub fn bytes(&mut self) -> Option<&'a [u8]> {
-        let n = self.uz()?;
+        let n = self.u32z()?;
         self.take(n)
     }
     pub fn rest(&self) -> &'a [u8] {
@@ -163,20 +143,6 @@ mod tests {
         c.update(b"1234");
         c.update(b"56789");
         assert_eq!(c.finish(), 0xCBF4_3926);
-    }
-
-    #[test]
-    fn uv_limits() {
-        let mut v = Vec::new();
-        super::put_uv(&mut v, u64::MAX);
-        assert_eq!(v.len(), 10);
-        assert_eq!(super::Rd::new(&v).uv(), Some(u64::MAX));
-        // a 10th byte with bits above bit 63
-        let bad = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02];
-        assert_eq!(super::Rd::new(&bad).uv(), None);
-        // 11 bytes
-        let long = [0x80; 11];
-        assert_eq!(super::Rd::new(&long).uv(), None);
     }
 
     #[test]
