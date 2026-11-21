@@ -30,7 +30,7 @@ fn garbage_never_panics() {
     let mut rng = Rng(0x1234_5678_9abc_def1);
     for i in 0..3000 {
         let n = rng.below(400);
-        let mut b: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
+        let mut b: Vec<u8> = Vec::from_fn(n, |_| rng.next() as u8);
         if i % 2 == 0 && b.len() >= 6 {
             b[..4].copy_from_slice(b"MVDZ");
             b[4] = 1;
@@ -41,21 +41,21 @@ fn garbage_never_panics() {
 }
 
 #[test]
-fn mutated_streams_never_panic() {
+fn mutated_streams_never_panic() -> anyhow::Result<()> {
     let Some(src) = demo() else {
         eprintln!("no demo available, skipping");
-        return;
+        return Ok(());
     };
     let mut rng = Rng(0xdead_beef_cafe_f00d);
     for seg in [0usize, 50_000] {
-        let (c, info) = compress_info(&src, &cfg(seg)).unwrap();
+        let (c, info) = compress_info(&src, &cfg(seg))?;
         assert_eq!(info.fallback_segments, 0);
-        assert_eq!(mvdz::decompress(&c, 1).unwrap(), src);
+        assert_eq!(mvdz::decompress(&c, 1)?, src);
         for _ in 0..200 {
             let mut b = c.clone();
             match rng.below(4) {
                 0 => {
-                    for _ in 0..1 + rng.below(8) {
+                    for _ in 0..=rng.below(8) {
                         let i = rng.below(b.len());
                         b[i] ^= 1 << rng.below(8);
                     }
@@ -82,4 +82,5 @@ fn mutated_streams_never_panic() {
             }
         }
     }
+    Ok(())
 }

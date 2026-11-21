@@ -25,13 +25,13 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Format(s) => write!(f, "format: {s}"),
-            Error::Corrupt(s) => write!(f, "corrupt: {s}"),
-            Error::Limit(s) => write!(f, "limit: {s}"),
-            Error::Invalid(s) => write!(f, "invalid argument: {s}"),
-            Error::Io(k) => write!(f, "i/o: {k}"),
-            Error::Internal(s) => write!(f, "internal: {s}"),
-            Error::NotMvd(s) => write!(f, "not an MVD demo: {s}"),
+            Self::Format(s) => write!(f, "format: {s}"),
+            Self::Corrupt(s) => write!(f, "corrupt: {s}"),
+            Self::Limit(s) => write!(f, "limit: {s}"),
+            Self::Invalid(s) => write!(f, "invalid argument: {s}"),
+            Self::Io(k) => write!(f, "i/o: {k}"),
+            Self::Internal(s) => write!(f, "internal: {s}"),
+            Self::NotMvd(s) => write!(f, "not an MVD demo: {s}"),
         }
     }
 }
@@ -39,19 +39,19 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Error {
-        match e.get_ref().and_then(|x| x.downcast_ref::<Error>()) {
+    fn from(e: std::io::Error) -> Self {
+        match e.get_ref().and_then(|x| x.downcast_ref::<Self>()) {
             Some(d) => *d,
-            None => Error::Io(e.kind()),
+            None => Self::Io(e.kind()),
         }
     }
 }
 
 impl From<Error> for std::io::Error {
-    fn from(e: Error) -> std::io::Error {
+    fn from(e: Error) -> Self {
         match e {
-            Error::Io(k) => std::io::Error::new(k, e),
-            _ => std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            Error::Io(k) => Self::new(k, e),
+            _ => Self::new(std::io::ErrorKind::InvalidData, e),
         }
     }
 }
@@ -60,6 +60,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Shorthand for a corrupt-file error.
 #[inline]
-pub fn bad<T>(what: &'static str) -> Result<T> {
+pub(crate) fn bad<T>(what: &'static str) -> Result<T> {
     Err(Error::Corrupt(what))
 }

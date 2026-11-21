@@ -4,20 +4,23 @@
 use crate::budget::{Budget, Charge, Limits, zeroed};
 use crate::coder::rans::FileTables;
 use crate::error::{Error, Result, bad};
-use crate::format::*;
+use crate::format::{
+    C_DEFLATE, C_TRANSFORM, HEADER_LEN, LEN, Layout, MAX_SEG_RAW, SEG_FIELDS, Sec, SegHdr,
+    TABLES_MAX, len_field, parse_seg_hdr,
+};
 use crate::segment::{self, frame_scan};
 use crate::util::{Crc, crc32, par_map, usz};
 use std::io::{Read, Seek, SeekFrom};
 
 /// Random access to a file's bytes.
-pub trait Src {
+pub(crate) trait Src {
     fn len(&mut self) -> Result<u64>;
     /// Fills `buf` from file offset `off` (exactly).
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Result<()>;
 }
 
 /// A file in memory.
-pub struct SliceSrc<'a>(pub &'a [u8]);
+pub(crate) struct SliceSrc<'a>(pub(crate) &'a [u8]);
 
 impl Src for SliceSrc<'_> {
     fn len(&mut self) -> Result<u64> {
@@ -33,7 +36,7 @@ impl Src for SliceSrc<'_> {
 }
 
 /// A file behind `Read + Seek`.
-pub struct SeekSrc<R>(pub R);
+pub(crate) struct SeekSrc<R>(pub(crate) R);
 
 impl<R: Read + Seek> Src for SeekSrc<R> {
     fn len(&mut self) -> Result<u64> {
@@ -48,7 +51,7 @@ impl<R: Read + Seek> Src for SeekSrc<R> {
 }
 
 /// `read_exact` that reports a short read as a truncated file.
-pub fn read_full<R: Read + ?Sized>(r: &mut R, buf: &mut [u8]) -> Result<()> {
+pub(crate) fn read_full<R: Read + ?Sized>(r: &mut R, buf: &mut [u8]) -> Result<()> {
     let mut n = 0;
     while n < buf.len() {
         match r.read(&mut buf[n..]) {
@@ -82,14 +85,16 @@ fn len_at(src: &mut impl Src, off: u64, len: u64) -> Result<Option<u64>> {
     Ok(len_field(&b))
 }
 
-/// Reads and checks the whole structure of a complete file: the header,
-/// the models and the header of every segment (FORMAT.md, "Validation").
+/// Reads and checks the whole structure of a complete file.
+///
+/// That is the header, the models and the header of every segment
+/// (FORMAT.md, "Validation").
 /// Segment payloads are not decoded. The models are built on up to
 /// `threads` threads.
-pub fn scan_layout(src: &mut impl Src, threads: usize, budget: &Budget) -> Result<Layout> {
+pub(crate) fn scan_layout(src: &mut impl Src, threads: usize, budget: &Budget) -> Result<Layout> {
     let len = src.len()?;
     let mut h = [0u8; HEADER_LEN];
-    let n = len.min(HEADER_LEN as u64) as usize;
+    let n = usz(len).map_or(HEADER_LEN, |len| len.min(HEADER_LEN));
     src.read_at(0, &mut h[..n])?;
     let mut lay = Layout::new(&h[..n], budget)?;
     let mut off = HEADER_LEN as u64;
@@ -136,11 +141,11 @@ pub fn scan_layout(src: &mut impl Src, threads: usize, budget: &Budget) -> Resul
 }
 
 /// Frames, frame time and whole-frame length of one decoded segment.
-pub type SegTiming = (u64, u64, usize);
+pub(crate) type SegTiming = (u64, u64, usize);
 
 /// Decodes one segment body into `dst` (its exact raw length) and checks
 /// its CRC and its frame time.
-pub fn decode_segment(
+pub(crate) fn decode_segment(
     lay: &Layout,
     body: &[u8],
     h: &SegHdr,
@@ -149,7 +154,7 @@ pub fn decode_segment(
     budget: &Budget,
 ) -> Result<SegTiming> {
     let tables = lay.tables.as_ref();
-    if dst.len() as u64 != h.raw_len {
+    if dst.len() as u64 != u64::from(h.raw_len) {
         return bad("segment length");
     }
     let coded = body
@@ -161,7 +166,7 @@ pub fn decode_segment(
             segment::decode(coded, &th, dst, tables, threads, budget)?;
         }
         C_DEFLATE => {
-            let _c = budget.alloc(h.raw_len)?;
+            let _c = budget.alloc(u64::from(h.raw_len))?;
             dst.copy_from_slice(&crate::deflate::decompress(coded, dst.len())?);
         }
         _ => return Err(Error::Format("unknown segment coding")),
@@ -170,7 +175,7 @@ pub fn decode_segment(
         return bad("segment checksum");
     }
     let tm = frame_scan(dst);
-    if tm.1 != h.dur_ms {
+    if tm.1 != u64::from(h.dur_ms) {
         return bad("segment duration");
     }
     Ok(tm)
@@ -179,28 +184,29 @@ pub fn decode_segment(
 /// Whole-demo checks over the segments' timings (all of them, in order).
 /// The header's SHA-256 names the demo; decoding does not recompute it.
 #[derive(Default)]
-pub struct DemoCheck {
+pub(crate) struct DemoCheck {
     crc: Crc,
     size: u64,
     t: u64,
-    /// the previous segment ended inside a frame
-    open: bool,
+    is_inside_frame: bool,
 }
 
 impl DemoCheck {
     /// The next segment, decoded.
-    pub fn segment(&mut self, out: &[u8], tm: SegTiming) -> Result<()> {
-        if self.open {
+    pub(crate) fn segment(&mut self, out: &[u8], tm: SegTiming) -> Result<()> {
+        if self.is_inside_frame {
             return bad("segment ends inside a frame");
         }
         self.crc.update(out);
         self.size += out.len() as u64;
         self.t += tm.1;
-        self.open = tm.2 != out.len();
+        let has_tail = tm.2 != out.len();
+        let is_cut_at_max = out.len() as u64 == MAX_SEG_RAW;
+        self.is_inside_frame = has_tail && !is_cut_at_max;
         Ok(())
     }
     /// After the last segment: the header's size, duration and CRC-32.
-    pub fn finish(self, lay: &Layout) -> Result<()> {
+    pub(crate) fn finish(self, lay: &Layout) -> Result<()> {
         let h = &lay.header;
         if self.crc.finish() != h.crc || self.size != h.size {
             return bad("checksum mismatch");
@@ -213,7 +219,7 @@ impl DemoCheck {
 }
 
 /// Decompresses a whole file in memory.
-pub fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
+pub(crate) fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
     let budget = Budget::new(limits);
     budget.input(b.len() as u64);
     let threads = crate::util::threads(threads);
@@ -237,7 +243,10 @@ pub fn decompress(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> 
     }
     let res = par_map(outer, nseg, |i| {
         let (s, h) = &lay.segs[i];
-        let body = &b[s.body_off() as usize..s.end() as usize];
+        let body = s
+            .body_range()
+            .and_then(|range| b.get(range))
+            .ok_or(Error::Corrupt("truncated"))?;
         let mut dst = slices[i].lock().map_err(|_| Error::Internal("lock"))?;
         decode_segment(&lay, body, h, &mut dst, inner, &budget)
     });

@@ -8,28 +8,30 @@
 //! Groups in wave 1 are independent of each other; wave 2 (sounds, temp
 //! entities) reads player and entity origins that wave 1 wrote.
 
-use crate::streams::*;
-use crate::walk::*;
+use crate::streams::{PE_F0, PE_OX, PI_AP, PI_F0, PI_OX, SND_O, TE_O, UC_A};
+use crate::walk::{NONE, PE_FLOAT, PE_INPREV, PeRec, PiRec, Recs};
 
 /// Side features of one numeric value. Backends pick which to use.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct NCtx {
-    pub f: [u8; 6],
+pub(crate) struct NCtx {
+    pub(crate) f: [u8; 6],
 }
 
-pub trait NumIO {
+pub(crate) trait NumIO {
     /// Encode: record `v` on local stream `k`, return it. Decode: return the
     /// decoded residual.
     fn code(&mut self, k: usize, ctx: NCtx, v: i32) -> i32;
 }
 
-/// Shared view of the segment buffer. On encode it is the input (never
+/// Shared view of the segment buffer.
+///
+/// On encode it is the input (never
 /// written); on decode the output. Groups running in parallel write
 /// disjoint byte ranges: every offset comes from the walker's monotonic
 /// cursor, so no two records share a byte.
 #[derive(Clone, Copy)]
-pub struct Buf {
+pub(crate) struct Buf {
     ptr: *mut u8,
     len: usize,
 }
@@ -37,27 +39,27 @@ unsafe impl Send for Buf {}
 unsafe impl Sync for Buf {}
 
 impl Buf {
-    pub fn new(b: &mut [u8]) -> Buf {
-        Buf {
+    pub(crate) fn new(b: &mut [u8]) -> Self {
+        Self {
             ptr: b.as_mut_ptr(),
             len: b.len(),
         }
     }
-    pub fn ro(b: &[u8]) -> Buf {
-        Buf {
-            ptr: b.as_ptr() as *mut u8,
+    pub(crate) fn ro(b: &[u8]) -> Self {
+        Self {
+            ptr: b.as_ptr().cast_mut(),
             len: b.len(),
         }
     }
-    pub fn ptr(&self) -> *mut u8 {
+    pub(crate) fn ptr(&self) -> *mut u8 {
         self.ptr
     }
     #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
     #[inline(always)]
-    pub fn rd16(&self, off: u32) -> u16 {
+    pub(crate) fn rd16(&self, off: u32) -> u16 {
         let o = off as usize;
         if o.wrapping_add(2) <= self.len && o < self.len {
             unsafe { u16::from_le_bytes([*self.ptr.add(o), *self.ptr.add(o + 1)]) }
@@ -66,7 +68,7 @@ impl Buf {
         }
     }
     #[inline(always)]
-    pub fn rd32(&self, off: u32) -> u32 {
+    pub(crate) fn rd32(&self, off: u32) -> u32 {
         let o = off as usize;
         if o.wrapping_add(4) <= self.len && o < self.len {
             unsafe {
@@ -80,7 +82,7 @@ impl Buf {
         }
     }
     #[inline(always)]
-    pub fn wr16(&self, off: u32, v: u16) {
+    pub(crate) fn wr16(&self, off: u32, v: u16) {
         let o = off as usize;
         if o.wrapping_add(2) <= self.len && o < self.len {
             unsafe {
@@ -91,10 +93,15 @@ impl Buf {
         }
     }
     #[inline(always)]
-    pub fn wr32(&self, off: u32, v: u32) {
+    pub(crate) fn wr32(&self, off: u32, v: u32) {
         let o = off as usize;
         if o.wrapping_add(4) <= self.len && o < self.len {
-            unsafe { (self.ptr.add(o) as *mut [u8; 4]).write_unaligned(v.to_le_bytes()) }
+            unsafe {
+                self.ptr
+                    .add(o)
+                    .cast::<[u8; 4]>()
+                    .write_unaligned(v.to_le_bytes());
+            }
         }
     }
 }
@@ -112,13 +119,13 @@ impl IntoLe for [u8; 4] {
 /// Sign and bit-length bucket of a residual: 0 for zero, else
 /// 2*bitlen(|v|) - 1 + sign (0..=64).
 #[inline(always)]
-pub fn q(v: i32) -> u8 {
+pub(crate) fn q(v: i32) -> u8 {
     if v == 0 {
         return 0;
     }
-    let neg = (v < 0) as u32;
+    let neg = u32::from(v < 0);
     let m = v.unsigned_abs();
-    let n = 32 - m.leading_zeros();
+    let n = m.bit_width();
     (2 * n - 1 + neg) as u8
 }
 
@@ -137,27 +144,30 @@ static RECIP: [u64; 256] = {
 /// Rounded division a / b for b > 0 (halves away from zero).
 #[inline(always)]
 fn div_round(a: i32, b: i32) -> i32 {
-    let n = a.unsigned_abs() + (b as u32) / 2;
+    let n = a.unsigned_abs() + b.cast_unsigned() / 2;
     let q = if b < 256 {
-        ((n as u128 * RECIP[b as usize] as u128) >> 40) as u32
+        ((u128::from(n) * u128::from(RECIP[b.cast_unsigned() as usize])) >> 40) as u32
     } else {
-        n / b as u32
-    } as i32;
+        n / b.cast_unsigned()
+    }
+    .cast_signed();
     if a < 0 { -q } else { q }
 }
 
 /// Frame intervals are clamped so the scaled velocity fits 32 bits.
-pub const DT_MAX: i32 = 32767;
+pub(crate) const DT_MAX: i32 = 32767;
 
-/// dt-scaled linear prediction: last + (last - prev) * dt_now / dt_prev,
-/// rounded (wrapping 16-bit arithmetic). Intervals are clamped to DT_MAX.
+/// dt-scaled linear prediction: last + (last - prev) * `dt_now` / `dt_prev`,
+/// rounded (wrapping 16-bit arithmetic). Intervals are clamped to `DT_MAX`.
 #[inline(always)]
 fn pred_dt(last: u16, prev: u16, dt_now: i32, dt_prev: i32) -> u16 {
-    let d = (last.wrapping_sub(prev)) as i16 as i32;
+    let d = i32::from((last.wrapping_sub(prev)).cast_signed());
     if dt_now == dt_prev || dt_prev <= 0 || dt_now < 0 {
-        last.wrapping_add(d as u16)
+        last.wrapping_add(d.cast_unsigned() as u16)
     } else {
-        last.wrapping_add(div_round(d * dt_now.min(DT_MAX), dt_prev.min(DT_MAX)) as u16)
+        last.wrapping_add(
+            div_round(d * dt_now.min(DT_MAX), dt_prev.min(DT_MAX)).cast_unsigned() as u16,
+        )
     }
 }
 
@@ -172,14 +182,14 @@ fn x16<const ENC: bool, IO: NumIO>(
 ) -> (u16, i32) {
     if ENC {
         let v = buf.rd16(off);
-        let r = v.wrapping_sub(pred) as i16 as i32;
+        let r = i32::from(v.wrapping_sub(pred).cast_signed());
         io.code(k, c, r);
         (v, r)
     } else {
         let r = io.code(k, c, 0);
-        let v = pred.wrapping_add(r as u16);
+        let v = pred.wrapping_add(r.cast_unsigned() as u16);
         buf.wr16(off, v);
-        (v, r as u16 as i16 as i32)
+        (v, i32::from(r as i16))
     }
 }
 
@@ -194,19 +204,19 @@ fn x32<const ENC: bool, IO: NumIO>(
 ) -> (u32, i32) {
     if ENC {
         let v = buf.rd32(off);
-        let r = v.wrapping_sub(pred) as i32;
+        let r = v.wrapping_sub(pred).cast_signed();
         io.code(k, c, r);
         (v, r)
     } else {
         let r = io.code(k, c, 0);
-        let v = pred.wrapping_add(r as u32);
+        let v = pred.wrapping_add(r.cast_unsigned());
         buf.wr32(off, v);
         (v, r)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Group {
+pub(crate) enum Group {
     PiO(u8),
     PiA(u8),
     PeO(u8),
@@ -223,7 +233,7 @@ pub enum Group {
 }
 
 /// Wave 1, split per axis (for multi-threaded decoding).
-pub const WAVE1: [Group; 10] = [
+pub(crate) const WAVE1: [Group; 10] = [
     Group::PiA(1),
     Group::PiA(0),
     Group::PiO(0),
@@ -236,34 +246,34 @@ pub const WAVE1: [Group; 10] = [
     Group::Uc,
 ];
 /// Wave 1 for pipelined decoding next to the walker (one task per worker).
-pub const WAVE1_PIPE: [Group; 4] = [Group::PiAAll, Group::PiOAll, Group::PeAll, Group::Uc];
-pub const WAVE2: [Group; 2] = [Group::Snd, Group::Te];
+pub(crate) const WAVE1_PIPE: [Group; 4] = [Group::PiAAll, Group::PiOAll, Group::PeAll, Group::Uc];
+pub(crate) const WAVE2: [Group; 2] = [Group::Snd, Group::Te];
 
 impl Group {
     /// Stream ids by local index.
-    pub fn streams(self) -> &'static [usize] {
+    pub(crate) fn streams(self) -> &'static [usize] {
         match self {
-            Group::PiO(0) => &[PI_OX, PI_F0],
-            Group::PiO(1) => &[PI_OX + 1, PI_F0 + 1],
-            Group::PiO(_) => &[PI_OX + 2, PI_F0 + 2],
-            Group::PiA(0) => &[PI_AP],
-            Group::PiA(1) => &[PI_AP + 1],
-            Group::PiA(_) => &[PI_AP + 2],
-            Group::PeO(0) => &[PE_OX, PE_F0],
-            Group::PeO(1) => &[PE_OX + 1, PE_F0 + 1],
-            Group::PeO(_) => &[PE_OX + 2, PE_F0 + 2],
-            Group::PeAll => &[PE_OX, PE_F0, PE_OX + 1, PE_F0 + 1, PE_OX + 2, PE_F0 + 2],
-            Group::PiOAll => &[PI_OX, PI_F0, PI_OX + 1, PI_F0 + 1, PI_OX + 2, PI_F0 + 2],
-            Group::PiAAll => &[PI_AP, PI_AP + 1, PI_AP + 2],
-            Group::Uc => &[UC_A],
-            Group::Snd => &[SND_O],
-            Group::Te => &[TE_O],
+            Self::PiO(0) => &[PI_OX, PI_F0],
+            Self::PiO(1) => &[PI_OX + 1, PI_F0 + 1],
+            Self::PiO(_) => &[PI_OX + 2, PI_F0 + 2],
+            Self::PiA(0) => &[PI_AP],
+            Self::PiA(1) => &[PI_AP + 1],
+            Self::PiA(_) => &[PI_AP + 2],
+            Self::PeO(0) => &[PE_OX, PE_F0],
+            Self::PeO(1) => &[PE_OX + 1, PE_F0 + 1],
+            Self::PeO(_) => &[PE_OX + 2, PE_F0 + 2],
+            Self::PeAll => &[PE_OX, PE_F0, PE_OX + 1, PE_F0 + 1, PE_OX + 2, PE_F0 + 2],
+            Self::PiOAll => &[PI_OX, PI_F0, PI_OX + 1, PI_F0 + 1, PI_OX + 2, PI_F0 + 2],
+            Self::PiAAll => &[PI_AP, PI_AP + 1, PI_AP + 2],
+            Self::Uc => &[UC_A],
+            Self::Snd => &[SND_O],
+            Self::Te => &[TE_O],
         }
     }
 
-    pub fn run<const ENC: bool, IO: NumIO>(self, recs: &Recs, buf: Buf, io: &mut IO) {
+    pub(crate) fn run<const ENC: bool, IO: NumIO>(self, recs: &Recs, buf: Buf, io: &mut IO) {
         match self {
-            Group::PiO(a) => {
+            Self::PiO(a) => {
                 let mut st = vec![Track::default(); 256];
                 let mut tm = vec![(0u32, 0u32); 256];
                 for r in recs.pi.feed() {
@@ -280,7 +290,7 @@ impl Group {
                     );
                 }
             }
-            Group::PiA(a) => {
+            Self::PiA(a) => {
                 let mut st = vec![Track::default(); 256];
                 let mut tm = vec![(0u32, 0u32); 256];
                 for r in recs.pi.feed() {
@@ -297,7 +307,7 @@ impl Group {
                     );
                 }
             }
-            Group::PiOAll => {
+            Self::PiOAll => {
                 let mut st = vec![[Track::default(); 3]; 256];
                 let mut tm = vec![(0u32, 0u32); 256];
                 for r in recs.pi.feed() {
@@ -308,7 +318,7 @@ impl Group {
                     }
                 }
             }
-            Group::PiAAll => {
+            Self::PiAAll => {
                 let mut st = vec![[Track::default(); 3]; 256];
                 let mut tm = vec![(0u32, 0u32); 256];
                 for r in recs.pi.feed() {
@@ -319,7 +329,7 @@ impl Group {
                     }
                 }
             }
-            Group::PeO(a) => {
+            Self::PeO(a) => {
                 let mut st = vec![Track::default(); 2048];
                 for r in recs.pe.feed() {
                     pe_origin_step::<ENC, IO>(
@@ -332,7 +342,7 @@ impl Group {
                     );
                 }
             }
-            Group::PeAll => {
+            Self::PeAll => {
                 let mut st = vec![[Track::default(); 3]; 2048];
                 for r in recs.pe.feed() {
                     let s = &mut st[(r.num & 2047) as usize];
@@ -341,9 +351,9 @@ impl Group {
                     }
                 }
             }
-            Group::Uc => uc::<ENC, IO>(recs, buf, io),
-            Group::Snd => snd::<ENC, IO>(recs, buf, io),
-            Group::Te => te::<ENC, IO>(recs, buf, io),
+            Self::Uc => uc::<ENC, IO>(recs, buf, io),
+            Self::Snd => snd::<ENC, IO>(recs, buf, io),
+            Self::Te => te::<ENC, IO>(recs, buf, io),
         }
     }
 }
@@ -362,20 +372,20 @@ struct Track {
     t_last: u32,
 }
 
-/// Per-player frame times: returns (dt_now, dt_prev) and advances.
+/// Per-player frame times: returns (`dt_now`, `dt_prev`) and advances.
 #[inline(always)]
 fn times(tm: &mut (u32, u32), t: u32) -> (i32, i32) {
     let (t_last, t_prev) = *tm;
     *tm = (t, t_last);
     (
-        t.wrapping_sub(t_last) as i32,
-        t_last.wrapping_sub(t_prev) as i32,
+        t.wrapping_sub(t_last).cast_signed(),
+        t_last.wrapping_sub(t_prev).cast_signed(),
     )
 }
 
 #[inline(always)]
 fn dd(now: i32, prev: i32) -> u8 {
-    ((now - prev).clamp(-3, 3) + 3) as u8
+    ((now - prev).clamp(-3, 3) + 3).cast_unsigned() as u8
 }
 
 #[inline(always)]
@@ -410,12 +420,12 @@ fn pi_origin_step<const ENC: bool, IO: NumIO>(
         let v = if sent {
             let pred = pred_dt(s.last, s.prev, dt_now, dt_prev);
             let off = r.off + 2 * (r.flags & ((1 << axis) - 1)).count_ones();
-            let vel = s.last.wrapping_sub(s.prev) as i16 as i32;
+            let vel = i32::from(s.last.wrapping_sub(s.prev).cast_signed());
             let c = NCtx {
                 f: [
                     q(s.res),
                     q(vel),
-                    dt_now.clamp(0, 63) as u8,
+                    dt_now.clamp(0, 63).cast_unsigned() as u8,
                     (r.flags & 7) as u8,
                     dd(dt_now, dt_prev),
                     0,
@@ -451,12 +461,12 @@ fn pi_angle_step<const ENC: bool, IO: NumIO>(
         let off = r.off
             + cw * (r.flags & 7).count_ones()
             + 2 * ((r.flags >> 3) & ((1 << axis) - 1)).count_ones();
-        let dprev = s.prev.wrapping_sub(s.prev2) as i16 as i32;
+        let dprev = i32::from(s.prev.wrapping_sub(s.prev2).cast_signed());
         let c = NCtx {
             f: [
                 q(s.res),
                 q(dprev),
-                dt_now.clamp(0, 63) as u8,
+                dt_now.clamp(0, 63).cast_unsigned() as u8,
                 ((r.flags >> 3) & 7) as u8,
                 dd(dt_now, dt_prev),
                 0,
@@ -483,7 +493,7 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
     io: &mut IO,
     k: usize,
 ) {
-    let dt_now = r.t.wrapping_sub(s.t_last) as i32;
+    let dt_now = r.t.wrapping_sub(s.t_last).cast_signed();
     s.t_last = r.t;
     let sent = r.bits & (1 << (2 * axis)) != 0;
     if sent {
@@ -498,16 +508,16 @@ fn pe_origin_step<const ENC: bool, IO: NumIO>(
             s.flast = v;
             s.fres = d;
         } else {
-            let vel = s.last.wrapping_sub(s.prev) as i16 as i32;
-            let pred = s.last.wrapping_add(vel as u16);
-            let ip = (r.bits & PE_INPREV != 0) as u8;
+            let vel = i32::from(s.last.wrapping_sub(s.prev).cast_signed());
+            let pred = s.last.wrapping_add(vel.cast_unsigned() as u16);
+            let ip = u8::from(r.bits & PE_INPREV != 0);
             let c = NCtx {
                 f: [
                     q(s.res),
                     q(vel),
                     r.model,
                     ip | (r.ubits & 7) << 1,
-                    dt_now.clamp(0, 63) as u8,
+                    dt_now.clamp(0, 63).cast_unsigned() as u8,
                     0,
                 ],
             };
@@ -535,22 +545,22 @@ fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
                 continue;
             }
             let off = r.off + 4 * a as u32;
-            let d = t.last.wrapping_sub(t.prev) as i16 as i32;
-            let d2 = t.prev.wrapping_sub(t.prev2) as i16 as i32;
-            let pred = t.last.wrapping_add(d as u16);
+            let d = i32::from(t.last.wrapping_sub(t.prev).cast_signed());
+            let d2 = i32::from(t.prev.wrapping_sub(t.prev2).cast_signed());
+            let pred = t.last.wrapping_add(d.cast_unsigned() as u16);
             let c = NCtx {
                 f: [q(t.res), q(d), q(d2), a as u8, 0, 0],
             };
             let v = if ENC {
                 let v = crate::walk::on_grid(buf.rd32(off)).expect("the walker saw it on the grid");
-                io.code(0, c, v.wrapping_sub(pred) as i16 as i32);
+                io.code(0, c, i32::from(v.wrapping_sub(pred).cast_signed()));
                 v
             } else {
-                let v = pred.wrapping_add(io.code(0, c, 0) as u16);
+                let v = pred.wrapping_add(io.code(0, c, 0).cast_unsigned() as u16);
                 buf.wr32(off, crate::walk::grid_f32(v));
                 v
             };
-            t.res = v.wrapping_sub(pred) as i16 as i32;
+            t.res = i32::from(v.wrapping_sub(pred).cast_signed());
             t.prev2 = t.prev;
             t.prev = t.last;
             t.last = v;
@@ -609,10 +619,10 @@ fn te<const ENC: bool, IO: NumIO>(recs: &Recs, buf: Buf, io: &mut IO) {
 mod tests {
     use super::*;
     fn div_round_ref(a: i64, b: i64) -> i64 {
-        if (a < 0) != (b < 0) {
-            -((-a + b / 2) / b)
-        } else {
+        if (a < 0) == (b < 0) {
             (a + b / 2) / b
+        } else {
+            -((-a + b / 2) / b)
         }
     }
     #[test]
@@ -623,10 +633,10 @@ mod tests {
                 x ^= x << 13;
                 x ^= x >> 7;
                 x ^= x << 17;
-                let a = (x % (2 * 32768 * 32767) as u64) as i64 - 32768 * 32767;
+                let a = (x % (2 * 32768 * 32767) as u64).cast_signed() - 32768 * 32767;
                 assert_eq!(
-                    div_round(a as i32, b) as i64,
-                    div_round_ref(a, b as i64),
+                    i64::from(div_round(a as i32, b)),
+                    div_round_ref(a, i64::from(b)),
                     "{a} / {b}"
                 );
             }
@@ -642,8 +652,8 @@ mod tests {
                 -b,
             ] {
                 assert_eq!(
-                    div_round(a, b) as i64,
-                    div_round_ref(a as i64, b as i64),
+                    i64::from(div_round(a, b)),
+                    div_round_ref(i64::from(a), i64::from(b)),
                     "{a} / {b}"
                 );
             }

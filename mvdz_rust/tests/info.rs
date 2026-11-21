@@ -3,28 +3,30 @@
 //! run without the demo cache.
 
 mod common;
+use anyhow::Context as _;
 use common::*;
 use mvdz::format::{HEADER_LEN, Header};
 use sha2::{Digest, Sha256};
+use std::assert_matches;
 use std::io::Cursor;
 
 /// Every header field describes the original demo; the segments' raw
 /// lengths and start times are running sums.
 #[test]
-fn header_describes_the_demo() {
+fn header_describes_the_demo() -> anyhow::Result<()> {
     let demo = synthetic(&[(0, "{\"x\":1}")], false);
     let (_, ms, whole) = mvdz::segment::frame_scan(&demo);
     assert_eq!(whole, demo.len());
     for seg in [0, 300] {
-        let c = compress(&demo, &cfg(seg)).unwrap();
-        let h = Header::parse(&c).unwrap();
+        let c = compress(&demo, &cfg(seg))?;
+        let h = Header::parse(&c)?;
         assert_eq!(&c[..4], b"MVDZ");
         assert_eq!(h.size, demo.len() as u64);
         assert_eq!(h.duration_ms, ms);
         assert_eq!(h.crc, mvdz::util::crc32(&demo));
         assert_eq!(h.sha256, <[u8; 32]>::from(Sha256::digest(&demo)));
         assert_eq!(h.bytes(), c[..HEADER_LEN]);
-        let fi = mvdz::read_info(Cursor::new(&c)).unwrap();
+        let fi = mvdz::read_info(Cursor::new(&c))?;
         assert_eq!(fi.header, h);
         assert_eq!(fi.file_size, c.len() as u64);
         assert_eq!(fi.index.segs.len() > 1, seg > 0);
@@ -44,28 +46,33 @@ fn header_describes_the_demo() {
         }
         assert_eq!(raw, h.size);
         // the JSON rendering
-        let json: serde_json::Value = serde_json::from_str(&fi.to_json()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&fi.to_json())?;
         assert_eq!(json["version"], 2);
         assert_eq!(json["size"], demo.len());
         assert_eq!(json["duration_ms"], ms);
-        assert_eq!(json["sha256"], mvdz::api::hex(&h.sha256));
+        assert_eq!(json["sha256"], hex(&h.sha256));
         assert_eq!(json["crc32"], format!("{:08x}", h.crc));
         assert_eq!(json["file_size"], c.len());
         assert_eq!(
-            json["segments"].as_array().unwrap().len(),
+            json["segments"].as_array().context("a segment list")?.len(),
             fi.index.segs.len()
         );
-        assert_eq!(readers_agree(&c, "header").unwrap(), demo);
+        assert_eq!(
+            readers_agree(&c, "header").context("every reader refuses")?,
+            demo
+        );
     }
+    Ok(())
 }
 
 /// A wrong header field makes every reader refuse the file.
 #[test]
-fn wrong_header_fields_are_refused() {
+fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     let demo = synthetic(&[], false);
-    let c = compress(&demo, &cfg(300)).unwrap();
-    let p = parts(&c);
+    let c = compress(&demo, &cfg(300))?;
+    let p = parts(&c)?;
     assert_eq!(p.build(), c);
+    #[expect(clippy::type_complexity, reason = "a table of named edits")]
     let cases: [(&str, fn(&mut Header)); 5] = [
         ("size + 1", |h| h.size += 1),
         ("size - 1", |h| h.size -= 1),
@@ -81,7 +88,10 @@ fn wrong_header_fields_are_refused() {
     // the SHA-256 names the demo: decoding does not recompute it
     let mut q = p.clone();
     q.header.sha256[31] ^= 1;
-    assert_eq!(readers_agree(&q.build(), "sha256").unwrap(), demo);
+    assert_eq!(
+        readers_agree(&q.build(), "sha256").context("every reader refuses")?,
+        demo
+    );
     // a byte after the last segment
     let mut more = c.clone();
     more.push(0);
@@ -90,23 +100,17 @@ fn wrong_header_fields_are_refused() {
     let mut q = p.clone();
     q.segs.pop();
     assert!(readers_agree(&q.build(), "dropped segment").is_none());
-    let mut q = p.clone();
+    let mut q = p;
     q.segs.swap(1, 2);
     assert!(readers_agree(&q.build(), "swapped segments").is_none());
     // an unknown version, another magic
     let mut v = c.clone();
     v[4] = 3;
-    assert!(matches!(
-        mvdz::decompress(&v, 1),
-        Err(mvdz::Error::Format(_))
-    ));
+    assert_matches!(mvdz::decompress(&v, 1), Err(mvdz::Error::Format(_)));
     assert!(readers_agree(&v, "version").is_none());
     let mut m = c.clone();
     m[0] = b'N';
-    assert!(matches!(
-        mvdz::decompress(&m, 1),
-        Err(mvdz::Error::Format(_))
-    ));
+    assert_matches!(mvdz::decompress(&m, 1), Err(mvdz::Error::Format(_)));
     // every cut of the file
     for cut in [
         0,
@@ -120,10 +124,11 @@ fn wrong_header_fields_are_refused() {
     ] {
         assert!(readers_agree(&c[..cut], "cut").is_none(), "cut at {cut}");
     }
+    Ok(())
 }
 
 #[test]
-fn demoinfo_multi_block_round_trip() {
+fn demoinfo_multi_block_round_trip() -> anyhow::Result<()> {
     // blocks 1, 2, 0; then a second, newer copy
     let parts = [
         (1, "{\"a\":1,"),
@@ -135,25 +140,33 @@ fn demoinfo_multi_block_round_trip() {
     ];
     let demo = synthetic(&parts, false);
     for seg in [0, 300] {
-        let c = compress(&demo, &cfg(seg)).unwrap();
-        assert_eq!(readers_agree(&c, "demoinfo").unwrap(), demo);
+        let c = compress(&demo, &cfg(seg))?;
+        assert_eq!(
+            readers_agree(&c, "demoinfo").context("every reader refuses")?,
+            demo
+        );
     }
+    Ok(())
 }
 
 #[test]
-fn truncated_demo_round_trips() {
+fn truncated_demo_round_trips() -> anyhow::Result<()> {
     let demo = synthetic(&[], true);
     for seg in [0, 200] {
-        let c = compress(&demo, &cfg(seg)).unwrap();
-        assert_eq!(readers_agree(&c, "truncated").unwrap(), demo);
+        let c = compress(&demo, &cfg(seg))?;
+        assert_eq!(
+            readers_agree(&c, "truncated").context("every reader refuses")?,
+            demo
+        );
     }
     if let Some(d) = duel() {
         // one byte holds no frame: refused as a non-demo
         let r = compress(&d[..1], &cfg(65536));
-        assert!(matches!(r, Err(mvdz::Error::NotMvd(_))), "{r:?}");
+        assert_matches!(r, Err(mvdz::Error::NotMvd(_)), "{r:?}");
         for cut in [1000, 123_457, d.len() / 2 + 3, d.len() - 1] {
-            let c = compress(&d[..cut], &cfg(65536)).unwrap();
-            assert_eq!(mvdz::decompress(&c, 2).unwrap(), &d[..cut], "cut {cut}");
+            let c = compress(&d[..cut], &cfg(65536))?;
+            assert_eq!(mvdz::decompress(&c, 2)?, &d[..cut], "cut {cut}");
         }
     }
+    Ok(())
 }

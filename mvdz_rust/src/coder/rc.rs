@@ -1,9 +1,11 @@
-//! Binary range coder (LZMA-style: 32-bit range, byte-wise normalisation,
-//! carry propagation through a cache byte) with 12-bit probabilities.
+//! Binary range coder with 12-bit probabilities.
+//!
+//! LZMA-style: 32-bit range, byte-wise normalisation, carry propagation
+//! through a cache byte.
 //! `p` is always P(bit = 1) in 1..=4095. Written from the published LZMA
 //! range-coder description; no code copied.
 
-pub const PBITS: u32 = 12;
+pub(crate) const PBITS: u32 = 12;
 const TOP: u32 = 1 << 24;
 
 pub struct Enc {
@@ -13,7 +15,7 @@ pub struct Enc {
     range: u32,
     cache: u8,
     cache_size: u64,
-    pub out: Vec<u8>,
+    pub(crate) out: Vec<u8>,
 }
 
 impl Default for Enc {
@@ -23,8 +25,8 @@ impl Default for Enc {
 }
 
 impl Enc {
-    pub fn new() -> Enc {
-        Enc {
+    pub fn new() -> Self {
+        Self {
             decisions: 0,
             low: 0,
             range: u32::MAX,
@@ -54,13 +56,13 @@ impl Enc {
     }
 
     #[inline(always)]
-    pub fn bit(&mut self, bit: u32, p: u32) {
+    pub(crate) fn bit(&mut self, bit: u32, p: u32) {
         self.decisions += 1;
         let bound = (self.range >> PBITS) * p;
         if bit != 0 {
             self.range = bound;
         } else {
-            self.low += bound as u64;
+            self.low += u64::from(bound);
             self.range -= bound;
         }
         while self.range < TOP {
@@ -77,9 +79,9 @@ impl Enc {
     }
 }
 
-pub struct Dec<'a> {
+pub(crate) struct Dec<'a> {
     /// binary decisions decoded so far
-    pub decisions: u64,
+    pub(crate) decisions: u64,
     code: u32,
     range: u32,
     b: &'a [u8],
@@ -87,7 +89,7 @@ pub struct Dec<'a> {
 }
 
 impl<'a> Dec<'a> {
-    pub fn new(b: &'a [u8]) -> Dec<'a> {
+    pub(crate) fn new(b: &'a [u8]) -> Self {
         let mut d = Dec {
             decisions: 0,
             code: 0,
@@ -96,7 +98,7 @@ impl<'a> Dec<'a> {
             pos: 0,
         };
         for _ in 0..5 {
-            d.code = (d.code << 8) | d.next() as u32;
+            d.code = (d.code << 8) | u32::from(d.next());
         }
         d
     }
@@ -109,26 +111,26 @@ impl<'a> Dec<'a> {
     }
 
     /// Bytes read so far (including the zeros past the end).
-    pub fn pos(&self) -> usize {
+    pub(crate) fn pos(&self) -> usize {
         self.pos
     }
 
     /// Bytes consumed beyond the input (a sign of corruption if large).
-    pub fn overrun(&self) -> bool {
+    pub(crate) fn overrun(&self) -> bool {
         self.pos > self.b.len() + 5
     }
 
     #[inline(always)]
-    pub fn bit(&mut self, p: u32) -> u32 {
+    pub(crate) fn bit(&mut self, p: u32) -> u32 {
         self.decisions += 1;
         let bound = (self.range >> PBITS) * p;
-        let b = (self.code < bound) as u32;
+        let b = u32::from(self.code < bound);
         let m = b.wrapping_neg();
         self.code -= bound & !m;
         self.range = (bound & m) | (self.range.wrapping_sub(bound) & !m);
         while self.range < TOP {
             self.range <<= 8;
-            self.code = (self.code << 8) | self.next() as u32;
+            self.code = (self.code << 8) | u32::from(self.next());
         }
         b
     }
@@ -136,21 +138,21 @@ impl<'a> Dec<'a> {
 
 /// Adaptive probability with a fixed shift (used for side information).
 #[derive(Clone, Copy)]
-pub struct P(pub u16);
+pub(crate) struct P(pub(crate) u16);
 
 impl Default for P {
     fn default() -> Self {
-        P(1 << 15)
+        Self(1 << 15)
     }
 }
 
 impl P {
     #[inline(always)]
-    pub fn p12(self) -> u32 {
-        ((self.0 as u32) >> 4).clamp(1, 4095)
+    pub(crate) fn p12(self) -> u32 {
+        (u32::from(self.0) >> 4).clamp(1, 4095)
     }
     #[inline(always)]
-    pub fn up(&mut self, bit: u32, sh: u32) {
+    pub(crate) fn up(&mut self, bit: u32, sh: u32) {
         if bit != 0 {
             self.0 += (65535 - self.0) >> sh;
         } else {
@@ -166,14 +168,14 @@ pub struct IntModel {
 }
 
 impl IntModel {
-    pub fn new(nctx: usize) -> IntModel {
-        IntModel {
+    pub fn new(nctx: usize) -> Self {
+        Self {
             p: vec![P::default(); nctx * 64],
         }
     }
     pub fn put(&mut self, e: &mut Enc, ctx: usize, v: u32) {
-        let v1 = v as u64 + 1;
-        let n = 63 - v1.leading_zeros(); // bits below the leading one
+        let v1 = u64::from(v) + 1;
+        let n = v1.ilog2(); // bits below the leading one
         let base = ctx * 64;
         for i in 0..n {
             let p = &mut self.p[base + i as usize];
@@ -192,11 +194,11 @@ impl IntModel {
             p.up(b, 5);
         }
     }
-    pub fn get(&mut self, d: &mut Dec, ctx: usize) -> u32 {
+    pub(crate) fn get(&mut self, d: &mut Dec, ctx: usize) -> u32 {
         let base = ctx * 64;
-        let mut n = 0;
+        let mut n: usize = 0;
         while n < 32 {
-            let p = &mut self.p[base + n as usize];
+            let p = &mut self.p[base + n];
             let b = d.bit(p.p12());
             p.up(b, 4);
             if b == 0 {
@@ -206,10 +208,10 @@ impl IntModel {
         }
         let mut v1: u64 = 1;
         for i in (0..n).rev() {
-            let p = &mut self.p[base + 33 + (i as usize).min(30)];
+            let p = &mut self.p[base + 33 + i.min(30)];
             let b = d.bit(p.p12());
             p.up(b, 5);
-            v1 = (v1 << 1) | b as u64;
+            v1 = (v1 << 1) | u64::from(b);
         }
         (v1 - 1) as u32
     }

@@ -3,25 +3,30 @@
 //! are the reviewers' proofs of concept rebuilt for this format.
 
 mod common;
+use anyhow::Context as _;
 use common::*;
 use mvdz::Error;
 use mvdz::format::*;
 use mvdz::util::put_uv;
+use std::assert_matches;
 use std::io::Cursor;
 use std::time::Instant;
 
-fn base(seg: usize) -> (Vec<u8>, Vec<u8>) {
+fn base(seg: usize) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let c = compress(&demo, &cfg(seg)).unwrap();
-    (demo, c)
+    let c = compress(&demo, &cfg(seg))?;
+    Ok((demo, c))
 }
 
 /// Refused by every reader within `secs`, with `want` matching the error.
 fn refused(b: &[u8], what: &str, want: impl Fn(&Error) -> bool) {
     let t = Instant::now();
     assert!(readers_agree(b, what).is_none(), "{what}: accepted");
-    let e = mvdz::decompress(b, 2).unwrap_err();
-    assert!(want(&e), "{what}: unexpected error {e}");
+    let refusal = mvdz::decompress(b, 2).err();
+    assert!(
+        refusal.as_ref().is_some_and(&want),
+        "{what}: unexpected result {refusal:?}"
+    );
     assert!(
         t.elapsed().as_secs_f64() < 5.0,
         "{what}: took {:?}",
@@ -34,10 +39,13 @@ fn corrupt(e: &Error) -> bool {
 }
 
 #[test]
-fn structure_rules() {
-    let (demo, c) = base(300);
-    assert_eq!(readers_agree(&c, "base").unwrap(), demo);
-    let p = parts(&c);
+fn structure_rules() -> anyhow::Result<()> {
+    let (demo, c) = base(300)?;
+    assert_eq!(
+        readers_agree(&c, "base").context("every reader refuses")?,
+        demo
+    );
+    let p = parts(&c)?;
     assert!(p.segs.len() > 3);
     // rebuilt unchanged: the same file
     assert_eq!(p.build(), c);
@@ -46,11 +54,11 @@ fn structure_rules() {
     let mut q = p.clone();
     q.header.sha256 = [0xff; 32];
     let b = q.build();
-    assert_eq!(readers_agree(&b, "another SHA-256").unwrap(), demo);
     assert_eq!(
-        mvdz::read_info(Cursor::new(&b)).unwrap().header.sha256,
-        [0xff; 32]
+        readers_agree(&b, "another SHA-256").context("every reader refuses")?,
+        demo
     );
+    assert_eq!(mvdz::read_info(Cursor::new(&b))?.header.sha256, [0xff; 32]);
     // a segment dropped
     let mut q = p.clone();
     q.segs.remove(2);
@@ -75,7 +83,7 @@ fn structure_rules() {
     });
     // a segment of a coding this version does not know
     let mut q = p.clone();
-    let h = parse_seg_hdr(&q.segs[1]).unwrap();
+    let h = parse_seg_hdr(&q.segs[1])?;
     q.segs[1][h.body_off - 1] = 9;
     refused(&q.build(), "unknown coding", |e| {
         matches!(e, Error::Format(_))
@@ -108,18 +116,19 @@ fn structure_rules() {
     ] {
         assert!(readers_agree(b, what).is_none(), "{what}");
     }
+    Ok(())
 }
 
 /// Declared sizes never reach the allocator unbounded (robustness 3, 4,
 /// 12; correctness F4): each is refused by a format rule or the budget.
 #[test]
-fn declared_sizes() {
-    let (_, c) = base(0);
-    let p = parts(&c);
+fn declared_sizes() -> anyhow::Result<()> {
+    let (_, c) = base(0)?;
+    let p = parts(&c)?;
     // a 30-byte segment that claims 4 GiB: DEFLATE coding, raw_len
     // 2^32 - 2^16
     let mut q = p.clone();
-    let mut b = seg_hdr_bytes(MAX_SEG_RAW, 0, 0, C_DEFLATE);
+    let mut b = seg_hdr_bytes(u32::try_from(MAX_SEG_RAW)?, 0, 0, C_DEFLATE);
     b.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
     q.header.size = MAX_SEG_RAW;
     q.segs = vec![b];
@@ -144,38 +153,38 @@ fn declared_sizes() {
     b.extend_from_slice(&p.segs[0]);
     refused(&b, "segment length", corrupt);
     // the caller's memory budget
-    let (demo, c) = base(0);
+    let (demo, c) = base(0)?;
     let small = mvdz::Limits {
         memory: demo.len() as u64 / 2,
         ..Default::default()
     };
-    assert!(matches!(
-        mvdz::decompress_with(&c, 1, &small),
-        Err(Error::Limit(_))
-    ));
+    assert_matches!(mvdz::decompress_with(&c, 1, &small), Err(Error::Limit(_)));
     assert!(
         mvdz::Reader::new(Cursor::new(&c), 1, &small)
             .and_then(|mut r| r.read_demo(&mut [0; 10]))
             .is_err()
     );
+    Ok(())
 }
 
 /// The reviewer's amplifying v2 model headers (robustness 5: a 2.3 KB
 /// header took 1.3 GB and 3.6 s) in the models block: refused at once by
 /// the model rules (decisions <= 128 per header byte + 1024).
 #[test]
-fn model_amplification() {
-    let Some(dir) = test_data("poc") else { return };
+fn model_amplification() -> anyhow::Result<()> {
+    let Some(dir) = test_data("poc") else {
+        return Ok(());
+    };
     let demo = synthetic(&[], false);
-    let c = compress(&demo, &cfg(0)).unwrap();
-    let p = parts(&c);
+    let c = compress(&demo, &cfg(0))?;
+    let p = parts(&c)?;
     for name in ["v2model_1000.bin", "v2model_16000.bin", "v2model_65535.bin"] {
         // a model and a rANS stream body: header length, header, rANS data
         let Ok(st) = std::fs::read(dir.join(name)) else {
             continue;
         };
         let mut r = mvdz::util::Rd::new(&st);
-        let hdr = r.bytes().unwrap();
+        let hdr = r.bytes().context("the model's header")?;
         let rest = r.rest();
         // the models block: one model, the time stream's
         let mut models = Vec::new();
@@ -191,8 +200,8 @@ fn model_amplification() {
         }
         body.extend_from_slice(rest);
         let mut b = seg_hdr_bytes(
-            demo.len() as u64,
-            p.header.duration_ms,
+            u32::try_from(demo.len())?,
+            u32::try_from(p.header.duration_ms)?,
             mvdz::util::crc32(&demo),
             C_TRANSFORM,
         );
@@ -202,20 +211,21 @@ fn model_amplification() {
         q.segs = vec![b];
         refused(&q.build(), name, |e| *e == Error::Corrupt("model"));
     }
+    Ok(())
 }
 
 /// Mutated files: every reader decides the same way (spec review items
 /// 2-4, robustness 13).
 #[test]
-fn mutations_agree() {
+fn mutations_agree() -> anyhow::Result<()> {
     let mut rng = Rng(0x5eed);
     for seg in [0, 300] {
-        let (_, c) = base(seg);
+        let (_, c) = base(seg)?;
         for _ in 0..150 {
             let mut b = c.clone();
             match rng.below(3) {
                 0 => {
-                    for _ in 0..1 + rng.below(3) {
+                    for _ in 0..=rng.below(3) {
                         let k = rng.below(b.len());
                         b[k] ^= 1 << rng.below(8);
                     }
@@ -229,6 +239,7 @@ fn mutations_agree() {
             readers_agree(&b, "mutation");
         }
     }
+    Ok(())
 }
 
 /// A model header (FORMAT.md §8.3) of `n` own tables and the fallback,
@@ -246,14 +257,14 @@ fn wide_model(n: u32) -> Vec<u8> {
     };
     im.put(&mut e, NQC, 256);
     im.put(&mut e, NQC + 1, n);
-    let fb: Vec<u32> = (0..256).map(|_| q()).collect();
+    let fb: Vec<u32> = Vec::from_fn(256, |_| q());
     let mut prev = 0;
     for &v in &fb {
         im.put(&mut e, 17 * 17 + prev.min(16) as usize, v);
         prev = v;
     }
     for t in 0..n {
-        im.put(&mut e, NQC + 2, (t > 0) as u32);
+        im.put(&mut e, NQC + 2, u32::from(t > 0));
         let mut prev = 0u32;
         for &f in &fb {
             let v = q();
@@ -268,10 +279,10 @@ fn wide_model(n: u32) -> Vec<u8> {
 /// opened, under the reader's budget, which refuses them, for the file
 /// information as for a decode. With room for them the file opens, quickly.
 #[test]
-fn large_tables() {
+fn large_tables() -> anyhow::Result<()> {
     let demo = usercmd_demo();
-    let c = compress(&demo, &cfg(8192)).unwrap();
-    let mut p = parts(&c);
+    let c = compress(&demo, &cfg(8192))?;
+    let mut p = parts(&c)?;
     assert!(!p.models.is_empty());
     let m = wide_model(512);
     let mut t = Vec::new();
@@ -294,13 +305,14 @@ fn large_tables() {
     };
     let e = mvdz::read_info_with(Cursor::new(&b), &lim).err();
     assert_eq!(e, Some(Error::Limit("memory")));
-    let e = mvdz::decompress_with(&b, 1, &lim).unwrap_err();
-    assert_eq!(e, Error::Limit("memory"));
+    let e = mvdz::decompress_with(&b, 1, &lim).err();
+    assert_eq!(e, Some(Error::Limit("memory")));
     let t0 = Instant::now();
-    mvdz::read_info_with(Cursor::new(&b), &mvdz::Limits::default()).unwrap();
+    mvdz::read_info_with(Cursor::new(&b), &mvdz::Limits::default())?;
     assert!(
         t0.elapsed().as_secs_f64() < 10.0,
         "reading the models took {:?}",
         t0.elapsed()
     );
+    Ok(())
 }

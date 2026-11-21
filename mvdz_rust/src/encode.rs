@@ -5,7 +5,10 @@ use crate::budget::Budget;
 use crate::coder::rans::Shared;
 use crate::decode::{DemoCheck, SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
-use crate::format::*;
+use crate::format::{
+    C_DEFLATE, C_TRANSFORM, Header, MAX_SEGMENTS, models_block, seg_hdr_bytes, seg_ratio_ok,
+    segment_block,
+};
 use crate::proto::{Proto, frame_len};
 use crate::segment::{
     self, DEFLATE_LEVEL, Nums, SEGMENT, StreamStat, Walked, cut_points, frame_scan,
@@ -25,7 +28,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             threads: 1,
             verify: true,
         }
@@ -43,14 +46,16 @@ pub struct Info {
     pub streams: Vec<StreamStat>,
 }
 
-/// True if `b` starts like an MVD demo: a whole first frame that carries
+/// True if `b` starts like an MVD demo.
+///
+/// That is a whole first frame that carries
 /// messages (a non-empty `dem_read`/`dem_all`/... payload, or hidden or
 /// multi-target data; not a bare `dem_set`), and either its messages parse
 /// without an escape or, if that first frame is damaged, the next 16
 /// frames are whole too. A frame's length field must fit the input, so
 /// other files almost never frame: text, gzip, PNG, TIFF and random bytes
 /// fail on the first frame.
-pub fn starts_like_mvd(b: &[u8]) -> bool {
+pub(crate) fn starts_like_mvd(b: &[u8]) -> bool {
     let bad = |b: &[u8], p: usize| b.len() >= p + 2 && matches!(b[p + 1] & 7, 0 | 7);
     if b.len() < 2 {
         return false;
@@ -128,7 +133,8 @@ fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize
             .filter_map(|(w, n)| Some((w.as_ref()?, n.as_ref()?)))
             .collect();
         trainer.add(&segs, threads);
-        t.walked.extend(walks.iter().map(|w| w.is_some()));
+        t.walked
+            .extend(walks.iter().map(std::option::Option::is_some));
     }
     t.shared = trainer.models(threads);
     t
@@ -137,8 +143,8 @@ fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize
 /// The body of a segment coded without the transform: the whole segment
 /// as one raw DEFLATE stream. If the best compression breaks the ratio
 /// limit, the stream is written as stored blocks instead.
-pub fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
-    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc32(s), C_DEFLATE);
+pub(crate) fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
+    let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s), C_DEFLATE);
     let mut z = crate::deflate::compress(s, DEFLATE_LEVEL);
     if !seg_ratio_ok(s.len() as u64, (b.len() + z.len()) as u64) {
         z = crate::deflate::compress(s, 0);
@@ -150,7 +156,7 @@ pub fn raw_body(s: &[u8], dur_ms: u64) -> Vec<u8> {
 /// The body of a walked segment with numeric values `nums`, or None if one
 /// of its streams has no model in `shared` (the file's models) or it breaks
 /// the ratio limit.
-pub fn transform_body(
+pub(crate) fn transform_body(
     s: &[u8],
     wk: &Walked,
     nums: &Nums,
@@ -159,7 +165,7 @@ pub fn transform_body(
     st: &mut Vec<StreamStat>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
-    let mut b = seg_hdr_bytes(s.len() as u64, dur_ms, crc32(s), C_TRANSFORM);
+    let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s), C_TRANSFORM);
     b.extend_from_slice(&segment::encode(wk, nums, threads, st, shared)?);
     seg_ratio_ok(s.len() as u64, b.len() as u64).then_some(b)
 }
@@ -202,9 +208,6 @@ fn compress_inner(
     if nseg > MAX_SEGMENTS {
         return Err(Error::Invalid("too many segments"));
     }
-    if cuts.windows(2).any(|w| (w[1] - w[0]) as u64 > MAX_SEG_RAW) {
-        return Err(Error::Invalid("segment over 4 GiB"));
-    }
     let (outer, inner) = if nseg >= threads {
         (threads, 1)
     } else {
@@ -235,9 +238,6 @@ fn compress_inner(
     } else {
         (train(), hashes())
     };
-    if t.durs.iter().any(|&d| d > u32::MAX as u64) {
-        return Err(Error::Invalid("segment over 2^32 ms"));
-    }
     let header = Header {
         size: src.len() as u64,
         duration_ms: t.durs.iter().sum(),
@@ -264,7 +264,7 @@ fn compress_inner(
         }
         Body::raw(s, t.durs[i])
     });
-    let (shared, durs) = (t.shared, t.durs);
+    let shared = t.shared;
     for _round in 0..2 {
         let (out, info) = assemble(&header, &shared, &bodies);
         if !cfg.verify {
@@ -276,7 +276,7 @@ fn compress_inner(
             Some(b) => {
                 for i in 0..nseg {
                     if b[i] && !bodies[i].fallback {
-                        bodies[i] = Body::raw(&src[cuts[i]..cuts[i + 1]], durs[i]);
+                        bodies[i] = Body::raw(&src[cuts[i]..cuts[i + 1]], t.durs[i]);
                     }
                 }
             }
@@ -300,8 +300,8 @@ struct Body {
 }
 
 impl Body {
-    fn raw(s: &[u8], dur_ms: u64) -> Body {
-        Body {
+    fn raw(s: &[u8], dur_ms: u64) -> Self {
+        Self {
             bytes: raw_body(s, dur_ms),
             fallback: true,
             escaped: 0,
@@ -332,18 +332,19 @@ fn assemble(header: &Header, shared: &[Option<Shared>], bodies: &[Body]) -> (Vec
     };
     for b in bodies {
         segment_block(&mut out, &b.bytes);
-        info.fallback_segments += b.fallback as usize;
+        info.fallback_segments += usize::from(b.fallback);
         info.escaped += b.escaped;
         info.streams.extend(b.streams.iter().cloned());
     }
     (out, info)
 }
 
-/// Decodes `file` and compares it with `src`, segment by segment (the
-/// decoded demo is never held whole): None if the container does not
+/// Decodes `file` and compares it with `src`, segment by segment.
+///
+/// The decoded demo is never held whole. None if the container does not
 /// parse, else per segment whether it fails. Every segment passing means
 /// the whole file decodes (the whole-file checks are run too).
-pub fn failing_segments(
+pub(crate) fn failing_segments(
     file: &[u8],
     src: &[u8],
     cuts: &[usize],
@@ -364,12 +365,12 @@ pub fn failing_segments(
         let (s, h) = &lay.segs[i];
         let want = &src[cuts[i]..cuts[i + 1]];
         let mut dst = vec![0u8; want.len()];
-        let body = &file[s.body_off() as usize..s.end() as usize];
+        let body = file.get(s.body_range()?)?;
         decode_segment(&lay, body, h, &mut dst, inner, &budget)
             .ok()
             .filter(|_| dst == want)
     });
-    let bad: Vec<bool> = timings.iter().map(|t| t.is_none()).collect();
+    let bad: Vec<bool> = timings.iter().map(std::option::Option::is_none).collect();
     if bad.iter().any(|&x| x) {
         return Some(bad);
     }

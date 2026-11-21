@@ -1,31 +1,42 @@
-//! mvdz: lossless, format-aware compression of QuakeWorld MVD demos.
+//! mvdz: lossless, format-aware compression of `QuakeWorld` MVD demos.
 //!
 //! One file format (FORMAT.md): a fixed header, the shared models and
 //! segments of 256 KiB that hold the demo coded by a structural transform
 //! (static rANS; raw DEFLATE for what the transform does not model).
 //!
 //! ```no_run
-//! let demo = std::fs::read("game.mvd").unwrap();
-//! let packed = mvdz::compress(&demo, &mvdz::Config::default()).unwrap();
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let demo = std::fs::read("game.mvd")?;
+//! let packed = mvdz::compress(&demo, &mvdz::Config::default())?;
 //! assert!(mvdz::is_mvdz(&packed));
-//! assert_eq!(mvdz::decompress(&packed, 1).unwrap(), demo);
+//! assert_eq!(mvdz::decompress(&packed, 1)?, demo);
+//! # Ok(())
+//! # }
 //! ```
 
-pub mod api;
-pub mod budget;
+mod api;
+mod budget;
+#[doc(hidden)]
 pub mod coder;
-pub mod decode;
+mod decode;
+#[doc(hidden)]
 pub mod deflate;
+#[doc(hidden)]
 pub mod encode;
-pub mod error;
+mod error;
+#[doc(hidden)]
 pub mod format;
-pub mod numeric;
+mod numeric;
+#[doc(hidden)]
 pub mod proto;
+#[doc(hidden)]
 pub mod segment;
-pub mod stream;
+mod stream;
+#[doc(hidden)]
 pub mod streams;
+#[doc(hidden)]
 pub mod util;
-pub mod walk;
+mod walk;
 
 pub use api::{
     Config, FileInfo, Info, check_demo, compress, compress_info, decompress, decompress_stream,

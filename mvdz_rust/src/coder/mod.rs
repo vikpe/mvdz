@@ -1,4 +1,6 @@
-//! Coders. A structural or numeric stream is static rANS with the stream's
+//! Coders.
+//!
+//! A structural or numeric stream is static rANS with the stream's
 //! model in the file's models block: the stream's kind decides its coder,
 //! and no stream carries a model or a coder id of its own. The blob streams
 //! of a segment are one DEFLATE stream (`segment.rs`).

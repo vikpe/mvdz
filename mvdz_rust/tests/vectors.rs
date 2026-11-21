@@ -9,50 +9,45 @@
 //! `MVDZ_WRITE_VECTORS=1` it writes the files and the manifest instead.
 
 mod common;
+use anyhow::Context as _;
 use common::*;
 use mvdz::format::*;
 use mvdz::util::put_uv;
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 
 fn dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
 }
 
-fn manifest() -> Vec<Vec<String>> {
-    std::fs::read_to_string(dir().join("MANIFEST.tsv"))
-        .unwrap()
+fn manifest() -> anyhow::Result<Vec<Vec<String>>> {
+    Ok(std::fs::read_to_string(dir().join("MANIFEST.tsv"))?
         .lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|l| l.split('\t').map(String::from).collect())
-        .collect()
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+        .collect())
 }
 
 #[test]
-fn vectors_decode() {
-    let m = manifest();
+fn vectors_decode() -> anyhow::Result<()> {
+    let m = manifest()?;
     assert!(m.len() >= 30, "the vector set is committed");
     for row in m {
         let (file, expect) = (&row[0], &row[1]);
-        let b = std::fs::read(dir().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let b = std::fs::read(dir().join(file)).with_context(|| file.clone())?;
         let got = readers_agree(&b, file);
         if let Some(err) = expect.strip_prefix("error: ") {
             assert!(got.is_none(), "{file}: accepted");
-            assert_eq!(
-                mvdz::decompress(&b, 1).unwrap_err().to_string(),
-                err,
-                "{file}: error"
-            );
+            let refusal = mvdz::decompress(&b, 1).err().map(|e| e.to_string());
+            assert_eq!(refusal.as_deref(), Some(err), "{file}: error");
         } else {
             let d = got
-                .unwrap_or_else(|| panic!("{file}: refused: {:?}", mvdz::decompress(&b, 1).err()));
+                .with_context(|| format!("{file}: refused: {:?}", mvdz::decompress(&b, 1).err()))?;
             assert_eq!(&hex(&Sha256::digest(&d)), expect, "{file}: decoded SHA-256");
             assert_eq!(d.len().to_string(), row[2], "{file}: decoded size");
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- the vector set
@@ -112,7 +107,7 @@ fn amplifying_model(n: u32) -> Vec<u8> {
         prev = 1;
     }
     for t in 0..n {
-        im.put(&mut e, NQC + 2, (t > 0) as u32);
+        im.put(&mut e, NQC + 2, u32::from(t > 0));
         let mut prev = 0usize;
         for _ in 0..256 {
             im.put(&mut e, 17 + prev.min(16), 1);
@@ -134,7 +129,10 @@ fn amplifying_model(n: u32) -> Vec<u8> {
 /// Returns the models block's body and the transform body. Each structural
 /// stream is coded with a model of its own symbols (so few that the model
 /// is its fallback table alone: the contexts do not matter).
-fn transform_body(lazy: &[(usize, &[u8])], blobs: &[(usize, &[u8])]) -> (Vec<u8>, Vec<u8>) {
+fn transform_body(
+    lazy: &[(usize, &[u8])],
+    blobs: &[(usize, &[u8])],
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     use mvdz::coder::rans;
     let mut models: Vec<Option<rans::Shared>> = Vec::new();
     let mut ids = Vec::new();
@@ -143,7 +141,7 @@ fn transform_body(lazy: &[(usize, &[u8])], blobs: &[(usize, &[u8])]) -> (Vec<u8>
         let ctxs = vec![0u16; syms.len()];
         let mut t = rans::Tally::new(256);
         t.add(syms, &ctxs);
-        let m = t.shared().unwrap();
+        let m = t.shared().context("a model")?;
         bodies.push(rans::encode_bytes(syms, &ctxs, &m));
         models.resize_with(models.len().max(id + 1), || None);
         models[*id] = Some(m);
@@ -181,16 +179,21 @@ fn transform_body(lazy: &[(usize, &[u8])], blobs: &[(usize, &[u8])]) -> (Vec<u8>
         body.extend_from_slice(b);
     }
     body.extend_from_slice(&z);
-    (mvdz::segment::tables_body(&models, &ids), body)
+    Ok((mvdz::segment::tables_body(&models, &ids), body))
 }
 
 /// The file of `demo` as one transform segment with these models and body.
-fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> Vec<u8> {
+fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
     let (_, ms, _) = mvdz::segment::frame_scan(demo);
     let crc = mvdz::util::crc32(demo);
-    let mut b = seg_hdr_bytes(demo.len() as u64, ms, crc, C_TRANSFORM);
+    let mut b = seg_hdr_bytes(
+        u32::try_from(demo.len())?,
+        u32::try_from(ms)?,
+        crc,
+        C_TRANSFORM,
+    );
     b.extend_from_slice(body);
-    Parts {
+    Ok(Parts {
         header: Header {
             size: demo.len() as u64,
             duration_ms: ms,
@@ -200,17 +203,17 @@ fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> Vec<u8> {
         models: models.clone(),
         segs: vec![b],
     }
-    .build()
+    .build())
 }
 
 /// Hostile files: refused by every reader.
-fn hostile(v: &mut Vec<Vector>) {
+fn hostile(v: &mut Vec<Vector>) -> anyhow::Result<()> {
     let mut add = |name: &str, b: Vec<u8>, how: &str| {
-        v.push((format!("hostile-{name}.mvdz"), b, None, how.to_string()))
+        v.push((format!("hostile-{name}.mvdz"), b, None, how.to_string()));
     };
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let base = compress(&demo, &cfg(300)).unwrap();
-    let p = parts(&base);
+    let base = compress(&demo, &cfg(300))?;
+    let p = parts(&base)?;
     assert!(p.segs.len() > 3);
     add(
         "base-cut",
@@ -256,7 +259,7 @@ fn hostile(v: &mut Vec<Vector>) {
     let mut q = p.clone();
     q.segs.insert(1, p.segs[1].clone());
     add("repeated-segment", q.build(), "the second segment twice");
-    let h = parse_seg_hdr(&p.segs[1]).unwrap();
+    let h = parse_seg_hdr(&p.segs[1])?;
     let mut q = p.clone();
     q.segs[1][h.body_off - 2] ^= 0x10;
     add(
@@ -272,7 +275,7 @@ fn hostile(v: &mut Vec<Vector>) {
         .insert(1, seg_hdr_bytes(0, 0, mvdz::util::crc32(&[]), C_DEFLATE));
     add("segment-empty", q.build(), "an empty segment");
     let mut q = p.clone();
-    let mut b = seg_hdr_bytes(MAX_SEG_RAW, 0, 0, C_DEFLATE);
+    let mut b = seg_hdr_bytes(u32::try_from(MAX_SEG_RAW)?, 0, 0, C_DEFLATE);
     b.extend_from_slice(&mvdz::deflate::compress(&[0u8; 10], 9));
     q.header.size = MAX_SEG_RAW;
     q.segs = vec![b];
@@ -286,7 +289,12 @@ fn hostile(v: &mut Vec<Vector>) {
     let plain = synthetic(&[], false);
     let (_, ms, _) = mvdz::segment::frame_scan(&plain);
     let crc = mvdz::util::crc32(&plain);
-    let mut b = seg_hdr_bytes(plain.len() as u64, ms + 1, crc, C_DEFLATE);
+    let mut b = seg_hdr_bytes(
+        u32::try_from(plain.len())?,
+        u32::try_from(ms + 1)?,
+        crc,
+        C_DEFLATE,
+    );
     b.extend_from_slice(&mvdz::deflate::compress(&plain, 9));
     add(
         "segment-duration",
@@ -342,30 +350,30 @@ fn hostile(v: &mut Vec<Vector>) {
         if let Some(m) = misc {
             blobs.push((HIDMISC, m));
         }
-        one_segment(&one, &transform_body(&lazy, &blobs))
+        one_segment(&one, &transform_body(&lazy, &blobs)?)
     };
     add(
         "ucmd-grid",
-        ucmd_seg(Some(&[0, 0, 13, 9]), None),
+        ucmd_seg(Some(&[0, 0, 13, 9]), None)?,
         "a usercmd block whose grid flags symbol is 9",
     );
     let misc = usercmd_block(0, 0, 13, [0.0; 3], [0; 3], [0, 0]);
     add(
         "ucmd-misc",
-        ucmd_seg(None, Some(&misc)),
+        ucmd_seg(None, Some(&misc))?,
         "a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream",
     );
-    tables(&mut add);
+    tables(&mut add)
 }
 
 /// Hostile models blocks (FORMAT.md §2.6, §8.4), from the usercmd demo at
 /// -s 8K.
-fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
+fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let uc = usercmd_demo();
-    let tc = compress(&uc, &cfg(8192)).unwrap();
-    let p = parts(&tc);
+    let tc = compress(&uc, &cfg(8192))?;
+    let p = parts(&tc)?;
     assert!(!p.models.is_empty(), "a segmented normal file has models");
-    let ents = tables_entries(&p.models);
+    let ents = tables_entries(&p.models)?;
     let with = |e: &[(usize, Vec<u8>)]| {
         let mut q = p.clone();
         q.models = tables_body(e);
@@ -399,11 +407,14 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
         with(&e),
         "an entry of the models block repeated (the same stream id twice)",
     );
-    let lazy = ents.iter().find(|e| mvdz::streams::is_lazy(e.0)).unwrap();
+    let lazy = ents
+        .iter()
+        .find(|e| mvdz::streams::is_lazy(e.0))
+        .context("a structural stream's model")?;
     let num = ents
         .iter()
         .position(|e| mvdz::streams::is_num(e.0))
-        .unwrap();
+        .context("a numeric stream's model")?;
     let mut e = ents.clone();
     e.push((mvdz::streams::TEXT, lazy.1.clone()));
     add(
@@ -412,7 +423,10 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
         "a model for a blob stream (text)",
     );
     let mut e = ents.clone();
-    let at = e.iter().position(|x| x.0 > mvdz::streams::PI_NUM).unwrap();
+    let at = e
+        .iter()
+        .position(|x| x.0 > mvdz::streams::PI_NUM)
+        .context("a model after pi.num")?;
     e.insert(at, (mvdz::streams::PI_NUM, lazy.1.clone()));
     add(
         "tables-plain-id",
@@ -466,21 +480,26 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) {
     );
     let amp = amplifying_model(2000);
     let mut e = ents.clone();
-    e[0].1 = mvdz::util::Rd::new(&amp).bytes().unwrap().to_vec();
+    e[0].1 = mvdz::util::Rd::new(&amp)
+        .bytes()
+        .context("the model's header")?
+        .to_vec();
     add(
         "tables-decisions",
         with(&e),
         "a model breaking the decision limit (rule M2)",
     );
+    Ok(())
 }
 
 /// The entries (stream id, model) of a models block.
-fn tables_entries(b: &[u8]) -> Vec<(usize, Vec<u8>)> {
+fn tables_entries(b: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
     let mut r = mvdz::util::Rd::new(b);
-    let n = r.uz().unwrap();
+    let n = r.uz().context("the entry count")?;
     (0..n)
-        .map(|_| (r.uz().unwrap(), r.bytes().unwrap().to_vec()))
-        .collect()
+        .map(|_| Some((r.uz()?, r.bytes()?.to_vec())))
+        .collect::<Option<_>>()
+        .context("a models entry")
 }
 
 /// A models block from its entries.
@@ -498,40 +517,48 @@ fn tables_body(e: &[(usize, Vec<u8>)]) -> Vec<u8> {
 /// Every hostile vector is refused by every reader (they are built from
 /// synthetic demos, so this runs without the demo cache).
 #[test]
-fn hostile_vectors_are_refused() {
+fn hostile_vectors_are_refused() -> anyhow::Result<()> {
     let mut v = Vec::new();
-    hostile(&mut v);
+    hostile(&mut v)?;
     assert!(v.len() > 30);
     for (name, b, _, _) in &v {
         assert!(readers_agree(b, name).is_none(), "{name}: accepted");
     }
+    Ok(())
 }
 
-fn all_vectors() -> Option<Vec<Vector>> {
-    let duel = duel()?;
-    let mvd1 = std::fs::read(test_data("gen")?.join("float_mvd1.mvd")).ok()?;
-    let fte = sample("3fdd80182a39f773710e4468c509106926450a296c0c9e4a9d4d821f4a783ddb")?;
+/// Every vector; None without the demos they are made from.
+fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
+    let sources = || {
+        let duel = duel()?;
+        let mvd1 = std::fs::read(test_data("gen")?.join("float_mvd1.mvd")).ok()?;
+        let fte = sample("3fdd80182a39f773710e4468c509106926450a296c0c9e4a9d4d821f4a783ddb")?;
+        Some((duel, mvd1, fte))
+    };
+    let Some((duel, mvd1, fte)) = sources() else {
+        return Ok(None);
+    };
     let fte = fte[..300_000].to_vec();
     let mut v: Vec<Vector> = Vec::new();
     let mut add = |name: &str, b: Vec<u8>, d: &[u8], how: &str| {
-        v.push((name.to_string(), b, Some(d.to_vec()), how.to_string()))
+        v.push((name.to_string(), b, Some(d.to_vec()), how.to_string()));
     };
     // without the input check: some vectors hold non-demo input
-    let one = |d: &[u8], c: Cfg| unchecked(d, &c).unwrap().0;
+    let one = |d: &[u8], c: Cfg| anyhow::Ok(unchecked(d, &c)?.0);
     let src = "duel = sample 3ff1f82b...8d92";
     add(
         "duel.normal.mvdz",
-        one(&duel, cfg(0)),
+        one(&duel, cfg(0))?,
         &duel,
         &format!("{src}; compress"),
     );
     add(
         "duel.normal.seg64k.mvdz",
-        one(&duel, cfg(65536)),
+        one(&duel, cfg(65536))?,
         &duel,
         &format!("{src}; compress -s 64K"),
     );
-    let fb = untransformed(&duel, &cfg(65536));
+    let fb = untransformed(&duel, &cfg(65536))?;
     add(
         "duel.untransformed.mvdz",
         fb,
@@ -540,110 +567,108 @@ fn all_vectors() -> Option<Vec<Vector>> {
     );
     add(
         "duel-truncated.normal.mvdz",
-        one(&duel[..150_000], cfg(0)),
+        one(&duel[..150_000], cfg(0))?,
         &duel[..150_000],
         "the first 150000 bytes of duel (ends inside a frame)",
     );
     let mut rng = Rng(0x1234);
-    let random: Vec<u8> = (0..3000).map(|_| rng.next() as u8).collect();
+    let random: Vec<u8> = Vec::from_fn(3000, |_| rng.next() as u8);
     add(
         "float-mvd1.normal.mvdz",
-        one(&mvd1, cfg(0)),
+        one(&mvd1, cfg(0))?,
         &mvd1,
         "rev-correct gen1/float_mvd1.mvd (MVD1 float coordinates, 3 escapes)",
     );
     add(
         "float-fte.normal.mvdz",
-        one(&fte, cfg(0)),
+        one(&fte, cfg(0))?,
         &fte,
         "the first 300000 bytes of sample 3fdd8018 (FTE float coordinates)",
     );
     let esc = escapes();
     add(
         "escapes.normal.mvdz",
-        one(&esc, cfg(0)),
+        one(&esc, cfg(0))?,
         &esc,
         "synthetic demo with unknown commands and lying hidden blocks",
     );
     let md = multi_demoinfo();
     add(
         "demoinfo-multi.normal.mvdz",
-        one(&md, cfg(1000)),
+        one(&md, cfg(1000))?,
         &md,
         "synthetic demo carrying a 3-block KTX demoinfo twice; segment 1000",
     );
     add(
         "random.normal.mvdz",
-        one(&random, cfg(0)),
+        one(&random, cfg(0))?,
         &random,
         "3000 random bytes (no frame: all tail)",
     );
-    let rs = untransformed(&random, &cfg(0));
+    let rs = untransformed(&random, &cfg(0))?;
     add(
         "random.deflate.mvdz",
         rs,
         &random,
         "the same, untransformed: one DEFLATE segment",
     );
-    add("empty.normal.mvdz", one(b"", cfg(0)), b"", "an empty demo");
+    add("empty.normal.mvdz", one(b"", cfg(0))?, b"", "an empty demo");
     let uc = usercmd_demo();
     add(
         "usercmd.normal.mvdz",
-        one(&uc, cfg(0)),
+        one(&uc, cfg(0))?,
         &uc,
         "synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)",
     );
     add(
         "usercmd.normal.seg8k.mvdz",
-        one(&uc, cfg(8192)),
+        one(&uc, cfg(8192))?,
         &uc,
         "the same, -s 8K",
     );
-    hostile(&mut v);
-    Some(v)
+    hostile(&mut v)?;
+    Ok(Some(v))
 }
 
 #[test]
-fn vectors_reproduce() {
-    let Some(v) = all_vectors() else {
+fn vectors_reproduce() -> anyhow::Result<()> {
+    let Some(v) = all_vectors()? else {
         eprintln!("vector sources not cached, skipping");
-        return;
+        return Ok(());
     };
     if std::env::var_os("MVDZ_WRITE_VECTORS").is_some() {
         let _ = std::fs::create_dir_all(dir());
-        for f in std::fs::read_dir(dir()).unwrap() {
-            let p = f.unwrap().path();
+        for f in std::fs::read_dir(dir())? {
+            let p = f?.path();
             if p.extension().is_some_and(|x| x == "mvdz") {
-                std::fs::remove_file(p).unwrap();
+                std::fs::remove_file(p)?;
             }
         }
         let mut m = String::from(
             "# file\tdecoded_sha256 or \"error: <message>\"\tdecoded_size\thow it was made\n# Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (format, corrupt, limit; FORMAT.md 9), in its own words.\n",
         );
         for (name, b, d, how) in &v {
-            std::fs::write(dir().join(name), b).unwrap();
-            match d {
-                Some(d) => {
-                    m += &format!("{name}\t{}\t{}\t{how}\n", hex(&Sha256::digest(d)), d.len())
-                }
-                None => {
-                    m += &format!(
-                        "{name}\terror: {}\t-\t{how}\n",
-                        mvdz::decompress(b, 1).unwrap_err()
-                    )
-                }
+            std::fs::write(dir().join(name), b)?;
+            if let Some(d) = d {
+                writeln!(m, "{name}\t{}\t{}\t{how}", hex(&Sha256::digest(d)), d.len())?;
+            } else {
+                let refusal = mvdz::decompress(b, 1)
+                    .err()
+                    .context("a hostile vector decodes")?;
+                writeln!(m, "{name}\terror: {refusal}\t-\t{how}")?;
             }
         }
-        std::fs::write(dir().join("MANIFEST.tsv"), m).unwrap();
-        return;
+        std::fs::write(dir().join("MANIFEST.tsv"), m)?;
+        return Ok(());
     }
-    let rows = manifest();
+    let rows = manifest()?;
     assert_eq!(rows.len(), v.len(), "the manifest lists every vector");
     for (name, b, _, _) in &v {
-        let committed = std::fs::read(dir().join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let committed = std::fs::read(dir().join(name)).with_context(|| name.clone())?;
         assert!(
             committed == *b,
             "{name}: the encoder no longer reproduces the committed vector"
         );
     }
+    Ok(())
 }

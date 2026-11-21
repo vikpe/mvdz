@@ -2,11 +2,10 @@
 name = "mvdz"
 version = "1.0.0-rc.4"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.100"
 license = "MIT"
 description = "Lossless, format-aware compression of QuakeWorld MVD demos"
 repository = "https://github.com/galfthan/mvdz"
-homepage = "https://github.com/galfthan/mvdz"
 documentation = "https://github.com/galfthan/mvdz"
 readme = "../README.md"
 keywords = ["quakeworld", "mvd", "demo", "compression", "rans"]
@@ -23,6 +22,7 @@ miniz_oxide = "0.9"
 
 # the tests parse the JSON of `mvdz info`
 [dev-dependencies]
+anyhow = "1"
 serde_json = "1"
 
 [profile.release]
@@ -44,18 +44,43 @@ debug = 0
 # wasm32 and other targets
 scalar = []
 
-# Style lints the code deliberately does not follow: the C ABI's safety
-# contract is documented once, in include/mvdz.h; the hot loops (walker,
-# rANS, numeric groups, CRC) index several parallel arrays and keep their
-# written form, which was benchmarked.
+[lints.rust]
+# `pub` only where something outside the crate names it
+unreachable_pub = "warn"
+
 [lints.clippy]
-missing_safety_doc = "allow"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Stylistic, not bugs
+assert_is_empty = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
+missing_const_for_fn = "allow"
+option_if_let_else = "allow"
+redundant_pub_crate = "allow"
+
+# Narrowing casts are bounded, not lossy: positions and lengths by the
+# 1 MiB segment and 16 MiB models caps, small values by a clamp or range
+# just before. Only the entropy coders and varints drop high bits, on purpose.
+cast_possible_truncation = "allow"
+
+# The hot loops (walker, rANS, numeric groups) keep their written form,
+# which was benchmarked: parallel arrays indexed by one counter, forced
+# inlining
 needless_range_loop = "allow"
-collapsible_if = "allow"
-too_many_arguments = "allow"
-type_complexity = "allow"
-large_enum_variant = "allow"
-len_without_is_empty = "allow"
-precedence = "allow"
-manual_div_ceil = "allow"
-chunks_exact_to_as_chunks = "allow"
+inline_always = "allow"
+
+# Not followed yet: each is removed with the step that fixes its findings
+many_single_char_names = "allow"       # 21, naming
+
+# No panics
+exit = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+unwrap_used = "deny"

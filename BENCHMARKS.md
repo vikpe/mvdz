@@ -378,7 +378,7 @@ scripts/bench_cli.sh /tmp/bench list.txt
 cargo run --release --example sweep -- -s 1M demos/*.mvd
 
 # the tests, with real demos where they help (see README, Tests)
-MVDZ_TEST_DATA=/path/to/testdata cargo test --release
+MVDZ_TEST_DATA=/path/to/testdata cargo nextest run --release
 ```
 
 For the confidence intervals, draw the sample at random from the whole

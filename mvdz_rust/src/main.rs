@@ -1,7 +1,12 @@
+// The tool reports errors by exit status from where they occur.
+#![allow(clippy::exit)]
+
+use mvdz::Config;
 use mvdz::Limits;
-use mvdz::api::{self, Config};
+use mvdz::util::approx_f64;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::time::Instant;
 
@@ -39,6 +44,10 @@ independently decodable segments of 256 KiB."
     std::process::exit(2)
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one field per command-line flag"
+)]
 struct Args {
     threads: usize,
     reps: usize,
@@ -69,9 +78,7 @@ fn size(s: &str) -> u64 {
 
 fn parse(args: &[String]) -> Args {
     let mut a = Args {
-        threads: std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
+        threads: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         reps: 3,
         max_memory: None,
         streams: None,
@@ -93,7 +100,7 @@ fn parse(args: &[String]) -> Args {
         };
         match s.as_str() {
             "-j" | "--threads" => {
-                a.threads = mvdz::util::threads(val().parse().unwrap_or_else(|_| usage()))
+                a.threads = mvdz::util::threads(val().parse().unwrap_or_else(|_| usage()));
             }
             "-r" | "--reps" => a.reps = val().parse().unwrap_or_else(|_| usage()),
             "--max-memory" => a.max_memory = Some(size(&val())),
@@ -184,7 +191,7 @@ fn try_write_with(
                 .map_err(|e| e.to_string())?;
             fill(&mut f).map_err(|e| e.to_string())
         }
-        _ => api::write_file_atomic_with(path, |f| fill(f)).map_err(|e| e.to_string()),
+        _ => mvdz::write_file_atomic_with(path, |f| fill(f)).map_err(|e| e.to_string()),
     }
 }
 
@@ -297,7 +304,7 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
         // store whatever it is (it still round-trips)
         mvdz::encode::compress(&src, &cfg)
     } else {
-        api::compress_info(&src, &cfg)
+        mvdz::compress_info(&src, &cfg)
     };
     let (out, info) = r.map_err(|e| match e {
         mvdz::Error::NotMvd(s) if !s.starts_with("gzip") => {
@@ -320,7 +327,7 @@ fn decompress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), Stri
     let input = open_input(i)?;
     let limits = read_limits(a);
     try_write_with(o, |w| {
-        api::decompress_stream(input, w, threads, &limits)?;
+        mvdz::decompress_stream(input, w, threads, &limits)?;
         Ok(())
     })
 }
@@ -353,12 +360,12 @@ fn stats(v: &mut [f64]) -> (f64, f64, f64) {
     if v.is_empty() {
         return (0.0, 0.0, 0.0);
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(f64::total_cmp);
     let n = v.len();
     let med = if n % 2 == 1 {
         v[n / 2]
     } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
+        f64::midpoint(v[n / 2 - 1], v[n / 2])
     };
     (med, v[0], v[n - 1])
 }
@@ -369,8 +376,7 @@ fn fmt(s: (f64, f64, f64)) -> String {
 
 fn loadavg() -> String {
     std::fs::read_to_string("/proc/loadavg")
-        .map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
-        .unwrap_or_default()
+        .map_or_default(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
 }
 
 /// In-memory library benchmark: every figure is MB/s of raw demo
@@ -379,11 +385,11 @@ fn bench(a: &Args) {
     let files: Vec<(String, Vec<u8>)> =
         a.files.iter().map(|f| (f.clone(), read_input(f))).collect();
     let raw: usize = files.iter().map(|f| f.1.len()).sum();
-    let mb = raw as f64 / 1e6;
+    let mb = approx_f64(raw as u64) / 1e6;
     let nt = a.threads.max(1);
     let reps = a.reps.max(3);
     let lim = read_limits(a);
-    let dec = |c: &[u8], t: usize| api::decompress_with(c, t, &lim);
+    let dec = |c: &[u8], t: usize| mvdz::decompress_with(c, t, &lim);
     out!(
         "files {}  raw {:.2} MB (10^6 bytes)  reps {}  threads {}  verify {}  loadavg {}",
         files.len(),
@@ -403,13 +409,13 @@ fn bench(a: &Args) {
         verify: !a.no_verify,
     };
     let c1 = cfg(1);
-    let comp: Vec<(Vec<u8>, api::Info)> = mvdz::util::par_map(nt, files.len(), |i| {
-        api::compress_info(&files[i].1, &c1).unwrap_or_else(|e| die(e))
+    let comp: Vec<(Vec<u8>, mvdz::Info)> = mvdz::util::par_map(nt, files.len(), |i| {
+        mvdz::compress_info(&files[i].1, &c1).unwrap_or_else(|e| die(e))
     });
     let bytes: usize = comp.iter().map(|c| c.0.len()).sum();
     let fb: usize = comp.iter().map(|c| c.1.fallback_segments).sum();
     let oks: Vec<bool> =
-        mvdz::util::par_map(nt, files.len(), |i| match api::decompress(&comp[i].0, 1) {
+        mvdz::util::par_map(nt, files.len(), |i| match mvdz::decompress(&comp[i].0, 1) {
             Ok(back) => Sha256::digest(&back) == Sha256::digest(&files[i].1),
             Err(_) => false,
         });
@@ -417,10 +423,10 @@ fn bench(a: &Args) {
     for (i, f) in files.iter().enumerate() {
         let base = std::path::Path::new(&f.0)
             .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        perfile += &format!(
-            "{base}\t{}\t{}\t{}\t{}\t{}\n",
+            .map_or_default(|s| s.to_string_lossy().to_string());
+        let _ = writeln!(
+            perfile,
+            "{base}\t{}\t{}\t{}\t{}\t{}",
             f.1.len(),
             comp[i].0.len(),
             oks[i],
@@ -445,7 +451,7 @@ fn bench(a: &Args) {
         if !a.skip_compress {
             let t = Instant::now();
             for f in &files {
-                std::hint::black_box(api::compress(&f.1, &c1).ok());
+                std::hint::black_box(mvdz::compress(&f.1, &c1).ok());
             }
             tc1.push(mb / t.elapsed().as_secs_f64());
         }
@@ -457,12 +463,12 @@ fn bench(a: &Args) {
         if nt > 1 && !a.skip_compress {
             let t = Instant::now();
             for f in &files {
-                std::hint::black_box(api::compress(&f.1, &cn).ok());
+                std::hint::black_box(mvdz::compress(&f.1, &cn).ok());
             }
             tcn.push(mb / t.elapsed().as_secs_f64());
             let t = Instant::now();
             mvdz::util::par_map(nt, files.len(), |i| {
-                std::hint::black_box(api::compress(&files[i].1, &c1).map(|v| v.len()).ok())
+                std::hint::black_box(mvdz::compress(&files[i].1, &c1).map(|v| v.len()).ok())
             });
             tcb.push(mb / t.elapsed().as_secs_f64());
         }
@@ -481,7 +487,7 @@ fn bench(a: &Args) {
     }
     out!(
         "bytes {bytes}  ratio {:.4}  sha ok {ok}/{}  fallback segments {fb}",
-        bytes as f64 / raw as f64,
+        approx_f64(bytes as u64) / approx_f64(raw as u64),
         files.len()
     );
     out!(
@@ -503,7 +509,7 @@ fn bench(a: &Args) {
     if let Some(path) = &a.streams {
         let mut s = String::from("stream\tcount\tpacked\n");
         for (name, (count, packed)) in &stream_rows {
-            s += &format!("{name}\t{count}\t{packed}\n");
+            let _ = writeln!(s, "{name}\t{count}\t{packed}");
         }
         std::fs::write(path, s).unwrap_or_else(|e| die(e));
     }
@@ -512,7 +518,7 @@ fn bench(a: &Args) {
 fn info(a: &Args) {
     for f in &a.files {
         let r = std::fs::File::open(f).unwrap_or_else(|e| die(e));
-        match api::read_info(std::io::BufReader::new(r)) {
+        match mvdz::read_info(std::io::BufReader::new(r)) {
             Ok(fi) => out!("{}", fi.to_json()),
             Err(e) => die(format!("{f}: {e}")),
         }

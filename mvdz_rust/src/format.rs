@@ -24,8 +24,8 @@ use crate::coder::rans::FileTables;
 use crate::error::{Error, Result, bad};
 use crate::util::Rd;
 
-pub const MAGIC: &[u8; 4] = b"MVDZ";
-pub const VERSION: u32 = 2;
+pub(crate) const MAGIC: &[u8; 4] = b"MVDZ";
+pub(crate) const VERSION: u32 = 2;
 pub const HEADER_LEN: usize = 64;
 /// Bytes of a length field (of the models block, of a segment).
 pub const LEN: usize = 4;
@@ -35,26 +35,27 @@ pub const C_TRANSFORM: u8 = 0;
 /// The whole segment as one raw DEFLATE stream: the encoder's fallback.
 pub const C_DEFLATE: u8 = 1;
 
-/// Largest raw length of one segment. Below 2^32 so that every offset
-/// into a segment (plus the walker's small look-ahead) fits in a `u32`.
-pub const MAX_SEG_RAW: u64 = 0xFFFF_0000;
+/// Largest raw length of one segment: what a reader holds at most per
+/// segment. The encoder cuts at a frame boundary well below it and at
+/// this length only where no boundary comes first.
+pub const MAX_SEG_RAW: u64 = 1 << 20;
 /// A segment decodes to at most `SEG_RATIO * len + SEG_SLACK` bytes.
-pub const SEG_RATIO: u64 = 1024;
-pub const SEG_SLACK: u64 = 4096;
+pub(crate) const SEG_RATIO: u64 = 1024;
+pub(crate) const SEG_SLACK: u64 = 4096;
 /// Largest models block.
-pub const TABLES_MAX: u64 = 1 << 24;
+pub(crate) const TABLES_MAX: u64 = 1 << 24;
 /// Most segments the reference encoder writes into one file (an encoder
 /// rule, not a reader rule).
 pub const MAX_SEGMENTS: usize = 1 << 16;
 
 /// The ratio limit: `raw` bytes may be coded in `len` bytes.
-pub fn ratio_ok(raw: u64, len: u64) -> bool {
+pub(crate) fn ratio_ok(raw: u64, len: u64) -> bool {
     raw <= len.saturating_mul(SEG_RATIO).saturating_add(SEG_SLACK)
 }
 
 /// True if a segment of `raw_len` bytes may be stored in a body of `len`
 /// bytes.
-pub fn seg_ratio_ok(raw_len: u64, len: u64) -> bool {
+pub(crate) fn seg_ratio_ok(raw_len: u64, len: u64) -> bool {
     raw_len <= MAX_SEG_RAW && ratio_ok(raw_len, len)
 }
 
@@ -80,7 +81,7 @@ impl Header {
         b[4..8].copy_from_slice(&VERSION.to_le_bytes());
         b[8..16].copy_from_slice(&self.size.to_le_bytes());
         b[16..24].copy_from_slice(&self.duration_ms.to_le_bytes());
-        b[24..32].copy_from_slice(&(self.crc as u64).to_le_bytes());
+        b[24..32].copy_from_slice(&u64::from(self.crc).to_le_bytes());
         b[32..].copy_from_slice(&self.sha256);
         b
     }
@@ -89,26 +90,32 @@ impl Header {
     /// an MVDZ file" if the magic is missing or wrong, "unsupported MVDZ
     /// version" if the version is known to be another, else "truncated
     /// header".
-    pub fn parse(b: &[u8]) -> Result<Header> {
-        if b.len() < 4 || &b[..4] != MAGIC {
+    pub fn parse(b: &[u8]) -> Result<Self> {
+        if b.first_chunk() != Some(MAGIC) {
             return Err(Error::Format("not an MVDZ file"));
         }
-        if b.len() >= 8 && u32::from_le_bytes(b[4..8].try_into().unwrap()) != VERSION {
+        let version = b.get(4..).and_then(<[u8]>::first_chunk);
+        if version.is_some_and(|v| u32::from_le_bytes(*v) != VERSION) {
             return Err(Error::Format("unsupported MVDZ version"));
         }
-        if b.len() < HEADER_LEN {
+        let field = |at: usize| {
+            let bytes = b.get(at..).and_then(<[u8]>::first_chunk)?;
+            Some(u64::from_le_bytes(*bytes))
+        };
+        let sha256 = b.get(32..).and_then(<[u8]>::first_chunk);
+        let (Some(size), Some(duration_ms), Some(crc), Some(sha256)) =
+            (field(8), field(16), field(24), sha256)
+        else {
             return bad("truncated header");
-        }
-        let u = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-        let crc = u(24);
-        if crc >> 32 != 0 {
+        };
+        let Ok(crc) = u32::try_from(crc) else {
             return bad("header checksum field");
-        }
-        Ok(Header {
-            size: u(8),
-            duration_ms: u(16),
-            crc: crc as u32,
-            sha256: b[32..HEADER_LEN].try_into().unwrap(),
+        };
+        Ok(Self {
+            size,
+            duration_ms,
+            crc,
+            sha256: *sha256,
         })
     }
 }
@@ -128,23 +135,29 @@ pub fn segment_block(out: &mut Vec<u8>, body: &[u8]) {
 
 /// The length field at the start of `b`.
 pub fn len_field(b: &[u8]) -> Option<u64> {
-    Some(u32::from_le_bytes(b.get(..LEN)?.try_into().ok()?) as u64)
+    Some(u64::from(u32::from_le_bytes(
+        b.get(..LEN)?.try_into().ok()?,
+    )))
 }
 
 /// A segment of a file: where its length field starts, and the length of
 /// its body (its header fields after the length, and its coded data).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Sec {
-    pub off: u64,
-    pub len: u64,
+pub(crate) struct Sec {
+    pub(crate) off: u64,
+    pub(crate) len: u64,
 }
 
 impl Sec {
-    pub fn body_off(&self) -> u64 {
+    pub(crate) fn body_off(&self) -> u64 {
         self.off + LEN as u64
     }
-    pub fn end(&self) -> u64 {
+    pub(crate) fn end(&self) -> u64 {
         self.off + LEN as u64 + self.len
+    }
+    /// Where the body is in a file held in memory.
+    pub(crate) fn body_range(&self) -> Option<std::ops::Range<usize>> {
+        Some(crate::util::usz(self.body_off())?..crate::util::usz(self.end())?)
     }
 }
 
@@ -154,32 +167,21 @@ impl Sec {
 /// headers knows them. Not stored: it is the running sums of the headers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Index {
-    pub size: u64,
-    pub crc: u32,
-    pub duration_ms: u64,
+    pub(crate) size: u64,
+    pub(crate) crc: u32,
+    pub(crate) duration_ms: u64,
     pub segs: Vec<IndexSeg>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IndexSeg {
     /// file offset of the segment (its length field)
-    pub off: u64,
+    pub(crate) off: u64,
     /// offset of its first byte in the demo
     pub raw_off: u64,
     pub raw_len: u64,
     /// demo time before its first frame (ms)
     pub t_start: u64,
-}
-
-impl Index {
-    /// The segment a seek to demo time `ms` starts at: the last one whose
-    /// start time is before `ms` (so every frame at `ms` or later is
-    /// decoded), or the first.
-    pub fn seg_at_time(&self, ms: u64) -> usize {
-        self.segs
-            .partition_point(|s| s.t_start < ms)
-            .saturating_sub(1)
-    }
 }
 
 // ---------------------------------------------------------------- segment header
@@ -188,23 +190,23 @@ impl Index {
 /// [`Layout::segment`] fills them in from the segments before.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SegHdr {
-    pub raw_off: u64,
-    pub raw_len: u64,
-    pub t_start: u64,
+    pub(crate) raw_off: u64,
+    pub raw_len: u32,
+    pub(crate) t_start: u64,
     /// the segment's frame time: the sum of its frame time bytes
-    pub dur_ms: u64,
-    pub crc: u32,
-    pub coding: u8,
+    pub(crate) dur_ms: u32,
+    pub(crate) crc: u32,
+    pub(crate) coding: u8,
     /// offset of the coded data in the segment body
     pub body_off: usize,
 }
 
-/// The header fields of a segment body: `raw_len`, `dur_ms` (both must fit
-/// in 32 bits), `crc`, `coding`.
-pub fn seg_hdr_bytes(raw_len: u64, dur_ms: u64, crc: u32, coding: u8) -> Vec<u8> {
+/// The header fields of a segment body: `raw_len`, `dur_ms`, `crc`,
+/// `coding`.
+pub fn seg_hdr_bytes(raw_len: u32, dur_ms: u32, crc: u32, coding: u8) -> Vec<u8> {
     let mut b = Vec::with_capacity(SEG_FIELDS);
-    b.extend_from_slice(&(raw_len as u32).to_le_bytes());
-    b.extend_from_slice(&(dur_ms as u32).to_le_bytes());
+    b.extend_from_slice(&raw_len.to_le_bytes());
+    b.extend_from_slice(&dur_ms.to_le_bytes());
     b.extend_from_slice(&crc.to_le_bytes());
     b.push(coding);
     b
@@ -219,8 +221,8 @@ pub const SEG_FIELDS: usize = 4 + 4 + 4 + 1;
 pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
     let e = Error::Corrupt("segment header");
     let mut r = Rd::new(b);
-    let raw_len = r.u32le().ok_or(e)? as u64;
-    let dur_ms = r.u32le().ok_or(e)? as u64;
+    let raw_len = r.u32le().ok_or(e)?;
+    let dur_ms = r.u32le().ok_or(e)?;
     let crc = r.u32le().ok_or(e)?;
     let coding = r.u8().ok_or(e)?;
     if !matches!(coding, C_TRANSFORM | C_DEFLATE) {
@@ -229,7 +231,7 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
     if raw_len == 0 {
         return bad("empty segment");
     }
-    if raw_len > MAX_SEG_RAW {
+    if u64::from(raw_len) > MAX_SEG_RAW {
         return bad("segment too large");
     }
     Ok(SegHdr {
@@ -245,18 +247,20 @@ pub fn parse_seg_hdr(b: &[u8]) -> Result<SegHdr> {
 
 // ---------------------------------------------------------------- layout rules
 
-/// What a reader has learned about a file, fed in file order: the header,
-/// the models, then every segment. Every reader (whole-file, sequential,
-/// seekable) applies these rules through this type, so all of them accept
-/// and refuse the same files (FORMAT.md, "Validation").
+/// What a reader has learned about a file.
+///
+/// It is fed in file order: the header, the models, then every segment.
+/// Every reader (whole-file or in order) applies these rules through this
+/// type, so all of them accept and refuse the same files (FORMAT.md,
+/// "Validation").
 #[derive(Default)]
-pub struct Layout {
-    pub header: Header,
+pub(crate) struct Layout {
+    pub(crate) header: Header,
     /// the shared models, once the models block has been read
-    pub tables: Option<FileTables>,
+    pub(crate) tables: Option<FileTables>,
     models: bool,
     /// the segments: (block, header)
-    pub segs: Vec<(Sec, SegHdr)>,
+    pub(crate) segs: Vec<(Sec, SegHdr)>,
     raw: u64,
     t: u64,
     /// the budget charge for everything above (the models, one record per
@@ -270,8 +274,8 @@ const SEG_BOOK: u64 = std::mem::size_of::<(Sec, SegHdr)>() as u64;
 impl Layout {
     /// `header`: the first [`HEADER_LEN`] bytes of the file (or all of a
     /// shorter one).
-    pub fn new(header: &[u8], budget: &Budget) -> Result<Layout> {
-        Ok(Layout {
+    pub(crate) fn new(header: &[u8], budget: &Budget) -> Result<Self> {
+        Ok(Self {
             header: Header::parse(header)?,
             held: Some(Charge::none(budget)),
             ..Default::default()
@@ -287,12 +291,12 @@ impl Layout {
     }
 
     /// True once the models block has been read.
-    pub fn has_models(&self) -> bool {
+    pub(crate) fn has_models(&self) -> bool {
         self.models
     }
 
     /// The models block (`None`: its length is 0).
-    pub fn models(&mut self, t: Option<FileTables>) -> Result<()> {
+    pub(crate) fn models(&mut self, t: Option<FileTables>) -> Result<()> {
         if let Some(t) = &t {
             self.hold(t.len())?;
         }
@@ -303,14 +307,14 @@ impl Layout {
 
     /// The next segment with its parsed header; returns the header with
     /// its raw offset and start time.
-    pub fn segment(&mut self, s: &Sec, mut h: SegHdr) -> Result<SegHdr> {
-        if !seg_ratio_ok(h.raw_len, s.len) {
+    pub(crate) fn segment(&mut self, s: &Sec, mut h: SegHdr) -> Result<SegHdr> {
+        if !seg_ratio_ok(u64::from(h.raw_len), s.len) {
             return bad("segment size");
         }
         h.raw_off = self.raw;
         h.t_start = self.t;
-        let raw = self.raw.checked_add(h.raw_len);
-        let t = self.t.checked_add(h.dur_ms);
+        let raw = self.raw.checked_add(u64::from(h.raw_len));
+        let t = self.t.checked_add(u64::from(h.dur_ms));
         match (raw, t) {
             (Some(raw), Some(t)) if raw <= self.header.size && t <= self.header.duration_ms => {
                 self.raw = raw;
@@ -324,12 +328,12 @@ impl Layout {
     }
 
     /// True once the segments hold the whole demo: the file ends here.
-    pub fn complete(&self) -> bool {
+    pub(crate) fn complete(&self) -> bool {
         self.raw == self.header.size
     }
 
     /// Checks of a complete file, once every segment has been seen.
-    pub fn finish(&self) -> Result<()> {
+    pub(crate) fn finish(&self) -> Result<()> {
         if !self.models || !self.complete() {
             return bad("incomplete file");
         }
@@ -340,7 +344,7 @@ impl Layout {
     }
 
     /// The segments with their offsets and start times.
-    pub fn index(&self) -> Index {
+    pub(crate) fn index(&self) -> Index {
         Index {
             size: self.header.size,
             crc: self.header.crc,
@@ -351,7 +355,7 @@ impl Layout {
                 .map(|(s, h)| IndexSeg {
                     off: s.off,
                     raw_off: h.raw_off,
-                    raw_len: h.raw_len,
+                    raw_len: u64::from(h.raw_len),
                     t_start: h.t_start,
                 })
                 .collect(),
@@ -364,7 +368,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_round_trip() {
+    fn header_round_trip() -> anyhow::Result<()> {
         let h = Header {
             size: 0x0102_0304_0506,
             duration_ms: 1_234_567,
@@ -373,7 +377,7 @@ mod tests {
         };
         let b = h.bytes();
         assert_eq!(b.len(), HEADER_LEN);
-        assert_eq!(Header::parse(&b).unwrap(), h);
+        assert_eq!(Header::parse(&b)?, h);
         assert_eq!(
             Header::parse(b"MVD"),
             Err(Error::Format("not an MVDZ file"))
@@ -397,5 +401,6 @@ mod tests {
             Header::parse(&x),
             Err(Error::Corrupt("header checksum field"))
         );
+        Ok(())
     }
 }

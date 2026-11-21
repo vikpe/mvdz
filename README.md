@@ -46,8 +46,8 @@ it to `.mvd` first (`mvdz decompress game.mvdz game.mvd`).
 | `mvdz-<version>-x86_64-unknown-linux-musl-v3.tar.gz` | any x86-64 CPU from about 2015 on (AVX2); faster |
 | `mvdz-<version>-x86_64-unknown-linux-musl.tar.gz` | any x86-64 CPU (if unsure) |
 
-**From source**, on any platform (only Linux is tested): Rust 1.89 or newer
-and a C compiler (for the bundled libzstd).
+**From source**, on any platform (only Linux is tested): the latest stable
+Rust (1.100 at the time of writing).
 
 ```
 git clone https://github.com/galfthan/mvdz && cd mvdz/mvdz_rust
@@ -290,12 +290,13 @@ reads them. The format's resource rules bound memory by the input, and
 
 ## Tests
 
-`cargo test --release` runs the unit tests, the golden vectors (valid and
+`cargo nextest run --release` (in `mvdz_rust/`; `cargo install
+cargo-nextest` once) runs the unit tests, the golden vectors (valid and
 hostile files through every reader), round trips at both
 levels, segmented and streamed, corrupt-input and hostile-file tests,
 metadata and attachment tests, and the regressions of the pre-release
-reviews. `cargo test --features pure-zstd` runs them with the pure-Rust
-zstd decoder. Everything runs on synthetic demos; tests that can also use
+reviews. `cargo test --doc` runs the documentation examples, which
+nextest leaves out. Everything runs on synthetic demos; tests that can also use
 real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `sample/` with demos named `<sha256>.mvd`, `gen/` with constructed demos,
 `poc/` with hostile model headers) and say so when it is unset.
@@ -334,8 +335,8 @@ format alike.
 ## Contributing
 
 Issues and pull requests are welcome on GitHub. Please run `cargo fmt`,
-`cargo clippy --all-targets` and `cargo test` (CI runs them on Linux, with
-the pure-zstd tests, a wasm build and the minimum Rust version). Changes to the file format go through FORMAT.md first. See [CHANGELOG.md](CHANGELOG.md) for releases.
+`cargo clippy --all-targets` and `cargo nextest run` (CI runs them on Linux, with
+a wasm build). Changes to the file format go through FORMAT.md first. See [CHANGELOG.md](CHANGELOG.md) for releases.
 Pull requests from automated agents without a human author who reviews
 and answers for them are closed.
 

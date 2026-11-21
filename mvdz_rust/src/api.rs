@@ -3,12 +3,12 @@
 use crate::budget::{Budget, Limits};
 use crate::decode::{SeekSrc, scan_layout};
 use crate::error::{Error, Result};
-use crate::format::*;
+use crate::format::{MAGIC, VERSION};
 use crate::stream::Reader;
 use std::io::{Read, Seek, Write};
 
 pub use crate::encode::{Config, Info};
-pub use crate::format::{Header, Index};
+use crate::format::{Header, Index};
 
 /// Compresses a demo (a raw `.mvd`). Input that is not an MVD demo is
 /// `Error::NotMvd` (see `check_demo`).
@@ -22,8 +22,9 @@ pub fn compress_info(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
     crate::encode::compress(src, cfg)
 }
 
-/// Checks that `src` is an MVD demo, as the encoders do before any work:
-/// its first frame must be whole, carry messages (not only a `dem_set`)
+/// Checks that `src` is an MVD demo, as the encoders do before any work.
+///
+/// Its first frame must be whole, carry messages (not only a `dem_set`)
 /// and parse without an escape (FORMAT.md §6.2). Real demos start with
 /// the server data; a truncated or partly damaged demo passes as long as
 /// its start is intact, and what does not parse later is stored raw as
@@ -164,11 +165,16 @@ impl FileInfo {
     }
 }
 
-pub fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+pub(crate) fn hex(b: &[u8]) -> String {
+    use std::fmt::Write as _;
+    b.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
 }
 
 #[cfg(unix)]
+#[expect(clippy::unnecessary_wraps, reason = "None on targets without groups")]
 fn gid(m: &std::fs::Metadata) -> Option<u32> {
     Some(std::os::unix::fs::MetadataExt::gid(m))
 }
@@ -202,7 +208,7 @@ fn replace_locked(
     let dir = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
+        .unwrap_or_else(|| std::path::Path::new("."));
     let name = path
         .file_name()
         .ok_or(Error::Invalid("path"))?
@@ -260,28 +266,22 @@ pub fn write_file_atomic_with(
     path: &std::path::Path,
     fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<()> {
-    let (perm, group) = match std::fs::metadata(path) {
-        Ok(m) => (m.permissions(), gid(&m)),
-        Err(_) => {
-            let dir = path
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .unwrap_or(std::path::Path::new("."));
-            let probe = dir.join(temp_name("probe", 0));
-            let f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&probe)?;
-            let p = f.metadata()?.permissions();
-            drop(f);
-            let _ = std::fs::remove_file(&probe);
-            (p, None)
-        }
+    let (perm, group) = if let Ok(m) = std::fs::metadata(path) {
+        (m.permissions(), gid(&m))
+    } else {
+        let dir = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let probe = dir.join(temp_name("probe", 0));
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)?;
+        let p = f.metadata()?.permissions();
+        drop(f);
+        let _ = std::fs::remove_file(&probe);
+        (p, None)
     };
     replace_locked(path, fill, perm, group)
-}
-
-/// The original demo, read sequentially (any reader).
-pub fn reader<R: Read>(r: R, threads: usize) -> Result<Reader<R>> {
-    Reader::new(r, threads, &Limits::default())
 }

@@ -12,15 +12,27 @@
 //! Every read and write is bounds-checked and sets a sticky `err` instead of
 //! panicking, so corrupt input ends the walk early and fails the checksum.
 
-use crate::proto::*;
-use crate::streams::*;
+use crate::proto::{
+    DF_EFFECTS, DF_MODEL, DF_SKIN, DF_WEAPONFRAME, FTE_COLOURMOD, FTE_TRANS, Proto, U_ANGLE1,
+    U_ANGLE2, U_ANGLE3, U_COLORMAP, U_EFFECTS, U_EVENMORE, U_FRAME, U_MODEL, U_MOREBITS, U_ORIGIN1,
+    U_ORIGIN2, U_ORIGIN3, U_SKIN, X_COLOURMOD, X_ENTITYDBL, X_ENTITYDBL2, X_FATNESS, X_MODELDBL,
+    X_SCALE, X_TRANS, X_YETMORE, frame_len, le32,
+};
+use crate::streams::{
+    CMD, ESCLEN, FRAGS, GEN_BASE, HIDDMG, HIDLEN, HIDMISC, HIDTAG, HIDTYPE, MASK, NAILS, PE_A,
+    PE_BITS, PE_ENT, PE_FRAME, PE_HDR, PE_MISC, PE_MODEL, PE_MORE, PI_EFF, PI_FLAGS, PI_FRAME,
+    PI_MODEL, PI_NUM, PI_SKIN, PI_WFRAME, PING, PR_LEVEL, RAW, SET, SND_CH, SND_MISC, SND_NUM,
+    SNDF, ST_IDX, ST_VAL, STL_IDX, STL_VAL, TAIL, TE_MISC, TE_TYPE, TEF, TEXT, TIME, TYPE, UC,
+};
 
-pub const NONE: u32 = u32::MAX;
+pub(crate) const NONE: u32 = u32::MAX;
 
-/// Structural symbol I/O. Encode: record and return `v`. Decode: return the
+/// Structural symbol I/O.
+///
+/// Encode: record and return `v`. Decode: return the
 /// decoded symbol (`v` is ignored). Every `ctx` fits in 16 bits, the rans
 /// table key (FORMAT.md §8.3); both implementations debug-assert it.
-pub trait SymIO {
+pub(crate) trait SymIO {
     fn byte(&mut self, sid: usize, ctx: u32, v: u8) -> u8;
     fn put_blob(&mut self, sid: usize, b: &[u8]);
     fn take_blob(&mut self, sid: usize, n: usize) -> Option<&[u8]>;
@@ -29,39 +41,33 @@ pub trait SymIO {
 
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C)]
-pub struct PiRec {
-    pub off: u32,
-    pub t: u32,
-    pub flags: u16,
-    pub num: u8,
-    pub fl: u8, // bit0: float coords
+pub(crate) struct PiRec {
+    pub(crate) off: u32,
+    pub(crate) t: u32,
+    pub(crate) flags: u16,
+    pub(crate) num: u8,
+    pub(crate) fl: u8, // bit0: float coords
 }
 
-pub const PE_O1: u16 = 1;
-pub const PE_A1: u16 = 2;
-pub const PE_O2: u16 = 4;
-pub const PE_A2: u16 = 8;
-pub const PE_O3: u16 = 16;
-pub const PE_A3: u16 = 32;
-pub const PE_INPREV: u16 = 64;
-pub const PE_FLOAT: u16 = 128;
-pub const PE_WIDE: u16 = 256;
+pub(crate) const PE_INPREV: u16 = 64;
+pub(crate) const PE_FLOAT: u16 = 128;
+pub(crate) const PE_WIDE: u16 = 256;
 
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C)]
-pub struct PeRec {
-    pub off: u32,
-    pub t: u32,
-    pub num: u16,
-    pub bits: u16,
-    pub model: u8,
-    pub ubits: u8, // U_* bits 9..15 of the entity word
+pub(crate) struct PeRec {
+    pub(crate) off: u32,
+    pub(crate) t: u32,
+    pub(crate) num: u16,
+    pub(crate) bits: u16,
+    pub(crate) model: u8,
+    pub(crate) ubits: u8, // U_* bits 9..15 of the entity word
 }
 
 impl PeRec {
     /// Byte offsets of the three origin coords (NONE if not sent).
     #[inline]
-    pub fn origin_offs(&self) -> [u32; 3] {
+    pub(crate) fn origin_offs(&self) -> [u32; 3] {
         let cw = if self.bits & PE_FLOAT != 0 { 4 } else { 2 };
         let aw = if self.bits & PE_WIDE != 0 { 2 } else { 1 };
         let mut p = self.off;
@@ -80,36 +86,37 @@ impl PeRec {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct SndRec {
-    pub off: u32,
-    pub refs: [u32; 3],
-    pub kind: u8,
-    pub num: u8,
+pub(crate) struct SndRec {
+    pub(crate) off: u32,
+    pub(crate) refs: [u32; 3],
+    pub(crate) kind: u8,
+    pub(crate) num: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct TeRec {
-    pub off: u32,
-    pub refs: [u32; 3],
-    pub ty: u8,
+pub(crate) struct TeRec {
+    pub(crate) off: u32,
+    pub(crate) refs: [u32; 3],
+    pub(crate) ty: u8,
 }
 
 /// A usercmd block with angles on the grid: `off` is the pitch's offset
 /// (yaw and roll follow), `grid` bit a set for each axis a on the grid.
 #[derive(Clone, Copy, Debug)]
-pub struct UcRec {
-    pub off: u32,
-    pub num: u8,
-    pub grid: u8,
+pub(crate) struct UcRec {
+    pub(crate) off: u32,
+    pub(crate) num: u8,
+    pub(crate) grid: u8,
 }
 
-/// An append-only record buffer with one writer (the walker) and any
-/// number of concurrent readers (the numeric groups) that see a published
-/// prefix. A fixed-capacity buffer never moves: the writer writes through a
+/// An append-only record buffer with one writer and any number of readers.
+///
+/// The writer is the walker; the concurrent readers (the numeric groups)
+/// see a published prefix. A fixed-capacity buffer never moves: the writer writes through a
 /// raw pointer taken once, and no reference to the vector exists while
 /// readers follow the walker. Growable buffers (encode side, never shared
 /// between threads) may reallocate.
-pub struct RecBuf<T> {
+pub(crate) struct RecBuf<T> {
     /// owns the allocation (fixed: its length stays 0, it is only freed)
     mem: std::cell::UnsafeCell<Vec<T>>,
     /// start of the records (fixed: set once at construction)
@@ -131,35 +138,35 @@ unsafe impl<T: Send> Send for RecBuf<T> {}
 
 impl<T: Copy> RecBuf<T> {
     /// A buffer that never reallocates; allocation failure is an error.
-    pub fn fixed(cap: usize) -> crate::error::Result<RecBuf<T>> {
+    pub(crate) fn fixed(cap: usize) -> crate::error::Result<Self> {
         let mut v: Vec<T> = crate::budget::with_capacity(cap)?;
         let base = v.as_mut_ptr();
-        Ok(RecBuf {
+        Ok(Self {
             mem: std::cell::UnsafeCell::new(v),
             base: std::cell::UnsafeCell::new(base),
             wlen: std::cell::UnsafeCell::new(0),
             cap,
-            len: Default::default(),
-            done: Default::default(),
+            len: std::sync::atomic::AtomicUsize::default(),
+            done: std::sync::atomic::AtomicBool::default(),
             fixed: true,
         })
     }
-    pub fn growable(cap: usize) -> RecBuf<T> {
+    pub(crate) fn growable(cap: usize) -> Self {
         let mut v: Vec<T> = Vec::with_capacity(cap);
         let base = v.as_mut_ptr();
-        RecBuf {
+        Self {
             mem: std::cell::UnsafeCell::new(v),
             base: std::cell::UnsafeCell::new(base),
             wlen: std::cell::UnsafeCell::new(0),
             cap,
-            len: Default::default(),
-            done: Default::default(),
+            len: std::sync::atomic::AtomicUsize::default(),
+            done: std::sync::atomic::AtomicBool::default(),
             fixed: false,
         }
     }
     /// Single-writer append; false if a fixed buffer is full.
     #[inline(always)]
-    pub fn push(&self, v: T) -> bool {
+    pub(crate) fn push(&self, v: T) -> bool {
         use std::sync::atomic::Ordering;
         // SAFETY: only the walker calls push (single writer). A fixed
         // buffer writes slot n < cap of its allocation, which no reader
@@ -181,26 +188,26 @@ impl<T: Copy> RecBuf<T> {
         };
         // publish in batches: a store per record would bounce the cache
         // line between the walker and the readers polling it
-        if n & 255 == 0 {
+        if n % 256 == 0 {
             self.len.store(n, Ordering::Release);
         }
         true
     }
     #[inline(always)]
-    pub fn published(&self) -> &[T] {
+    pub(crate) fn published(&self) -> &[T] {
         let n = self.len.load(std::sync::atomic::Ordering::Acquire);
         // SAFETY: the first n records are initialised (published with
         // Release after they were written) and never written again
         unsafe { std::slice::from_raw_parts(*self.base.get(), n) }
     }
-    pub fn finish(&self) {
+    pub(crate) fn finish(&self) {
         // SAFETY: called by the writer after its last push
         let n = unsafe { *self.wlen.get() };
         self.len.store(n, std::sync::atomic::Ordering::Release);
         self.done.store(true, std::sync::atomic::Ordering::Release);
     }
     /// Iterates all records, waiting for the writer where needed.
-    pub fn feed(&self) -> Feed<'_, T> {
+    pub(crate) fn feed(&self) -> Feed<'_, T> {
         Feed {
             rb: self,
             i: 0,
@@ -209,7 +216,7 @@ impl<T: Copy> RecBuf<T> {
     }
 }
 
-pub struct Feed<'a, T> {
+pub(crate) struct Feed<'a, T> {
     rb: &'a RecBuf<T>,
     i: usize,
     avail: &'a [T],
@@ -244,18 +251,18 @@ impl<'a, T: Copy> Iterator for Feed<'a, T> {
     }
 }
 
-pub struct Recs {
-    pub pi: RecBuf<PiRec>,
-    pub pe: RecBuf<PeRec>,
-    pub snd: RecBuf<SndRec>,
-    pub te: RecBuf<TeRec>,
-    pub uc: RecBuf<UcRec>,
+pub(crate) struct Recs {
+    pub(crate) pi: RecBuf<PiRec>,
+    pub(crate) pe: RecBuf<PeRec>,
+    pub(crate) snd: RecBuf<SndRec>,
+    pub(crate) te: RecBuf<TeRec>,
+    pub(crate) uc: RecBuf<UcRec>,
 }
 
 impl Recs {
     /// Encode side: growable, sized by typical densities.
-    pub fn growable(n: usize) -> Recs {
-        Recs {
+    pub(crate) fn growable(n: usize) -> Self {
+        Self {
             pi: RecBuf::growable(n / 18),
             pe: RecBuf::growable(n / 32),
             snd: RecBuf::growable(n / 400),
@@ -264,14 +271,14 @@ impl Recs {
         }
     }
     /// Decode side: exact capacities from the stream table.
-    pub fn fixed(
+    pub(crate) fn fixed(
         pi: usize,
         pe: usize,
         snd: usize,
         te: usize,
         uc: usize,
-    ) -> crate::error::Result<Recs> {
-        Ok(Recs {
+    ) -> crate::error::Result<Self> {
+        Ok(Self {
             pi: RecBuf::fixed(pi)?,
             pe: RecBuf::fixed(pe)?,
             snd: RecBuf::fixed(snd)?,
@@ -279,7 +286,7 @@ impl Recs {
             uc: RecBuf::fixed(uc)?,
         })
     }
-    pub fn finish(&self) {
+    pub(crate) fn finish(&self) {
         self.pi.finish();
         self.pe.finish();
         self.snd.finish();
@@ -316,15 +323,15 @@ struct EntState {
     last_pkt: u32,
 }
 
-pub struct Walker<'a, const ENC: bool, IO: SymIO> {
-    pub src: &'a [u8],
+pub(crate) struct Walker<'a, const ENC: bool, IO: SymIO> {
+    pub(crate) src: &'a [u8],
     dst: *mut u8,
     dst_len: usize,
-    pub p: usize,
-    pub err: bool,
-    pub io: IO,
-    pub proto: Proto,
-    pub recs: &'a Recs,
+    pub(crate) p: usize,
+    pub(crate) err: bool,
+    pub(crate) io: IO,
+    pub(crate) proto: Proto,
+    pub(crate) recs: &'a Recs,
     pl: Box<[PlState; 256]>,
     ent: Box<[EntState; 2048]>,
     st: Box<[[u8; 256]; 32]>,
@@ -349,14 +356,18 @@ pub struct Walker<'a, const ENC: bool, IO: SymIO> {
     uc_prev: [u8; 2],
     ucs: Box<[UcState; 256]>,
     /// demo time at the end of the walk (ms)
-    pub t_end: u32,
+    pub(crate) t_end: u32,
 }
 
 impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     /// `dst`/`dst_len`: the output segment (decode; empty on encode). The
     /// walker writes only structural bytes; numeric groups may write the
     /// reserved bytes concurrently through their own raw pointer.
-    pub fn new(
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "fixed-size tables keep byte-indexed lookups free of bounds checks"
+    )]
+    pub(crate) fn new(
         src: &'a [u8],
         dst: *mut u8,
         dst_len: usize,
@@ -407,15 +418,12 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
 
     #[inline(always)]
     fn rd(&mut self) -> u8 {
-        match self.src.get(self.p) {
-            Some(&v) => {
-                self.p += 1;
-                v
-            }
-            None => {
-                self.err = true;
-                0
-            }
+        if let Some(&v) = self.src.get(self.p) {
+            self.p += 1;
+            v
+        } else {
+            self.err = true;
+            0
         }
     }
 
@@ -490,7 +498,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     fn pn(&mut self, sid: usize, n: usize) -> u32 {
         let mut v = 0u32;
         for k in 0..n {
-            v |= (self.p8(sid) as u32) << (8 * k);
+            v |= u32::from(self.p8(sid)) << (8 * k);
         }
         v
     }
@@ -502,14 +510,11 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         if ENC {
             self.io.put_blob(sid, &[v]);
             v
+        } else if let Some(b) = self.io.take_blob(sid, 1) {
+            b[0]
         } else {
-            match self.io.take_blob(sid, 1) {
-                Some(b) => b[0],
-                None => {
-                    self.err = true;
-                    0
-                }
-            }
+            self.err = true;
+            0
         }
     }
 
@@ -518,7 +523,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     fn bn(&mut self, sid: usize, ctx: u32, n: usize) -> u32 {
         let mut v = 0u32;
         for k in 0..n {
-            v |= (self.b8(sid, ctx | (k as u32) << 14) as u32) << (8 * k);
+            v |= u32::from(self.b8(sid, ctx | (k as u32) << 14)) << (8 * k);
         }
         v
     }
@@ -557,7 +562,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
 
     /// Walks the whole segment. Encode: returns the tail length. Decode:
     /// `tail` is the stored tail length.
-    pub fn run(&mut self, tail: usize) -> usize {
+    pub(crate) fn run(&mut self, tail: usize) -> usize {
         if ENC {
             while !self.err && frame_len(self.src, self.p).is_some() {
                 self.frame();
@@ -584,11 +589,11 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     }
 
     fn frame(&mut self) {
-        let lt = self.last_type as u32;
-        let tb = self.b8(TIME, lt | (self.last_tb as u32) << 8);
+        let lt = u32::from(self.last_type);
+        let tb = self.b8(TIME, lt | u32::from(self.last_tb) << 8);
         self.last_tb = tb;
-        self.t = self.t.wrapping_add(tb as u32);
-        let ty = self.b8(TYPE, lt | (tb.min(32) as u32) << 8);
+        self.t = self.t.wrapping_add(u32::from(tb));
+        let ty = self.b8(TYPE, lt | u32::from(tb.min(32)) << 8);
         self.last_type = ty;
         self.target = ty >> 3;
         match ty & 7 {
@@ -616,9 +621,9 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 return;
             }
             if hidden {
-                self.hidden(end)
+                self.hidden(end);
             } else {
-                self.payload(end, ty)
+                self.payload(end, ty);
             }
         } else {
             let at = self.p;
@@ -627,15 +632,15 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 return;
             }
             if hidden {
-                self.hidden(0)
+                self.hidden(0);
             } else {
-                self.payload(0, ty)
+                self.payload(0, ty);
             }
             let n = (self.p - at - 4) as u32;
             if at + 4 <= self.dst_len {
                 // SAFETY: in bounds, walker-owned bytes
                 unsafe {
-                    std::ptr::copy_nonoverlapping(n.to_le_bytes().as_ptr(), self.dst.add(at), 4)
+                    std::ptr::copy_nonoverlapping(n.to_le_bytes().as_ptr(), self.dst.add(at), 4);
                 };
             }
         }
@@ -657,7 +662,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             let mut n = 0u32;
             for k in 0..5u32 {
                 let b = self.tag(ESCLEN, 0);
-                n |= ((b & 0x7f) as u32) << (7 * k);
+                n |= u32::from(b & 0x7f) << (7 * k);
                 if b < 0x80 {
                     break;
                 }
@@ -677,7 +682,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         self.st_prev_val = 0;
         let mut idx = 0u32;
         let tyi = (ty & 7) as usize;
-        let first_prev = cmd_class(self.first_by_ty[tyi]) as u32;
+        let first_prev = u32::from(cmd_class(self.first_by_ty[tyi]));
         let mut first = 255u8;
         loop {
             if self.err {
@@ -685,9 +690,9 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             }
             // Bit 15 splits the space: a known previous command is named by
             // its class, an "other" one (class 15) by its own number.
-            let cl = cmd_class(self.prev_cmd) as u32;
+            let cl = u32::from(cmd_class(self.prev_cmd));
             let ctx = if cl == 15 {
-                0x8000 | self.prev_cmd as u32 | (tyi as u32) << 8 | idx.min(7) << 11
+                0x8000 | u32::from(self.prev_cmd) | (tyi as u32) << 8 | idx.min(7) << 11
             } else {
                 cl | idx.min(15) << 4 | first_prev << 8 | (tyi as u32) << 12
             };
@@ -764,10 +769,14 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 let t = (self.target & 31) as usize;
                 let i = self.b8(
                     ST_IDX,
-                    self.st_prev_idx as u32 | (self.prev_cmd as u32) << 8,
+                    u32::from(self.st_prev_idx) | u32::from(self.prev_cmd) << 8,
                 );
                 let prev = self.st[t][i as usize];
-                let v = self.r8(ST_VAL, i as u32 | (self.st_prev_val as u32) << 8, prev);
+                let v = self.r8(
+                    ST_VAL,
+                    u32::from(i) | u32::from(self.st_prev_val) << 8,
+                    prev,
+                );
                 self.st_prev_idx = i;
                 self.st_prev_val = v.wrapping_sub(prev);
                 self.st[t][i as usize] = v;
@@ -822,34 +831,36 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     fn pi_flags(&mut self, prev: u16) -> u16 {
         // Bit 15 keeps the main symbol's contexts clear of b1's (0x100-0x1ff)
         // and b2's (0x200); prev's own bit 15 is left out.
-        let cx = 0x8000 | (prev & 0x7fff) as u32;
+        let cx = 0x8000 | u32::from(prev & 0x7fff);
         let x = if ENC {
-            let lo = self.rd() as u16;
-            let x = (lo | (self.rd() as u16) << 8) ^ prev;
+            let lo = u16::from(self.rd());
+            let x = (lo | u16::from(self.rd()) << 8) ^ prev;
             let rare = x & !0x43f;
-            let a = (x & 0x3f) as u8 | (((x >> 10) & 1) as u8) << 6 | ((rare != 0) as u8) << 7;
+            let a = (x & 0x3f) as u8 | (((x >> 10) & 1) as u8) << 6 | u8::from(rare != 0) << 7;
             self.io.byte(PI_FLAGS, cx, a);
             if rare != 0 {
                 let b1 = ((x >> 6) & 0xf) as u8 | (((x >> 11) & 0xf) as u8) << 4;
                 self.io
-                    .byte(PI_FLAGS, 0x100 | ((prev >> 6) & 0xff) as u32, b1);
+                    .byte(PI_FLAGS, 0x100 | u32::from((prev >> 6) & 0xff), b1);
                 self.io.byte(PI_FLAGS, 0x200, (x >> 15) as u8);
             }
             x
         } else {
-            let a = self.io.byte(PI_FLAGS, cx, 0) as u16;
+            let a = u16::from(self.io.byte(PI_FLAGS, cx, 0));
             let mut x = (a & 0x3f) | ((a >> 6) & 1) << 10;
             if a & 0x80 != 0 {
-                let b1 = self
-                    .io
-                    .byte(PI_FLAGS, 0x100 | ((prev >> 6) & 0xff) as u32, 0)
-                    as u16;
-                let b2 = self.io.byte(PI_FLAGS, 0x200, 0) as u16;
+                let b1 = u16::from(self.io.byte(
+                    PI_FLAGS,
+                    0x100 | u32::from((prev >> 6) & 0xff),
+                    0,
+                ));
+                let b2 = u16::from(self.io.byte(PI_FLAGS, 0x200, 0));
                 x |= (b1 & 0xf) << 6 | (b1 >> 4) << 11 | (b2 & 1) << 15;
             }
             let f = x ^ prev;
-            self.wr(f as u8);
-            self.wr((f >> 8) as u8);
+            let [low, high] = f.to_le_bytes();
+            self.wr(low);
+            self.wr(high);
             x
         };
         x ^ prev
@@ -860,7 +871,11 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         self.pi_prev_num = num;
         let ps = self.pl[num as usize];
         let flags = self.pi_flags(ps.flags);
-        let frame = self.r8(PI_FRAME, ps.frame as u32 | (flags & 0x300) as u32, ps.frame);
+        let frame = self.r8(
+            PI_FRAME,
+            u32::from(ps.frame) | u32::from(flags & 0x300),
+            ps.frame,
+        );
         let cw = self.proto.coord();
         let nco = (flags & 7).count_ones() as usize;
         let nan = (flags & 0x38).count_ones() as usize;
@@ -870,7 +885,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             t: self.t,
             flags,
             num,
-            fl: self.proto.float_coords as u8,
+            fl: u8::from(self.proto.float_coords),
         }) {
             self.err = true;
         }
@@ -890,21 +905,22 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         if flags & DF_EFFECTS != 0 {
             self.p8(PI_EFF);
         }
-        let mut wf = ps.wf;
-        if flags & DF_WEAPONFRAME != 0 {
-            wf = self.r8(PI_WFRAME, ps.wf as u32, ps.wf);
-        }
+        let wf = if flags & DF_WEAPONFRAME != 0 {
+            self.r8(PI_WFRAME, u32::from(ps.wf), ps.wf)
+        } else {
+            ps.wf
+        };
         self.pl[num as usize] = PlState { flags, frame, wf };
     }
 
     /// Next entity number in this packet as predicted from the previous
     /// packet's list.
     fn predict_ent(&mut self, prev: i32) -> i32 {
-        while self.pkt_ptr < self.prev_pkt.len() && (self.prev_pkt[self.pkt_ptr] as i32) <= prev {
+        while self.pkt_ptr < self.prev_pkt.len() && i32::from(self.prev_pkt[self.pkt_ptr]) <= prev {
             self.pkt_ptr += 1;
         }
         if self.pkt_ptr < self.prev_pkt.len() {
-            self.prev_pkt[self.pkt_ptr] as i32
+            i32::from(self.prev_pkt[self.pkt_ptr])
         } else {
             prev + 1
         }
@@ -925,7 +941,8 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 break;
             }
             let pe = self.predict_ent(prev_ent);
-            let ectx = (pe - prev_ent).min(255) as u32 | (self.pe_prev_d.min(15) as u32) << 8;
+            let ectx =
+                (pe - prev_ent).min(255).cast_unsigned() | u32::from(self.pe_prev_d.min(15)) << 8;
             let w: u16;
             let ent: usize;
             if ENC {
@@ -940,51 +957,54 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                     break;
                 }
                 ent = (w & 511) as usize;
-                let d = ((ent as i32 - prev_ent - 1) & 511) + 1;
+                let d = ((i32::from(w & 511) - prev_ent - 1) & 511) + 1;
                 if d < 255 {
-                    self.io.byte(PE_ENT, ectx, d as u8);
+                    self.io.byte(PE_ENT, ectx, d.cast_unsigned() as u8);
                 } else {
                     self.io.byte(PE_ENT, ectx, 255);
-                    self.io.byte(PE_ENT, 1 << 12, d as u8);
-                    self.io.byte(PE_ENT, 2 << 12, (d >> 8) as u8);
+                    self.io.byte(PE_ENT, 1 << 12, d.cast_unsigned() as u8);
+                    self.io
+                        .byte(PE_ENT, 2 << 12, (d >> 8).cast_unsigned() as u8);
                 }
                 let es = self.ent[ent];
                 self.io.byte(
                     PE_BITS,
-                    es.bits as u32 | (es.model as u32) << 7,
+                    u32::from(es.bits) | u32::from(es.model) << 7,
                     (w >> 9) as u8 ^ es.bits,
                 );
             } else {
-                let mut d = self.io.byte(PE_ENT, ectx, 0) as i32;
+                let mut d = i32::from(self.io.byte(PE_ENT, ectx, 0));
                 if d == 255 {
-                    d = self.io.byte(PE_ENT, 1 << 12, 0) as i32;
-                    d |= (self.io.byte(PE_ENT, 2 << 12, 0) as i32) << 8;
+                    d = i32::from(self.io.byte(PE_ENT, 1 << 12, 0));
+                    d |= i32::from(self.io.byte(PE_ENT, 2 << 12, 0)) << 8;
                 }
                 if d == 0 {
                     self.wr(0);
                     self.wr(0);
                     break;
                 }
-                ent = ((prev_ent + d) & 511) as usize;
+                ent = ((prev_ent + d) & 511).cast_unsigned() as usize;
                 let es = self.ent[ent];
                 let b = self
                     .io
-                    .byte(PE_BITS, es.bits as u32 | (es.model as u32) << 7, 0)
+                    .byte(PE_BITS, u32::from(es.bits) | u32::from(es.model) << 7, 0)
                     ^ es.bits;
-                w = (b as u16) << 9 | ent as u16;
+                w = u16::from(b) << 9 | ent as u16;
                 if w == 0 {
                     // a word of zero would end the packet; the encoder never emits it
                     self.err = true;
                     break;
                 }
-                self.wr(w as u8);
-                self.wr((w >> 8) as u8);
+                let [low, high] = w.to_le_bytes();
+                self.wr(low);
+                self.wr(high);
             }
-            self.pe_prev_d = (ent as i32 - prev_ent).clamp(0, 255) as u8;
-            prev_ent = ent as i32;
+            let ent_number = i32::from(w & 511);
+            self.pe_prev_d = (ent_number - prev_ent).clamp(0, 255).cast_unsigned() as u8;
+            prev_ent = ent_number;
             self.cur_pkt.push(ent as u16);
             self.ent[ent].bits = (w >> 9) as u8;
-            self.entity_delta(w as u32);
+            self.entity_delta(u32::from(w));
         }
         std::mem::swap(&mut self.prev_pkt, &mut self.cur_pkt);
     }
@@ -993,14 +1013,14 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         let mut bits = w & !511;
         let mut more = 0u32;
         let mut num = (w & 511) as usize;
-        let m0 = self.ent[num].model as u32;
+        let m0 = u32::from(self.ent[num].model);
         if bits & U_MOREBITS != 0 {
-            bits |= self.b8(PE_MORE, (bits >> 9) | m0 << 8) as u32;
+            bits |= u32::from(self.b8(PE_MORE, (bits >> 9) | m0 << 8));
         }
         if bits & U_EVENMORE != 0 && self.proto.fte != 0 {
-            more = self.b8(PE_MORE, 0x8000) as u32;
+            more = u32::from(self.b8(PE_MORE, 0x8000));
             if more & X_YETMORE != 0 {
-                more |= (self.b8(PE_MORE, 0x8001) as u32) << 8;
+                more |= u32::from(self.b8(PE_MORE, 0x8001)) << 8;
             }
         }
         if more & X_ENTITYDBL != 0 {
@@ -1017,7 +1037,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         } else if more & X_MODELDBL != 0 {
             self.pn(PE_MODEL, 2);
         }
-        let model = es.model as u32;
+        let model = u32::from(es.model);
         if bits & U_FRAME != 0 {
             es.frame = self.pr8(PE_FRAME, es.frame);
         }
@@ -1080,7 +1100,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 if self.proto.msg_wide {
                     self.bn(PE_A, 3 | model << 6, 2);
                 } else {
-                    let qa = qb(es.ares[i]).min(15) as u32;
+                    let qa = u32::from(qb(es.ares[i]).min(15));
                     let v = self.r8(PE_A, i as u32 | qa << 2 | model << 6, es.a[i]);
                     es.ares[i] = v.wrapping_sub(es.a[i]);
                     es.a[i] = v;
@@ -1106,8 +1126,8 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     }
 
     fn sound(&mut self) {
-        let lo = self.b8(SND_CH, self.prev_cmd as u32) as u32;
-        let ch = lo | (self.b8(SND_CH, 1 << 8 | lo) as u32) << 8;
+        let lo = u32::from(self.b8(SND_CH, u32::from(self.prev_cmd)));
+        let ch = lo | u32::from(self.b8(SND_CH, 1 << 8 | lo)) << 8;
         if ch & 0x8000 != 0 {
             self.p8(SND_MISC);
         }
@@ -1141,7 +1161,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     fn temp_entity(&mut self) {
         let t = self.b8(
             TE_TYPE,
-            self.prev_te as u32 | ((self.prev_cmd == 23) as u32) << 8,
+            u32::from(self.prev_te) | u32::from(self.prev_cmd == 23) << 8,
         );
         self.prev_te = t;
         let c = self.proto.coord();
@@ -1196,7 +1216,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         }
     }
 
-    /// dem_multiple with mask 0: blocks of [u32 len][u16 type][len bytes].
+    /// `dem_multiple` with mask 0: blocks of [u32 len][u16 type][len bytes].
     /// Tags: 1 block, 2 end, 0 escape (rest raw).
     fn hidden(&mut self, end: usize) {
         loop {
@@ -1211,7 +1231,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 }
                 let mut ok = rem >= 6;
                 if ok {
-                    let bl = le32(&self.src[self.p..]) as u64;
+                    let bl = u64::from(le32(&self.src[self.p..]));
                     ok = bl >= 1 && bl <= (rem - 6) as u64;
                 }
                 if !ok {
@@ -1252,11 +1272,11 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     /// (`UcRec`); the rest goes to UC, context kind in bits 12-15.
     fn ucmd(&mut self) {
         let [p1, p2] = self.uc_prev;
-        let pl = self.b8(UC, (p1.min(31) as u32) | (p2.min(31) as u32) << 5);
+        let pl = self.b8(UC, u32::from(p1.min(31)) | u32::from(p2.min(31)) << 5);
         self.uc_prev = [pl, p1];
         let mut s = self.ucs[pl as usize];
-        s.drop = self.b8(UC, 1 << 12 | s.drop as u32);
-        s.msec = self.b8(UC, 2 << 12 | s.msec as u32);
+        s.drop = self.b8(UC, 1 << 12 | u32::from(s.drop));
+        s.msec = self.b8(UC, 2 << 12 | u32::from(s.msec));
         // hidden() saw all 23 bytes inside the payload: the angles follow
         let mut grid = 0u8;
         if ENC {
@@ -1266,7 +1286,7 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 }
             }
         }
-        grid = self.io.byte(UC, 3 << 12 | s.grid as u32, grid);
+        grid = self.io.byte(UC, 3 << 12 | u32::from(s.grid), grid);
         if grid > 7 {
             self.err = true;
             return;
@@ -1286,12 +1306,12 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
             self.err = true;
         }
         for m in 0..3 {
-            let lo = self.b8(UC, 5 << 12 | (m as u32) << 8 | (s.mv[m] & 0xff) as u32);
-            let hi = self.b8(UC, 6 << 12 | (m as u32) << 8 | lo as u32);
+            let lo = self.b8(UC, 5 << 12 | (m as u32) << 8 | u32::from(s.mv[m] & 0xff));
+            let hi = self.b8(UC, 6 << 12 | (m as u32) << 8 | u32::from(lo));
             s.mv[m] = u16::from_le_bytes([lo, hi]);
         }
-        s.buttons = self.b8(UC, 7 << 12 | s.buttons as u32);
-        s.impulse = self.b8(UC, 8 << 12 | s.impulse as u32);
+        s.buttons = self.b8(UC, 7 << 12 | u32::from(s.buttons));
+        s.impulse = self.b8(UC, 8 << 12 | u32::from(s.impulse));
         self.ucs[pl as usize] = s;
     }
 }
@@ -1321,27 +1341,27 @@ fn cmd_class(c: u8) -> u8 {
 
 /// Sign/magnitude bucket of a byte residual (as i8).
 #[inline(always)]
-pub fn qb(v: u8) -> u8 {
-    crate::numeric::q(v as i8 as i32)
+pub(crate) fn qb(v: u8) -> u8 {
+    crate::numeric::q(i32::from(v.cast_signed()))
 }
 
 /// The grid value of a usercmd angle: the s in -32768..=32767 whose
 /// f32(s * 45/8192) has exactly these bits (s * 45/8192 is exact in f32),
 /// or None (-0.0, NaN, +180 and anything else off the grid).
 #[inline]
-pub fn on_grid(bits: u32) -> Option<u16> {
+pub(crate) fn on_grid(bits: u32) -> Option<u16> {
     // f * 8192 is exact and the division correctly rounded: an integer
     // quotient comes out exactly
-    let x = f32::from_bits(bits) as f64 * 8192.0 / 45.0;
+    let x = f64::from(f32::from_bits(bits)) * 8192.0 / 45.0;
     if x.fract() != 0.0 || !(-32768.0..=32767.0).contains(&x) {
         return None;
     }
     let s = x as i32 as i16;
-    (grid_f32(s as u16) == bits).then_some(s as u16)
+    (grid_f32(s.cast_unsigned()) == bits).then_some(s.cast_unsigned())
 }
 
 /// The f32 bits of grid value `s` (as i16): s * 45/8192, exact.
 #[inline]
-pub fn grid_f32(s: u16) -> u32 {
-    ((s as i16 as f32) * (45.0 / 8192.0)).to_bits()
+pub(crate) fn grid_f32(s: u16) -> u32 {
+    (f32::from(s.cast_signed()) * (45.0 / 8192.0)).to_bits()
 }

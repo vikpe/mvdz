@@ -18,11 +18,11 @@ use super::rc::{Dec as RcDec, Enc as RcEnc, IntModel};
 use crate::budget::{Budget, Charge, with_capacity};
 use crate::error::{Error, Result};
 use crate::numeric::NCtx;
-use crate::streams::*;
-use crate::util::{Rd, par_map, put_uv};
+use crate::streams::{N_STREAMS, PE_OX, PI_AP, PI_OX, SND_O, TE_O, UC_A, is_lazy, is_num};
+use crate::util::{Rd, approx_f64, par_map, put_uv};
 use std::sync::Arc;
 
-pub const SCALE: u32 = 12;
+pub(crate) const SCALE: u32 = 12;
 const T: u32 = 1 << SCALE;
 const L: u32 = 1 << 16;
 const NSTATE: usize = 4;
@@ -49,8 +49,8 @@ fn qlog(c: u32) -> u32 {
     if c == 0 {
         return 0;
     }
-    let x = (c as u64) << 16;
-    let o = 31 - c.leading_zeros();
+    let x = u64::from(c) << 16;
+    let o = c.ilog2();
     let mut e = o * STEPS;
     for k in 0..STEPS {
         if qval(1 + o * STEPS + k) <= x {
@@ -60,7 +60,11 @@ fn qlog(c: u32) -> u32 {
     let lo = qval(1 + e);
     let hi = qval(2 + e);
     // compare x/lo with hi/x  <=>  x*x vs lo*hi
-    if (x as u128) * (x as u128) > (lo as u128) * (hi as u128) {
+    #[expect(
+        clippy::suspicious_operation_groupings,
+        reason = "x*x against lo*hi is meant"
+    )]
+    if u128::from(x) * u128::from(x) > u128::from(lo) * u128::from(hi) {
         2 + e
     } else {
         1 + e
@@ -69,7 +73,7 @@ fn qlog(c: u32) -> u32 {
 
 /// Normalises weights to a total of exactly T, every present symbol >= 1.
 fn normalize(w: &[u64]) -> Vec<u32> {
-    let tot: u128 = w.iter().map(|&x| x as u128).sum();
+    let tot: u128 = w.iter().map(|&x| u128::from(x)).sum();
     let mut f = vec![0u32; w.len()];
     if tot == 0 {
         return f;
@@ -77,11 +81,11 @@ fn normalize(w: &[u64]) -> Vec<u32> {
     let mut sum: i64 = 0;
     for (i, &x) in w.iter().enumerate() {
         if x > 0 {
-            f[i] = ((x as u128 * T as u128 / tot) as u32).max(1);
-            sum += f[i] as i64;
+            f[i] = ((u128::from(x) * u128::from(T) / tot) as u32).max(1);
+            sum += i64::from(f[i]);
         }
     }
-    let mut diff = T as i64 - sum;
+    let mut diff = i64::from(T) - sum;
     while diff != 0 {
         // adjust the largest entry (first one on ties)
         let mut bi = 0;
@@ -91,14 +95,16 @@ fn normalize(w: &[u64]) -> Vec<u32> {
             }
         }
         if diff > 0 {
-            f[bi] += diff as u32;
+            f[bi] += diff.cast_unsigned() as u32;
             diff = 0;
         } else {
-            let take = (-diff).min(f[bi] as i64 - 1).min(((f[bi] as i64) + 1) / 2);
+            let take = (-diff)
+                .min(i64::from(f[bi]) - 1)
+                .min((i64::from(f[bi]) + 1) / 2);
             if take <= 0 {
                 break;
             }
-            f[bi] -= take as u32;
+            f[bi] -= take.cast_unsigned() as u32;
             diff += take;
         }
     }
@@ -114,7 +120,7 @@ struct Table {
 }
 
 impl Table {
-    fn from_q(q: Vec<u32>) -> Table {
+    fn from_q(q: Vec<u32>) -> Self {
         let w: Vec<u64> = q.iter().map(|&x| qval(x)).collect();
         let freq = normalize(&w);
         let mut cum = vec![0u32; freq.len() + 1];
@@ -127,32 +133,32 @@ impl Table {
         } else {
             None
         };
-        Table { q, freq, cum, det }
+        Self { q, freq, cum, det }
     }
 }
 
 fn entropy_bits(c: &[u32]) -> f64 {
-    let n: u64 = c.iter().map(|&x| x as u64).sum();
+    let n: u64 = c.iter().map(|&x| u64::from(x)).sum();
     if n == 0 {
         return 0.0;
     }
-    let ln = (n as f64).log2();
+    let ln = approx_f64(n).log2();
     c.iter()
         .filter(|&&x| x > 0)
-        .map(|&x| x as f64 * (ln - (x as f64).log2()))
+        .map(|&x| f64::from(x) * (ln - f64::from(x).log2()))
         .sum()
 }
 
 fn cross_bits(c: &[u32], p: &[u32]) -> f64 {
-    let n: u64 = p.iter().map(|&x| x as u64).sum();
-    let ln = (n.max(1) as f64).log2();
+    let n: u64 = p.iter().map(|&x| u64::from(x)).sum();
+    let ln = approx_f64(n.max(1)).log2();
     let mut b = 0.0;
     for (i, &x) in c.iter().enumerate() {
         if x > 0 {
             if p[i] == 0 {
                 return f64::INFINITY;
             }
-            b += x as f64 * (ln - (p[i] as f64).log2());
+            b = f64::mul_add(f64::from(x), ln - f64::from(p[i]).log2(), b);
         }
     }
     b
@@ -166,14 +172,15 @@ struct Model {
     tables: Vec<Table>,
 }
 
-pub static TABLE_BITS_PER_SYM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
+pub(crate) static TABLE_BITS_PER_SYM: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(5);
 const TABLE_BITS_BASE: f64 = 16.0;
 
 /// A stream's counts and the contexts that get their own table.
 struct Counts {
     alpha: usize,
     own: Vec<u32>,
-    own_counts: Vec<u32>,
+    own_rows: Vec<u32>,
     rest: Vec<u32>,
 }
 
@@ -188,8 +195,8 @@ pub struct Tally {
 }
 
 impl Tally {
-    pub fn new(alpha: usize) -> Tally {
-        Tally {
+    pub fn new(alpha: usize) -> Self {
+        Self {
             alpha,
             row_of: Vec::new(),
             keys: Vec::new(),
@@ -215,7 +222,7 @@ impl Tally {
             &mut self.global,
         );
         for (&s, &c) in syms.iter().zip(ctxs) {
-            let c = c as u32;
+            let c = u32::from(c);
             let r = row_of[c as usize];
             let r = if r == u32::MAX {
                 let r = keys.len() as u32;
@@ -256,11 +263,11 @@ impl Counts {
     /// highest context first) into the fallback's counts.
     fn fold_smallest(&mut self, n: usize) {
         let alpha = self.alpha;
-        let row = |i: usize| &self.own_counts[i * alpha..(i + 1) * alpha];
+        let row = |i: usize| &self.own_rows[i * alpha..(i + 1) * alpha];
         let mut order: Vec<usize> = (0..self.own.len()).collect();
         order.sort_by_key(|&i| {
             (
-                row(i).iter().map(|&x| x as u64).sum::<u64>(),
+                row(i).iter().map(|&x| u64::from(x)).sum::<u64>(),
                 std::cmp::Reverse(i),
             )
         });
@@ -269,7 +276,7 @@ impl Counts {
             drop[i] = true;
         }
         let mut own = Vec::new();
-        let mut own_counts = Vec::new();
+        let mut own_rows = Vec::new();
         for i in 0..self.own.len() {
             if drop[i] {
                 for (r, &c) in self.rest.iter_mut().zip(row(i)) {
@@ -277,18 +284,18 @@ impl Counts {
                 }
             } else {
                 own.push(self.own[i]);
-                own_counts.extend_from_slice(row(i));
+                own_rows.extend_from_slice(row(i));
             }
         }
         self.own = own;
-        self.own_counts = own_counts;
+        self.own_rows = own_rows;
     }
 }
 
 /// The tables of a model of these counts: own contexts and the fallback's
 /// counts.
 fn select(t: &Tally) -> Counts {
-    let per_sym = TABLE_BITS_PER_SYM.load(std::sync::atomic::Ordering::Relaxed) as f64;
+    let per_sym = f64::from(TABLE_BITS_PER_SYM.load(std::sync::atomic::Ordering::Relaxed));
     let (alpha, row_of, rows, keys) = (t.alpha, &t.row_of, &t.rows, &t.keys);
     let row = |k: u32| &rows[row_of[k as usize] as usize * alpha..][..alpha];
     // selection order is part of the output: most frequent context first
@@ -303,8 +310,8 @@ fn select(t: &Tally) -> Counts {
         let mut rest = vec![0u32; alpha];
         for &k in &keys {
             let c = row(k);
-            let present = c.iter().filter(|&&x| x > 0).count() as f64;
-            let own_cost = entropy_bits(c) + TABLE_BITS_BASE + per_sym * present;
+            let present = approx_f64(c.iter().filter(|&&x| x > 0).count() as u64);
+            let own_cost = per_sym.mul_add(present, entropy_bits(c) + TABLE_BITS_BASE);
             if own_cost < cross_bits(c, &fb) {
                 own.push(k);
             } else {
@@ -320,7 +327,7 @@ fn select(t: &Tally) -> Counts {
             fb = rest;
         }
     }
-    own.sort();
+    own.sort_unstable();
     let mut is_own = vec![false; row_of.len()];
     for &k in &own {
         is_own[k as usize] = true;
@@ -334,14 +341,14 @@ fn select(t: &Tally) -> Counts {
             }
         }
     }
-    let mut own_counts = Vec::with_capacity(own.len() * alpha);
+    let mut own_rows = Vec::with_capacity(own.len() * alpha);
     for &k in &own {
-        own_counts.extend_from_slice(row(k));
+        own_rows.extend_from_slice(row(k));
     }
     Counts {
         alpha,
         own,
-        own_counts,
+        own_rows,
         rest,
     }
 }
@@ -353,7 +360,7 @@ fn build_model(c: &Counts) -> Model {
     let mut map = vec![0u32; maxk];
     for (i, &k) in c.own.iter().enumerate() {
         tables.push(Table::from_q(
-            c.own_counts[i * alpha..(i + 1) * alpha]
+            c.own_rows[i * alpha..(i + 1) * alpha]
                 .iter()
                 .map(|&n| qlog(n))
                 .collect(),
@@ -375,7 +382,7 @@ const NQC: usize = 17 * 18;
 fn write_table(e: &mut RcEnc, m: &mut IntModel, t: &[u32], fb: Option<&[u32]>) {
     let mut prev = 0u32;
     for (i, &q) in t.iter().enumerate() {
-        let f = fb.map(|f| f[i].min(16)).unwrap_or(17) as usize;
+        let f = fb.map_or(17, |f| f[i].min(16)) as usize;
         m.put(e, f * 17 + prev.min(16) as usize, q);
         prev = q;
     }
@@ -385,7 +392,7 @@ fn read_table(d: &mut RcDec, m: &mut IntModel, alpha: usize, fb: Option<&[u32]>)
     let mut t = vec![0u32; alpha];
     let mut prev = 0u32;
     for i in 0..alpha {
-        let f = fb.map(|f| f[i].min(16)).unwrap_or(17) as usize;
+        let f = fb.map_or(17, |f| f[i].min(16)) as usize;
         t[i] = m.get(d, f * 17 + prev.min(16) as usize).min(160);
         prev = t[i];
     }
@@ -422,8 +429,8 @@ const E_EMPTY: u32 = E_DET | E_LUT;
 
 /// Format limit on the binary decisions a model header may take:
 /// `DEC_PER_BYTE * header length + DEC_BASE` (FORMAT.md, rule M2).
-pub const DEC_PER_BYTE: u64 = 128;
-pub const DEC_BASE: u64 = 1024;
+pub(crate) const DEC_PER_BYTE: u64 = 128;
+pub(crate) const DEC_BASE: u64 = 1024;
 
 /// Decoder-side model. A search table at pool offset o is
 /// `[0, c1, .., cn = T, pad..]` (16*chunks + 1 entries) followed by its
@@ -443,7 +450,10 @@ fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
     debug_assert!(c.len() >= 16 * chunks);
     #[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
     {
-        use std::arch::x86_64::*;
+        use std::arch::x86_64::{
+            __m128i, _mm_add_epi32, _mm_cmpgt_epi16, _mm_cvtsi128_si32, _mm_loadu_si128,
+            _mm_sad_epu8, _mm_set1_epi16, _mm_setzero_si128, _mm_srli_si128, _mm_sub_epi16,
+        };
         // SAFETY: SSE2 is part of x86_64; the loads stay within
         // c[..16 * chunks]: every caller passes a search table of
         // 2 * 16 * chunks entries (read_model).
@@ -455,7 +465,8 @@ fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
             debug_assert!(chunks <= 127);
             let sv = _mm_set1_epi16(slot as i16);
             let mut gt = _mm_setzero_si128();
-            let p = c.as_ptr() as *const __m128i;
+            #[expect(clippy::cast_ptr_alignment, reason = "read with unaligned loads only")]
+            let p = c.as_ptr().cast::<__m128i>();
             for i in 0..chunks {
                 let a = _mm_loadu_si128(p.add(2 * i));
                 let b = _mm_loadu_si128(p.add(2 * i + 1));
@@ -463,7 +474,8 @@ fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
                 gt = _mm_sub_epi16(gt, _mm_cmpgt_epi16(b, sv));
             }
             let s = _mm_sad_epu8(gt, _mm_setzero_si128());
-            let n = _mm_cvtsi128_si32(_mm_add_epi32(s, _mm_srli_si128(s, 8))) as usize;
+            let n =
+                _mm_cvtsi128_si32(_mm_add_epi32(s, _mm_srli_si128(s, 8))).cast_unsigned() as usize;
             16 * chunks - n
         }
     }
@@ -495,7 +507,7 @@ fn read_header(b: &[u8], alpha_req: usize, budget: &Budget) -> Result<Header> {
         return Err(bad);
     }
     // the log-quantised tables (u8: q <= 160) until the layout is known
-    let _c = budget.alloc(((n + 1) * alpha + 4 * (n + 1)) as u64)?;
+    let charge = budget.alloc(((n + 1) * alpha + 4 * (n + 1)) as u64)?;
     let mut qs: Vec<u8> = with_capacity((n + 1) * alpha)?;
     let mut keys: Vec<u32> = with_capacity(n)?;
     let fbq = read_table(&mut d, &mut im, alpha, None);
@@ -526,7 +538,7 @@ fn read_header(b: &[u8], alpha_req: usize, budget: &Budget) -> Result<Header> {
         return Err(bad);
     }
     budget.work(d.decisions)?;
-    Ok((keys, qs, _c))
+    Ok((keys, qs, charge))
 }
 
 /// Reads a model header and builds its decoder model.
@@ -566,12 +578,12 @@ pub(crate) fn read_model(b: &[u8], alpha: usize, budget: &Budget) -> Result<DMod
     };
     let mut ents = with_capacity(keys.len() + 1)?;
     for q in qs.chunks(alpha) {
-        let t = Table::from_q(q.iter().map(|&x| x as u32).collect());
+        let t = Table::from_q(q.iter().map(|&x| u32::from(x)).collect());
         let present: Vec<usize> = (0..alpha).filter(|&s| t.freq[s] > 0).collect();
         let e = if present.is_empty() {
             E_EMPTY
         } else if let Some(d) = t.det {
-            E_DET | d as u32
+            E_DET | u32::from(d)
         } else if present.len() <= SEARCH_MAX {
             let off = dm.pool.len() as u32;
             dm.pool.push(0);
@@ -613,8 +625,8 @@ pub(crate) fn read_model(b: &[u8], alpha: usize, budget: &Budget) -> Result<DMod
 }
 
 impl DModel {
-    fn empty() -> DModel {
-        DModel {
+    fn empty() -> Self {
+        Self {
             map: Vec::new(),
             fb: E_EMPTY,
             chunks: 1,
@@ -653,12 +665,12 @@ impl DModel {
             // changed afterwards.
             let t = unsafe { self.pool.get_unchecked(e as usize..e as usize + 2 * m + 1) };
             let k = count_le(&t[1..], self.chunks, slot);
-            let lo = t[k] as u32;
-            let hi = t[k + 1] as u32;
+            let lo = u32::from(t[k]);
+            let hi = u32::from(t[k + 1]);
             // wrapping: an initial state from a hostile file may overflow
             // (the result is then garbage that the stream's checks refuse)
             (
-                t[m + 1 + k] as u32,
+                u32::from(t[m + 1 + k]),
                 (hi - lo).wrapping_mul(x >> SCALE).wrapping_add(slot - lo),
             )
         } else {
@@ -671,7 +683,7 @@ impl DModel {
             )
         };
         if x < L {
-            x = (x << 16) | d.word() as u32;
+            x = (x << 16) | u32::from(d.word());
         }
         d.x[j] = x;
         Some(sym)
@@ -686,8 +698,8 @@ struct REnc {
 }
 
 impl REnc {
-    fn new() -> REnc {
-        REnc {
+    fn new() -> Self {
+        Self {
             x: [L; NSTATE],
             words: Vec::new(),
         }
@@ -725,7 +737,7 @@ struct RDec<'a> {
 }
 
 impl<'a> RDec<'a> {
-    fn new(b: &'a [u8]) -> RDec<'a> {
+    fn new(b: &'a [u8]) -> Self {
         let mut d = RDec {
             x: [0; NSTATE],
             b,
@@ -733,8 +745,8 @@ impl<'a> RDec<'a> {
             j: 0,
         };
         for j in 0..NSTATE {
-            let hi = d.word() as u32;
-            let lo = d.word() as u32;
+            let hi = u32::from(d.word());
+            let lo = u32::from(d.word());
             d.x[j] = hi << 16 | lo;
         }
         d
@@ -834,7 +846,7 @@ fn unpack(b: &[u8]) -> Result<Unpacked<'_>> {
 pub struct Shared {
     model: Model,
     /// the model header
-    pub hdr: Vec<u8>,
+    pub(crate) hdr: Vec<u8>,
 }
 
 /// The decoder models of a file, by stream id.
@@ -842,7 +854,7 @@ pub(crate) type Models = Vec<Option<Arc<DModel>>>;
 
 /// The models of a file (FORMAT.md §2.6): the models block is read once,
 /// when the file is opened; that checks it and builds its models.
-pub struct FileTables {
+pub(crate) struct FileTables {
     len: u64,
     models: Models,
 }
@@ -850,8 +862,8 @@ pub struct FileTables {
 impl FileTables {
     /// Reads a models block's body: checks it and builds its models
     /// (charged to `budget`) on up to `threads` threads.
-    pub(crate) fn new(body: &[u8], threads: usize, budget: &Budget) -> Result<FileTables> {
-        Ok(FileTables {
+    pub(crate) fn new(body: &[u8], threads: usize, budget: &Budget) -> Result<Self> {
+        Ok(Self {
             len: body.len() as u64,
             models: read_tables(body, threads, budget)?,
         })
@@ -918,7 +930,7 @@ pub fn encode_bytes(syms: &[u8], ctxs: &[u16], file: &Shared) -> Vec<u8> {
     pack_body(&file.model, syms, ctxs, &[])
 }
 
-pub struct ByteDec<'a> {
+pub(crate) struct ByteDec<'a> {
     m: Arc<DModel>,
     d: RDec<'a>,
     n: usize,
@@ -926,7 +938,7 @@ pub struct ByteDec<'a> {
 }
 
 impl<'a> ByteDec<'a> {
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         ByteDec {
             m: Arc::new(DModel::empty()),
             d: RDec::finished_empty(),
@@ -948,33 +960,33 @@ impl<'a> ByteDec<'a> {
         })
     }
     #[inline(always)]
-    pub fn get(&mut self, ctx: u32) -> Option<u8> {
+    pub(crate) fn get(&mut self, ctx: u32) -> Option<u8> {
         self.used += 1;
         let e = self.m.entry(byte_ctx(ctx));
         self.m.decode(&mut self.d, e).map(|v| v as u8)
     }
     /// Exactly the declared count read and the coded data consumed.
-    pub fn done(&self) -> bool {
+    pub(crate) fn done(&self) -> bool {
         self.used == self.n && self.d.finished()
     }
 }
 
 // --------------------------------------------------------------- numeric streams
 
-pub const NALPHA: usize = 65;
+pub(crate) const NALPHA: usize = 65;
 
 /// Static-table context of a numeric value, per stream.
 #[inline(always)]
-pub fn num_ctx(sid: usize, c: &NCtx) -> u32 {
+pub(crate) fn num_ctx(sid: usize, c: &NCtx) -> u32 {
     let f = &c.f;
-    let cl = |v: u8, m: u8| v.min(m) as u32;
+    let cl = |v: u8, m: u8| u32::from(v.min(m));
     match sid {
         PI_OX..=50 => cl(f[0], 19) | cl(f[1], 19) << 5,
         PI_AP..=53 => cl(f[0], 23) | cl(f[1], 23) << 5,
-        PE_OX..=56 => cl(f[0], 17) | cl(f[1], 17) << 5 | ((f[3] & 1) as u32) << 10,
-        SND_O | TE_O => f[0] as u32 | (f[1] as u32) << 4,
-        UC_A => cl(f[0], 23) | cl(f[1], 23) << 5 | cl(f[2], 15) << 10 | (f[3] as u32) << 14,
-        _ => cl(f[0], 63) | (f[1] as u32) << 6,
+        PE_OX..=56 => cl(f[0], 17) | cl(f[1], 17) << 5 | u32::from(f[3] & 1) << 10,
+        SND_O | TE_O => u32::from(f[0]) | u32::from(f[1]) << 4,
+        UC_A => cl(f[0], 23) | cl(f[1], 23) << 5 | cl(f[2], 15) << 10 | u32::from(f[3]) << 14,
+        _ => cl(f[0], 63) | u32::from(f[1]) << 6,
     }
 }
 
@@ -984,13 +996,13 @@ fn bucket(v: i32) -> (u16, u32, u32) {
     if m == 0 {
         return (0, 0, 0);
     }
-    let n = 32 - m.leading_zeros();
-    let b = 2 * n - 1 + (v < 0) as u32;
+    let n = m.bit_width();
+    let b = 2 * n - 1 + u32::from(v < 0);
     (b as u16, n - 1, m & ((1u32 << (n - 1)) - 1))
 }
 
 #[derive(Default)]
-pub struct BitW {
+pub(crate) struct BitW {
     acc: u64,
     n: u32,
     out: Vec<u8>,
@@ -998,8 +1010,8 @@ pub struct BitW {
 
 impl BitW {
     #[inline]
-    pub fn put(&mut self, v: u32, n: u32) {
-        self.acc |= (v as u64) << self.n;
+    pub(crate) fn put(&mut self, v: u32, n: u32) {
+        self.acc |= u64::from(v) << self.n;
         self.n += n;
         while self.n >= 8 {
             self.out.push(self.acc as u8);
@@ -1007,7 +1019,7 @@ impl BitW {
             self.n -= 8;
         }
     }
-    pub fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         if self.n > 0 {
             self.out.push(self.acc as u8);
         }
@@ -1015,7 +1027,7 @@ impl BitW {
     }
 }
 
-pub struct BitR<'a> {
+pub(crate) struct BitR<'a> {
     b: &'a [u8],
     pos: usize,
     acc: u64,
@@ -1025,7 +1037,7 @@ pub struct BitR<'a> {
 }
 
 impl<'a> BitR<'a> {
-    pub fn new(b: &'a [u8]) -> BitR<'a> {
+    pub(crate) fn new(b: &'a [u8]) -> Self {
         BitR {
             b,
             pos: 0,
@@ -1036,15 +1048,15 @@ impl<'a> BitR<'a> {
     }
     #[inline(always)]
     fn refill(&mut self) {
-        if self.pos + 8 <= self.b.len() {
-            let w = u64::from_le_bytes(self.b[self.pos..self.pos + 8].try_into().unwrap());
+        if let Some(word) = self.b.get(self.pos..).and_then(<[u8]>::first_chunk) {
+            let w = u64::from_le_bytes(*word);
             self.acc |= w << self.n;
             let take = (63 - self.n) / 8;
             self.pos += take as usize;
             self.n += take * 8;
         } else {
             while self.n <= 56 {
-                let v = self.b.get(self.pos).copied().unwrap_or(0) as u64;
+                let v = u64::from(self.b.get(self.pos).copied().unwrap_or(0));
                 self.acc |= v << self.n;
                 self.pos += 1;
                 self.n += 8;
@@ -1053,32 +1065,32 @@ impl<'a> BitR<'a> {
     }
     /// `n` bits (n <= 31), least significant first; zeros past the end.
     #[inline(always)]
-    pub fn get(&mut self, n: u32) -> u32 {
+    pub(crate) fn get(&mut self, n: u32) -> u32 {
         if self.n < n {
             self.refill();
         }
         let v = (self.acc & ((1u64 << n) - 1)) as u32;
         self.acc >>= n;
         self.n -= n;
-        self.used += n as u64;
+        self.used += u64::from(n);
         v
     }
     /// The bits read end within the last byte (at most 7 padding bits).
-    pub fn finished(&self) -> bool {
+    pub(crate) fn finished(&self) -> bool {
         self.used.div_ceil(8) == self.b.len() as u64
     }
 }
 
 /// The values of a numeric stream as they are coded: the bucket of each
 /// value (its symbol), its context, and the mantissa bits of all of them.
-pub struct NumSyms {
-    pub syms: Vec<u8>,
-    pub ctxs: Vec<u16>,
-    pub extra: Vec<u8>,
+pub(crate) struct NumSyms {
+    pub(crate) syms: Vec<u8>,
+    pub(crate) ctxs: Vec<u16>,
+    pub(crate) extra: Vec<u8>,
 }
 
 /// Collects the values of numeric stream `sid` as [`NumSyms`].
-pub struct NumSymW {
+pub(crate) struct NumSymW {
     sid: usize,
     syms: Vec<u8>,
     ctxs: Vec<u16>,
@@ -1086,8 +1098,8 @@ pub struct NumSymW {
 }
 
 impl NumSymW {
-    pub fn new(sid: usize) -> NumSymW {
-        NumSymW {
+    pub(crate) fn new(sid: usize) -> Self {
+        Self {
             sid,
             syms: Vec::new(),
             ctxs: Vec::new(),
@@ -1095,9 +1107,9 @@ impl NumSymW {
         }
     }
     #[inline(always)]
-    pub fn push(&mut self, c: &NCtx, v: i32) {
+    pub(crate) fn push(&mut self, c: NCtx, v: i32) {
         let (b, n, m) = bucket(v);
-        let ctx = num_ctx(self.sid, c);
+        let ctx = num_ctx(self.sid, &c);
         debug_assert!(
             ctx <= 0xffff,
             "stream {}: context {ctx:#x} over 16 bits",
@@ -1107,7 +1119,7 @@ impl NumSymW {
         self.ctxs.push(ctx as u16);
         self.bits.put(m, n);
     }
-    pub fn finish(self) -> NumSyms {
+    pub(crate) fn finish(self) -> NumSyms {
         NumSyms {
             syms: self.syms,
             ctxs: self.ctxs,
@@ -1117,11 +1129,11 @@ impl NumSymW {
 }
 
 /// A numeric stream coded with its model in the file, `file`.
-pub fn encode_num(num: &NumSyms, file: &Shared) -> Vec<u8> {
+pub(crate) fn encode_num(num: &NumSyms, file: &Shared) -> Vec<u8> {
     pack_body(&file.model, &num.syms, &num.ctxs, &num.extra)
 }
 
-pub struct NumDec<'a> {
+pub(crate) struct NumDec<'a> {
     sid: usize,
     m: Arc<DModel>,
     d: RDec<'a>,
@@ -1131,7 +1143,7 @@ pub struct NumDec<'a> {
 }
 
 impl<'a> NumDec<'a> {
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         NumDec {
             sid: 0,
             m: Arc::new(DModel::empty()),
@@ -1154,7 +1166,7 @@ impl<'a> NumDec<'a> {
         })
     }
     #[inline(always)]
-    pub fn get(&mut self, c: NCtx) -> Option<i32> {
+    pub(crate) fn get(&mut self, c: NCtx) -> Option<i32> {
         self.used += 1;
         let e = self.m.entry(num_ctx(self.sid, &c));
         let b = self.m.decode(&mut self.d, e)?;
@@ -1162,14 +1174,14 @@ impl<'a> NumDec<'a> {
             return None;
         }
         // branchless: b = 0 reads no bits and gives 0
-        let n = (b + 1) / 2;
+        let n = b.div_ceil(2);
         let nb = n.saturating_sub(1);
-        let lead = ((n > 0) as u32) << nb;
-        let m = (lead | self.bits.get(nb)) as i32;
+        let lead = u32::from(n > 0) << nb;
+        let m = (lead | self.bits.get(nb)).cast_signed();
         Some(if b & 1 == 0 { m.wrapping_neg() } else { m })
     }
     /// Exactly the declared count read and every byte consumed.
-    pub fn done(&self) -> bool {
+    pub(crate) fn done(&self) -> bool {
         self.used == self.n && self.d.finished() && self.bits.finished()
     }
 }
@@ -1177,18 +1189,19 @@ impl<'a> NumDec<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
 
     /// The shared model of `syms` and its decoder model.
-    fn models(syms: &[u8], ctxs: &[u16], alpha: usize) -> (Shared, Arc<DModel>) {
+    fn models(syms: &[u8], ctxs: &[u16], alpha: usize) -> anyhow::Result<(Shared, Arc<DModel>)> {
         let mut t = Tally::new(alpha);
         t.add(syms, ctxs);
-        let sh = t.shared().unwrap();
-        let dm = read_model(&sh.hdr, alpha, &Budget::unlimited()).unwrap();
-        (sh, Arc::new(dm))
+        let sh = t.shared().context("a model")?;
+        let dm = read_model(&sh.hdr, alpha, &Budget::unlimited())?;
+        Ok((sh, Arc::new(dm)))
     }
 
     #[test]
-    fn byte_round_trip_and_limits() {
+    fn byte_round_trip_and_limits() -> anyhow::Result<()> {
         // three contexts with different distributions: own tables
         let ctxs: Vec<u16> = (0..5000u16).map(|i| i % 3).collect();
         let syms: Vec<u8> = (0..5000u32)
@@ -1196,29 +1209,30 @@ mod tests {
                 [(i * 7 % 13) as u8, 100 + (i % 5) as u8, 200 + (i % 2) as u8][(i % 3) as usize]
             })
             .collect();
-        let (sh, dm) = models(&syms, &ctxs, 256);
+        let (sh, dm) = models(&syms, &ctxs, 256)?;
         let b = encode_bytes(&syms, &ctxs, &sh);
-        let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
+        let mut d = ByteDec::new(&b, syms.len(), &dm)?;
         for (i, &s) in syms.iter().enumerate() {
-            assert_eq!(d.get(ctxs[i] as u32), Some(s));
+            assert_eq!(d.get(u32::from(ctxs[i])), Some(s));
         }
         assert!(d.done());
         // the model of a byte stream is refused as a numeric stream's
         assert!(read_model(&sh.hdr, NALPHA, &Budget::unlimited()).is_err());
         // a body cut short is refused; a symbol short does not finish
         assert!(ByteDec::new(&b[..b.len() - 2], syms.len(), &dm).is_err());
-        let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
+        let mut d = ByteDec::new(&b, syms.len(), &dm)?;
         for i in 0..syms.len() - 1 {
-            d.get(ctxs[i] as u32);
+            d.get(u32::from(ctxs[i]));
         }
         assert!(!d.done());
+        Ok(())
     }
 
     /// A model whose header would break the decision limit (thousands of
     /// own tables of one symbol each cost almost no bytes) is made smaller
     /// until it holds, and still codes the stream.
     #[test]
-    fn model_over_the_decision_limit_shrinks() {
+    fn model_over_the_decision_limit_shrinks() -> anyhow::Result<()> {
         let n = 60_000u32;
         let ctxs: Vec<u16> = (0..n).map(|i| (i % 3000) as u16).collect();
         let syms: Vec<u8> = ctxs.iter().map(|&c| (c % 4) as u8).collect();
@@ -1226,23 +1240,24 @@ mod tests {
         t.add(&syms, &ctxs);
         let full = build_model(&select(&t));
         assert!(header(&full).is_none(), "the full model breaks rule M2");
-        let (sh, dm) = models(&syms, &ctxs, 256);
+        let (sh, dm) = models(&syms, &ctxs, 256)?;
         assert!(sh.model.own.len() < full.own.len());
         let b = encode_bytes(&syms, &ctxs, &sh);
-        let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
+        let mut d = ByteDec::new(&b, syms.len(), &dm)?;
         for (i, &s) in syms.iter().enumerate() {
-            assert_eq!(d.get(ctxs[i] as u32), Some(s));
+            assert_eq!(d.get(u32::from(ctxs[i])), Some(s));
         }
         assert!(d.done());
+        Ok(())
     }
 
     #[test]
-    fn numeric_round_trip() {
+    fn numeric_round_trip() -> anyhow::Result<()> {
         let vals: Vec<(NCtx, i32)> = (0..3000i32)
             .map(|i| {
                 (
                     NCtx {
-                        f: [(i % 5) as u8, 0, 0, 0, 0, 0],
+                        f: [(i % 5).cast_unsigned() as u8, 0, 0, 0, 0, 0],
                     },
                     (i * 37) % 2001 - 1000,
                 )
@@ -1250,15 +1265,16 @@ mod tests {
             .collect();
         let mut w = NumSymW::new(PI_OX);
         for (c, v) in &vals {
-            w.push(c, *v);
+            w.push(*c, *v);
         }
         let num = w.finish();
-        let (sh, dm) = models(&num.syms, &num.ctxs, NALPHA);
+        let (sh, dm) = models(&num.syms, &num.ctxs, NALPHA)?;
         let b = encode_num(&num, &sh);
-        let mut d = NumDec::new(PI_OX, &b, vals.len(), &dm).unwrap();
+        let mut d = NumDec::new(PI_OX, &b, vals.len(), &dm)?;
         for &(c, v) in &vals {
             assert_eq!(d.get(c), Some(v));
         }
         assert!(d.done());
+        Ok(())
     }
 }

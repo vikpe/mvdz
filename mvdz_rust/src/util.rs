@@ -15,17 +15,17 @@ pub fn put_uv(out: &mut Vec<u8>, mut v: u64) {
 
 /// Byte cursor over a buffer. Every read is bounds-checked.
 pub struct Rd<'a> {
-    pub b: &'a [u8],
-    pub i: usize,
+    pub(crate) b: &'a [u8],
+    pub(crate) i: usize,
 }
 
 impl<'a> Rd<'a> {
-    pub fn new(b: &'a [u8]) -> Rd<'a> {
+    pub fn new(b: &'a [u8]) -> Self {
         Rd { b, i: 0 }
     }
     /// Unsigned LEB128, at most 10 bytes. A value that does not fit in 64
     /// bits (bits set above bit 63 in the 10th byte) is an error.
-    pub fn uv(&mut self) -> Option<u64> {
+    pub(crate) fn uv(&mut self) -> Option<u64> {
         let mut v = 0u64;
         for k in 0..10 {
             let b = *self.b.get(self.i)?;
@@ -33,7 +33,7 @@ impl<'a> Rd<'a> {
             if k == 9 && b > 1 {
                 return None;
             }
-            v |= ((b & 0x7f) as u64) << (7 * k);
+            v |= u64::from(b & 0x7f) << (7 * k);
             if b < 0x80 {
                 return Some(v);
             }
@@ -45,23 +45,19 @@ impl<'a> Rd<'a> {
         usize::try_from(self.uv()?).ok()
     }
     /// A `uv` that must fit in a `u32`.
-    pub fn u32v(&mut self) -> Option<u32> {
+    pub(crate) fn u32v(&mut self) -> Option<u32> {
         u32::try_from(self.uv()?).ok()
     }
-    pub fn u8(&mut self) -> Option<u8> {
+    pub(crate) fn u8(&mut self) -> Option<u8> {
         let v = *self.b.get(self.i)?;
         self.i += 1;
         Some(v)
     }
-    pub fn u32le(&mut self) -> Option<u32> {
+    pub(crate) fn u32le(&mut self) -> Option<u32> {
         let s = self.take(4)?;
         Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
     }
-    pub fn u64le(&mut self) -> Option<u64> {
-        let s = self.take(8)?;
-        Some(u64::from_le_bytes(s.try_into().ok()?))
-    }
-    pub fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let s = self.b.get(self.i..self.i.checked_add(n)?)?;
         self.i += n;
         Some(s)
@@ -74,14 +70,20 @@ impl<'a> Rd<'a> {
     pub fn rest(&self) -> &'a [u8] {
         &self.b[self.i.min(self.b.len())..]
     }
-    pub fn done(&self) -> bool {
+    pub(crate) fn done(&self) -> bool {
         self.i == self.b.len()
     }
 }
 
 /// `u64` to `usize`, or `None` on a 32-bit target when it does not fit.
 #[inline]
-pub fn usz(v: u64) -> Option<usize> {
+/// A count or size as a float, for ratios and estimates.
+#[expect(clippy::cast_precision_loss, reason = "exact below 2^53")]
+pub fn approx_f64(count: u64) -> f64 {
+    count as f64
+}
+
+pub(crate) fn usz(v: u64) -> Option<usize> {
     usize::try_from(v).ok()
 }
 
@@ -95,13 +97,13 @@ pub fn crc32(b: &[u8]) -> u32 {
 
 /// Running CRC-32 over consecutive chunks.
 #[derive(Clone, Default)]
-pub struct Crc(crc32fast::Hasher);
+pub(crate) struct Crc(crc32fast::Hasher);
 
 impl Crc {
-    pub fn update(&mut self, b: &[u8]) {
+    pub(crate) fn update(&mut self, b: &[u8]) {
         self.0.update(b);
     }
-    pub fn finish(&self) -> u32 {
+    pub(crate) fn finish(&self) -> u32 {
         self.0.clone().finalize()
     }
 }
@@ -117,11 +119,11 @@ pub fn threads(n: usize) -> usize {
     if !HAS_THREADS {
         return 1;
     }
-    std::thread::available_parallelism().map_or(1, |n| n.get())
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
 /// True where the standard library can spawn threads.
-pub const HAS_THREADS: bool = !cfg!(target_family = "wasm");
+pub(crate) const HAS_THREADS: bool = !cfg!(target_family = "wasm");
 
 /// Runs `f(i)` for i in 0..n on up to `threads` threads; results in order.
 pub fn par_map<T: Send, F: Fn(usize) -> T + Sync>(threads: usize, n: usize, f: F) -> Vec<T> {
@@ -129,7 +131,7 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync>(threads: usize, n: usize, f: F
         return (0..n).map(f).collect();
     }
     let next = AtomicUsize::new(0);
-    let mut out: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    let mut out: Vec<Option<T>> = Vec::from_fn(n, |_| None);
     let slots = SyncPtr(out.as_mut_ptr());
     std::thread::scope(|s| {
         for _ in 0..threads.min(n) {

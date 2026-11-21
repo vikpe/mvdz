@@ -7,13 +7,16 @@ use crate::budget::{Budget, Charge, Limits, zeroed};
 use crate::coder::rans::FileTables;
 use crate::decode::{DemoCheck, decode_segment};
 use crate::error::{Error, Result, bad};
-use crate::format::*;
-use crate::util::usz;
+use crate::format::{
+    HEADER_LEN, Header, LEN, Layout, SEG_FIELDS, Sec, SegHdr, TABLES_MAX, len_field, parse_seg_hdr,
+};
 use std::io::{self, Read};
 
 // ---------------------------------------------------------------- reader
 
-/// Decoder of a file read in order. Yields the original demo bytes
+/// Decoder of a file read in order.
+///
+/// Yields the original demo bytes
 /// through `io::Read`, checked as they arrive: every segment's CRC-32
 /// before its bytes are returned, and the whole demo's size, duration and
 /// CRC-32 before the end is reported. The first error is sticky.
@@ -23,7 +26,8 @@ pub struct Reader<R: Read> {
     /// the file offset of what is read next
     pos: u64,
     cur: Vec<u8>,
-    _cur_charge: Option<Charge>,
+    /// held so the current segment stays charged to the budget
+    cur_charge: Option<Charge>,
     at: usize,
     done: bool,
     failed: Option<Error>,
@@ -50,12 +54,12 @@ impl<R: Read> Reader<R> {
         let lay = Layout::new(&p[..n], &budget)?;
         budget.input(HEADER_LEN as u64);
         let check = Some(DemoCheck::default());
-        Ok(Reader {
+        Ok(Self {
             r,
             lay,
             pos: HEADER_LEN as u64,
             cur: Vec::new(),
-            _cur_charge: None,
+            cur_charge: None,
             at: 0,
             done: false,
             failed: None,
@@ -110,18 +114,18 @@ impl<R: Read> Reader<R> {
     }
 
     fn deliver(&mut self, h: &SegHdr, body: &[u8]) -> Result<()> {
-        let n = usz(h.raw_len).ok_or(Error::Limit("segment size"))?;
+        let n = h.raw_len as usize;
         self.cur = Vec::new();
-        self._cur_charge = None;
-        let charge = self.budget.alloc(h.raw_len)?;
-        self.budget.work(h.raw_len)?;
+        self.cur_charge = None;
+        let charge = self.budget.alloc(u64::from(h.raw_len))?;
+        self.budget.work(u64::from(h.raw_len))?;
         let mut out = zeroed(n)?;
         let tm = decode_segment(&self.lay, body, h, &mut out, self.threads, &self.budget)?;
         if let Some(c) = self.check.as_mut() {
             c.segment(&out, tm)?;
         }
         self.cur = out;
-        self._cur_charge = Some(charge);
+        self.cur_charge = Some(charge);
         self.at = 0;
         Ok(())
     }
@@ -190,7 +194,7 @@ impl<R: Read> Reader<R> {
             if let Err(e) = self.advance() {
                 self.failed = Some(e);
                 self.cur = Vec::new();
-                self._cur_charge = None;
+                self.cur_charge = None;
                 self.at = 0;
                 return Err(e);
             }
