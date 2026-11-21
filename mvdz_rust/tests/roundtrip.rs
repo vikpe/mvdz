@@ -262,10 +262,7 @@ fn deterministic_output() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{}")], false);
     let src = duel().unwrap_or_else(|| several_segments(&small));
     for src in [small, src] {
-        let threads = |threads| mvdz::Config {
-            threads,
-            ..Default::default()
-        };
+        let threads = |threads| mvdz::Config { threads };
         let a = mvdz::compress(&src, &threads(1))?;
         let b = mvdz::compress(&src, &threads(3))?;
         assert!(a == b, "{} bytes: threads change the output", src.len());

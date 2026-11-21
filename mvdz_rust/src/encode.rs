@@ -18,18 +18,11 @@ use sha2::{Digest, Sha256};
 pub struct Config {
     /// Worker threads (0: one per logical core).
     pub threads: usize,
-    /// Decode the result and compare (a segment that does not decode to
-    /// its input is written as all tail). On by default; off only for
-    /// experiments.
-    pub verify: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            threads: 1,
-            verify: true,
-        }
+        Self { threads: 1 }
     }
 }
 
@@ -242,9 +235,6 @@ fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, 
     let fails = || Error::Internal("the encoder's output does not decode to its input");
     loop {
         let (out, info) = assemble(&header, shared, &bodies);
-        if !cfg.verify {
-            return Ok((out, info));
-        }
         // None: the container itself does not decode, nothing to fall back to
         let bad = failing_segments(&out, src, &cuts, threads).ok_or_else(fails)?;
         if !bad.contains(&true) {

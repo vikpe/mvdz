@@ -49,10 +49,7 @@ fn demos() -> Vec<Vec<u8>> {
 }
 
 fn config(threads: usize) -> mvdz::Config {
-    mvdz::Config {
-        threads,
-        verify: true,
-    }
+    mvdz::Config { threads }
 }
 
 fn codec(c: &mut Criterion) {

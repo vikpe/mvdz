@@ -37,15 +37,10 @@ independently decodable segments of 256 KiB."
     std::process::exit(2)
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one field per command-line flag"
-)]
 struct Args {
     threads: usize,
     max_memory: Option<u64>,
     files: Vec<String>,
-    no_verify: bool,
     any_input: bool,
     output: Option<String>,
     overwrite: bool,
@@ -70,7 +65,6 @@ fn parse(args: &[String]) -> Args {
         threads: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         max_memory: None,
         files: Vec::new(),
-        no_verify: false,
         any_input: false,
         output: None,
         overwrite: false,
@@ -88,7 +82,6 @@ fn parse(args: &[String]) -> Args {
                 a.threads = mvdz::util::threads(val().parse().unwrap_or_else(|_| usage()));
             }
             "--max-memory" => a.max_memory = Some(size(&val())),
-            "--no-verify" => a.no_verify = true,
             "--allow-non-demo" => a.any_input = true,
             "-o" | "--output" => a.output = Some(val()),
             "-f" | "--force" => a.overwrite = true,
@@ -273,10 +266,7 @@ fn run_jobs(a: &Args, compress: bool) {
 fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
     // non-demos are refused by the library
     let src = try_read_input(i)?;
-    let cfg = Config {
-        threads,
-        verify: !a.no_verify,
-    };
+    let cfg = Config { threads };
     let r = if a.any_input {
         // store whatever it is (it still round-trips)
         mvdz::encode::compress(&src, &cfg)

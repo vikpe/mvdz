@@ -2,11 +2,14 @@
 
 MVDZ is a proposal with no files in the wild, so there is no compatibility burden.
 
-## Status (2026-11-21, late evening)
+## Status (2026-11-21, night)
 
 Resume point: "After steps B and C" in the Handoff below. Five format decisions on
-2026-11-21; steps A (149c415), B (d1a8c06) and C (every integer a u32) are done. Next:
-the open questions, then "Suggestions (2026-11-21)" near the end of this file. Tests
+2026-11-21; steps A (149c415), B (d1a8c06) and C (3fedb9d, every integer a u32) are
+done. Open questions 6, 13 and 14 decided later the same day (see Decisions); the
+self-check switch is removed (uncommitted at the time of writing). Open: 9 (needs a new
+probe) and 12 (Viktor: re-measure every stream model first; plan under "After steps B
+and C"). Then "Suggestions (2026-11-21)" near the end of this file. Tests
 (`cargo nextest run --release` in `mvdz_rust/`): 40 pass, 4 fail (the known four).
 `cargo clippy --all-targets -- -D warnings` is clean.
 
@@ -38,9 +41,9 @@ Whole session against `master`: see "Whole session" under Results per change.
 
 Next, in this order (nothing below is started):
 
-1. The open questions that can still change the file format: 4, 9, 12, 13 (and 14, to
-   specify).
-2. The other open questions (5 to 7, 10, 11).
+1. The open questions that can still change the file format: 9 and 12 (4, 13 and 14
+   are decided).
+2. The other open question, 11 (5, 6, 7 and 10 are decided).
 3. Finishing work, once the format no longer changes: regenerate the test vectors
    (clears the 4 failing tests), rewrite FORMAT.md and README, update BENCHMARKS.md.
    Implementations in C, Go and other languages come after that (see Decisions).
@@ -257,7 +260,20 @@ Theoretical maxima are from mvdsv's code (70f1135); headroom is ours divided by 
 
 ### After steps B and C
 
-The open questions 9, 12, 13 and 14 (format), then 6 and 11; then the Suggestions in the
+Decided 2026-11-21 (night): 6 (self-check always on, switch removed), 13 (`te.f`,
+`snd.f` stay blobs), 14 (edge inputs: specify the code as is). Left: 9, 12 and 11.
+
+For 12 Viktor asked for a re-measurement of every stream model before deciding. Plan:
+a real rebuild per stream, not the old per-stream estimate. A stream becomes a blob by
+adding its id to `PLAIN` (`src/streams.rs`); encoder and decoder read the same list, so
+each build round-trips. One build per modelled stream (20 lazy, 18 numeric), size on
+stratified (379 demos in `/tmp/mvdz-strat/demos`, `/tmp/mvdz-strat/size.sh BIN DIR`),
+against the step-C baseline 211,736,432 bytes, then one build with every stream that
+came out at or below zero. `PLAIN_MASK` is a u64: ids 64 to 66 (`pe.fy`, `pe.fz`,
+`uc.a`) need it widened to u128 for the experiment. `uc` and `uc.a` have no archive
+demo with usercmd blocks: unmeasurable on real data unless such demos are found.
+
+Then the open questions 9 and 11; then the Suggestions in the
 order given there (out-of-the-library 1 and 2, tests-and-experiments 1 and 3, naming),
 then Remaining implementation (vectors, FORMAT.md, README, BENCHMARKS.md). Note for
 FORMAT.md: demoinfo is not always in the last segment (25 of 367 files), so the
@@ -311,7 +327,9 @@ All implemented unless marked.
 | Model stored in a chunk | Removed; models only in the models block, also for one-chunk files | Costs 0.004 %; one model path |
 | The next ten stream models | Keep | Dropping all ten costs 2.70 % |
 | Container fields | Fixed width: 16-byte chunk header (17 until step B), 4-byte models length | Costs 0.005 %; no variable-length integers to decode there |
-| Encoder self-check | On by default; the switch that turns it off stays | Every file written is proven to decode; it is a third of compression time, so experiments and benchmarks can skip it |
+| Encoder self-check | Always on; the switch is removed (2026-11-21: `Config::verify`, the tool's undocumented `--no-verify`; `Config` is a thread count). Supersedes "the switch stays" of 2026-11-20 | Every file written is proven to decode; since the criterion change nothing but the undocumented flag read the switch, and the benchmark times compress with the self-check on; compress takes no options |
+| Float origins `te.f`, `snd.f` (open question 13, 2026-11-21) | Stay blobs | 2.4 % of the output, all in the 457 of 2,000 demos with float coordinates; modelling them is estimated at 0.31 % of the output for two more streams every port must match bit for bit |
+| Edge inputs (open question 14, 2026-11-21) | Specified as the code is. A demo ending inside a frame: the partial bytes are the `TAIL` of its segment, the rest of that segment is transform-coded. Input that does not start like an MVD: refused by the library (`check_demo`, `NotMvd`) and the tool; the unchecked entry point and `--allow-non-demo` write it. Bytes that do not frame are tail; where they run past 1 MiB the rest is cut every 1 MiB and each piece is walked afresh, so frames found later are coded | Both already round-trip and are tested (`truncated_demo_round_trips`, `empty_and_tiny_inputs`, `non_mvd_input_streams`, `non_demos_are_refused`, vectors `duel-truncated`, `random.normal`); the alternative, no frames after the first unframeable byte, needs a code change for a slightly simpler sentence |
 | Per-chunk checksum | Keep | Subsets of a demo are decoded for analytics |
 | Checksum algorithm | The CRC-32 of zlib (73bd49b) | In every standard library that has DEFLATE; `crc32fast` was already in the build; 80 lines of hand-written CRC-32C gone, one `unsafe` function with them |
 | Checks on decode | Both stay: each chunk's CRC-32 and the whole demo's (decided 2026-11-20) | The whole-demo check is the only one that catches chunks in the wrong order; the chunk check serves subset decodes and reports an error at the chunk |
@@ -392,7 +410,7 @@ What consumers do without META:
 
 ## Open questions
 
-All Viktor's to decide. Of those left, 9, 12 and 13 can change the file format.
+All Viktor's to decide. Of those left, 9 and 12 can change the file format.
 
 1. Fallback paths: decided and implemented, see "One fallback".
 2. The whole-demo CRC pass: decided, it stays (see Decisions).
@@ -401,7 +419,8 @@ All Viktor's to decide. Of those left, 9, 12 and 13 can change the file format.
    Decisions, "Integers inside a chunk"; measured under "Format decisions of
    2026-11-21").
 5. The C interface: decided, removed (see Decisions).
-6. Encoder self-check default: on (as now) or off like `flac -V`. Recommended: on.
+6. Encoder self-check: decided 2026-11-21, always on, the switch removed (see
+   Decisions).
 7. Gzip input (`.mvd.gz`) accepted by compress? Decided: no (see Decisions).
 8. Thread count: decided and implemented (see Decisions).
 9. Bits that can be flipped without changing the decoded demo: 784 of 30,696 in the
@@ -416,12 +435,11 @@ All Viktor's to decide. Of those left, 9, 12 and 13 can change the file format.
     the speed changes; not profiled since). Peak memory rose with changes 4 and 5.
 12. `pi.ar` (-0.002 %) is low value, but it is the third axis of the angle predictor, so
     dropping it removes no code. `uc` and `uc.a` are not measured (none of the 2,000
-    demos has usercmd blocks).
-13. `te.f` and `snd.f` (temp-entity and sound origins with float coordinates) are blobs
-    that no general-purpose coder compresses: 2.4 % of the output, all of it in the 457
-    of 2,000 demos with float coordinates. Estimated gain from modelling them: 0.31 % of
-    the output, for two more streams to specify. Recommended: leave them as blobs.
-14. Edge inputs to specify: a demo ending in a partial frame; input that is not an MVD.
+    demos has usercmd blocks). Viktor, 2026-11-21: re-measure every stream model first
+    (plan under "After steps B and C" in the Handoff).
+13. Decided 2026-11-21: `te.f` and `snd.f` stay blobs (see Decisions).
+14. Decided 2026-11-21: specified as the code is (see Decisions); the FORMAT.md text
+    is written with the rewrite (Remaining implementation 2).
 
 The 20 streams that lost their model: `snd.misc`, `pi.model`, `pi.eff`, `pi.skin`,
 `pr.level`, `esclen`, `mask`, `pe.hdr`, `pe.misc`, `pe.frame`, `pe.model`, `te.misc`,
@@ -1112,9 +1130,9 @@ number is given.
 
 ### Paths that exist for tests or experiments
 
-1. `Config::verify`: compress is meant to take no options. Without it `Config` is a
-   thread count. Since the criterion change only the tool's undocumented
-   `compress --no-verify` uses it; the benchmark times compress with the self-check.
+1. Done (2026-11-21, decided by Viktor): `Config::verify` and `--no-verify` removed;
+   `Config` is a thread count; the self-check always runs. Output unchanged (one demo
+   checked byte for byte; the switch never changed the file).
 2. Done (2026-11-21, not committed; Viktor chose "one segment size everywhere"):
    `compress_segmented` is gone, `compress_untransformed` and `cut_points` lose
    their size parameter, `cut_points` cuts at `SEGMENT` only. Tests that need
@@ -1204,6 +1222,11 @@ After the format decisions (open questions 4, 9, 12, 13):
 2. FORMAT.md: rewrite the container (§2); delete metadata, index, demoinfo sharing,
    attachments and streaming (§3, §4, §5.3, §10, §11) and what it says of the C
    interface; adjust the rest. README passages that still point at removed sections.
+   Also, from open question 14: §12 rule 1 ("once a frame does not parse, the rest of
+   the demo is the last segment") becomes the 1 MiB cut with each piece walked afresh;
+   §12 rule 5 (the zstd/stored fallback) becomes all tail; state that input not
+   starting like an MVD is refused by encoders; the consumer note "decode the last
+   chunk" becomes "scan back from the last segment".
 3. BENCHMARKS.md from the final measurements.
 4. Later, from the settled specification: implementations in C, Go and other
    languages, with a test suite they share.
