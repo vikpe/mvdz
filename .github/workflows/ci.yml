@@ -32,8 +32,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
       # tests that need real demos skip without MVDZ_TEST_DATA
-      - run: cargo test --profile fast
+      - run: cargo nextest run --cargo-profile fast
+      # nextest does not run the documentation examples
+      - run: cargo test --profile fast --doc
 
   wasm:
     runs-on: ubuntu-latest
