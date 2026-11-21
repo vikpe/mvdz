@@ -10,7 +10,7 @@ done. Open questions 6, 13 and 14 decided later the same day (see Decisions); th
 self-check switch is removed (f0c2019). 12 decided: every stream model stays (see
 Measurements and Decisions). Open: 9 (needs a new probe). Then "Suggestions (2026-11-21)" near the end of this file.
 No unsafe code since the same night (3f737db; see Decisions); the encoder threads
-across segments only (not committed at the time of writing). Tests (`cargo nextest run --release` in `mvdz_rust/`): 41 pass, 4 fail (the
+across segments only (72d5175). Tests (`cargo nextest run --release` in `mvdz_rust/`): 41 pass, 4 fail (the
 known four).
 `cargo clippy --all-targets -- -D warnings` is clean.
 
@@ -316,7 +316,7 @@ All implemented unless marked.
 | Low-value stream models | The 20 listed under Open questions lost their model; their bytes join the chunk's blob | Each model must match bit for bit in every port; together they were worth 0.078 % of the output |
 | Stream models, open question 12 (2026-11-21) | Every one of the 34 stays, `pi.ar` included | Measured with a rebuilt codec per stream: every model pays except `pi.ar`, -0.004 % (8,951 bytes on 379 demos) without it. Dropping it was implemented and reverted the same day: it saved no function, and made roll an exception to "the three angles are coded alike" in the walker's byte layout and in the specification. The uniform rule is the simpler one |
 | No unsafe code (2026-11-21, 3f737db) | `unsafe_code = "forbid"` in `Cargo.toml`. Decoding is sequential inside a segment and parallel across segments; the streaming reader decodes `threads` segments at a time; the rANS table search is one safe loop on every target (`scalar` feature gone) | Viktor: "unsafe is horrible choice". Accepted cost: single-thread decode +7 %, whole-file decode at 4 threads +6 %, demos of 1 segment at `-j 4` +0.4 to 0.9 ms. The CLI at `-j 4` on a 16 MB demo is 30 % faster. 20 lines of `unsafe` and 240 lines of library code gone |
-| Encoder threads (2026-11-21, not committed) | Across segments only, as the decoder: no threads inside a segment (`outer`/`inner` gone; `numerics` and `segment::encode` run in sequence) | Viktor: demos are typically 1 MB or more. Measured cost: a 1-segment demo (237 KB) compresses 1.5 ms slower at `-j 4` (9.6 to 11.2 ms); 3 and 62 segments and the 34-demo library set unchanged. Output identical on all 379 stratified demos |
+| Encoder threads (2026-11-21, 72d5175) | Across segments only, as the decoder: no threads inside a segment (`outer`/`inner` gone; `numerics` and `segment::encode` run in sequence) | Viktor: demos are typically 1 MB or more. Measured cost: a 1-segment demo (237 KB) compresses 1.5 ms slower at `-j 4` (9.6 to 11.2 ms); 3 and 62 segments and the 34-demo library set unchanged. Output identical on all 379 stratified demos |
 | Chunk codings (2026-11-21, step B, d1a8c06) | One: the transform. A chunk the transform cannot code is written as all tail; the `coding` byte and coding 1 (raw DEFLATE) go; chunk header 16 bytes | Coding 1 was used in 0 of 9,109 segments of 525 archive demos and 0 of 5 damaged copies; a 1 MiB segment of junk already codes as all tail and round-trips |
 | Ratio rule (2026-11-21, step A, 149c415) | Removed (`raw_len <= 1024 * len + 4096`, the two constants, the reader check, the "stored blocks" fallback). In its place a reader rule: a chunk's `len` is at most 2 MiB (`MAX_SEG_CODED`), checked at the length field before anything is read | Largest `raw_len / len` in 9,109 segments is 118.39, so the rule had 8.7 times headroom; the 1 MiB raw cap already bounds output. The largest coded segment seen is 110,888 bytes; 1 MiB of junk codes to about 1 MiB + 0.5 KiB, so 2 MiB is 2 times the possible maximum |
 | Models block limit | Stays 16 MiB | Once per file; largest seen 47,608 bytes (352 times headroom); the cost is reader memory, not file bytes |
@@ -894,7 +894,7 @@ set (108,606,042 bytes raw; plus a 1-segment and a 3-segment demo); CLI on singl
 - The pre-implementation timings above ran while the machine was in use; the result
   table did not.
 
-### Encoder threads across segments only (2026-11-21, not committed)
+### Encoder threads across segments only (2026-11-21, 72d5175)
 
 Follow-up of "No unsafe code". Measured first with a temporary switch (`inner = 1`
 always), old and new alternated twice, `-j 4`, cores 0, 2, 4, 6, silent machine, 32 s
@@ -917,8 +917,14 @@ always), old and new alternated twice, `-j 4`, cores 0, 2, 4, 6, silent machine,
   again. Their check that the transform alone is lossless is gone with
   `Config::verify` (f0c2019): a transform bug now costs size, as the self-check codes
   the segment as all tail, but does not fail the fuzzer. Open: restore it through a
-  hidden count of self-check fallbacks, or accept the loss. `cargo fuzz` is not
-  installed here: the targets compile but did not run.
+  hidden count of self-check fallbacks, or accept the loss.
+- Fuzzing after the change (cargo-fuzz 0.13.2, 30 s a target, `-max_len=200000`, seeds
+  in `/tmp/seqdec/corpus`: 18 demo prefixes of 1.5 to 20 KB, their files, and files of
+  1 and 3 segments): decode 2,487 runs, read_info 5,176, stream_reader 1,596,
+  compress_rt 1,717, gen_rt 5,016; no crash, leak, timeout or failed assertion.
+  `stream_reader` now also reads at 3 threads and requires the same bytes before the
+  same error as at 1 (the streaming reader decodes several segments at once since
+  3f737db).
 - Not done: sharing a helper between the encoder's self-check (`failing_segments`)
   and `decompress`. They share only the lookup of a segment body; the rest differs
   (one output buffer and the first error against a compare per segment).
