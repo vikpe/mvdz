@@ -308,7 +308,7 @@ fn pack_one(
 /// Per group (in [`GROUPS`] order) and stream of the group.
 pub(crate) type Numerics = Vec<Vec<rans::NumericSymbols>>;
 
-/// Run once by the encoder: the models are trained on these values and the segment is coded
+/// Run once by the encoder: the models are built from these values and the segment is coded
 /// from them.
 pub(crate) fn numerics(src: &[u8], walked: &Walked) -> Numerics {
     GROUPS
@@ -334,13 +334,13 @@ pub(crate) fn numerics(src: &[u8], walked: &Walked) -> Numerics {
 /// One model per structural and numeric stream from its per-context counts over every segment
 /// (FORMAT.md section 8 rule 4). Segments are added a few at a time; only counts are kept.
 #[derive(Debug)]
-pub(crate) struct Trainer {
+pub(crate) struct ModelBuilder {
     tallies: Vec<std::sync::Mutex<Option<rans::Tally>>>,
     /// (group, index in the group)
     numeric_positions: Vec<Option<(usize, usize)>>,
 }
 
-impl Default for Trainer {
+impl Default for ModelBuilder {
     fn default() -> Self {
         let mut numeric_positions = vec![None; STREAM_COUNT];
         for (group_index, group) in GROUPS.iter().enumerate() {
@@ -355,7 +355,7 @@ impl Default for Trainer {
     }
 }
 
-impl Trainer {
+impl ModelBuilder {
     pub(crate) fn add(&self, segments: &[(&Walked, &Numerics)], threads: usize) {
         // streams are independent: in parallel, each over the segments in order
         par_map(threads, STREAM_COUNT, |stream| {
@@ -740,10 +740,10 @@ mod tests {
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
-    fn train(segments: &[(&Walked, &Numerics)]) -> Vec<Option<rans::FileModel>> {
-        let trainer = Trainer::default();
-        trainer.add(segments, 1);
-        trainer.models(1)
+    fn build_models(segments: &[(&Walked, &Numerics)]) -> Vec<Option<rans::FileModel>> {
+        let model_builder = ModelBuilder::default();
+        model_builder.add(segments, 1);
+        model_builder.models(1)
     }
 
     fn decoded(
@@ -766,7 +766,7 @@ mod tests {
     fn coded(src: &[u8]) -> anyhow::Result<(Vec<u8>, ModelsBlock)> {
         let (walked, _) = walk(src, Proto::default()).context("the demo walks")?;
         let numerics = numerics(src, &walked);
-        let models = train(&[(&walked, &numerics)]);
+        let models = build_models(&[(&walked, &numerics)]);
         let ids: Vec<usize> = (0..models.len())
             .filter(|&stream| models[stream].is_some())
             .collect();
@@ -879,7 +879,7 @@ mod tests {
         let src = demo();
         let (walked, _) = walk(&src, Proto::default()).context("the demo walks")?;
         let numerics = numerics(&src, &walked);
-        let mut models = train(&[(&walked, &numerics), (&walked, &numerics)]);
+        let mut models = build_models(&[(&walked, &numerics), (&walked, &numerics)]);
         let ids = |candidates: &[Option<rans::FileModel>]| -> Vec<usize> {
             (0..candidates.len())
                 .filter(|&stream| candidates[stream].is_some())

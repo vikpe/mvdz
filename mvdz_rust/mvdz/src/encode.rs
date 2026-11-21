@@ -122,7 +122,7 @@ pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
 }
 
 #[derive(Debug)]
-struct Trained {
+struct FirstPass {
     file_models: Vec<Option<FileModel>>,
     start_protos: Vec<Proto>,
     is_walkable: Vec<bool>,
@@ -157,12 +157,12 @@ fn count_segment(raw: &[u8], start_proto: Proto) -> Counted {
 /// Pass 1 (FORMAT.md section 8) keeps only counts; pass 2 walks again. A segment starts in
 /// the proto the one before ends in, so the segments of a batch are walked in parallel from
 /// the end proto of the batch before, and the few that start in another proto walked again.
-fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
+fn run_first_pass(src: &[u8], cuts: &[usize], threads: usize) -> FirstPass {
     let segment_count = cuts.len() - 1;
     let segment_bytes = |index: usize| &src[cuts[index]..cuts[index + 1]];
-    let trainer = segment::Trainer::default();
+    let model_builder = segment::ModelBuilder::default();
     let mut proto = Proto::default();
-    let mut trained = Trained {
+    let mut first_pass = FirstPass {
         file_models: Vec::new(),
         start_protos: Vec::with_capacity(segment_count),
         is_walkable: Vec::with_capacity(segment_count),
@@ -187,19 +187,19 @@ fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
                 *counted = count_segment(segment_bytes(first + batch_index), proto);
             }
             proto = counted.end_proto;
-            trained.start_protos.push(counted.start_proto);
-            trained.is_walkable.push(counted.walked.is_some());
+            first_pass.start_protos.push(counted.start_proto);
+            first_pass.is_walkable.push(counted.walked.is_some());
         }
         let segments: Vec<(&Walked, &Numerics)> = batch
             .iter()
             .filter_map(|counted| counted.walked.as_ref())
             .map(|(walked, numerics)| (walked, numerics))
             .collect();
-        trainer.add(&segments, threads);
+        model_builder.add(&segments, threads);
         first += batch_len;
     }
-    trained.file_models = trainer.models(threads);
-    trained
+    first_pass.file_models = model_builder.models(threads);
+    first_pass
 }
 
 pub(crate) fn transform_body(
@@ -237,9 +237,9 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
         return Err(Error::DemoTooLarge);
     }
     let hashes = || (crc32fast::hash(src), <[u8; 32]>::from(Sha256::digest(src)));
-    let train = || {
+    let first_pass_or_all_tail = || {
         if is_all_tail {
-            Trained {
+            FirstPass {
                 file_models: Vec::new(),
                 start_protos: vec![Proto::default(); segment_count],
                 is_walkable: vec![false; segment_count],
@@ -248,25 +248,25 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
                     .collect(),
             }
         } else {
-            train(src, &cuts, threads)
+            run_first_pass(src, &cuts, threads)
         }
     };
-    let (trained, (crc, sha256)) = if threads > 1 && HAS_THREADS {
+    let (first_pass, (crc, sha256)) = if threads > 1 && HAS_THREADS {
         std::thread::scope(|scope| {
             let hashing = scope.spawn(hashes);
-            (train(), hashing.join().expect("hashing"))
+            (first_pass_or_all_tail(), hashing.join().expect("hashing"))
         })
     } else {
-        (train(), hashes())
+        (first_pass_or_all_tail(), hashes())
     };
     let header = Header {
         size_bytes: src.len() as u64,
-        duration_ms: trained.durations_ms.iter().sum(),
+        duration_ms: first_pass.durations_ms.iter().sum(),
         crc32: crc,
         sha256,
     };
-    let mut bodies = code_segments(src, &cuts, &trained, threads)?;
-    let file_models = &trained.file_models;
+    let mut bodies = code_segments(src, &cuts, &first_pass, threads)?;
+    let file_models = &first_pass.file_models;
     let self_check_error = || Error::Internal("the encoder's output does not decode to its input");
     let mut fallbacks = 0;
     loop {
@@ -282,7 +282,7 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
             if bodies[index].is_all_tail {
                 return Err(self_check_error());
             }
-            bodies[index] = tail_body(src, &cuts, &trained, index)?;
+            bodies[index] = tail_body(src, &cuts, &first_pass, index)?;
             fallbacks += 1;
         }
     }
@@ -291,34 +291,34 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
 fn code_segments(
     src: &[u8],
     cuts: &[usize],
-    trained: &Trained,
+    first_pass: &FirstPass,
     threads: usize,
 ) -> Result<Vec<Body>> {
     let bodies = par_map(threads, cuts.len() - 1, |index| {
         let raw = &src[cuts[index]..cuts[index + 1]];
-        let walked = trained.is_walkable[index]
-            .then(|| segment::walk(raw, trained.start_protos[index]))
+        let walked = first_pass.is_walkable[index]
+            .then(|| segment::walk(raw, first_pass.start_protos[index]))
             .flatten();
         if let Some((walked, _)) = walked
             && let Ok(body) = Body::new(
                 raw,
                 &walked,
-                trained.durations_ms[index],
-                &trained.file_models,
+                first_pass.durations_ms[index],
+                &first_pass.file_models,
                 false,
             )
         {
             return Ok(body);
         }
-        tail_body(src, cuts, trained, index)
+        tail_body(src, cuts, first_pass, index)
     });
     bodies.into_iter().collect()
 }
 
-fn tail_body(src: &[u8], cuts: &[usize], trained: &Trained, index: usize) -> Result<Body> {
+fn tail_body(src: &[u8], cuts: &[usize], first_pass: &FirstPass, index: usize) -> Result<Body> {
     let raw = &src[cuts[index]..cuts[index + 1]];
-    let walked = segment::walk_tail(raw, trained.start_protos[index]);
-    Body::new(raw, &walked, trained.durations_ms[index], &[], true)
+    let walked = segment::walk_tail(raw, first_pass.start_protos[index]);
+    Body::new(raw, &walked, first_pass.durations_ms[index], &[], true)
 }
 
 #[derive(Debug)]

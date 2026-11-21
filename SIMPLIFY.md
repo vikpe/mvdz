@@ -219,7 +219,7 @@ stages are grouped by the function that holds them):
 | Numeric predictors, pass 1 and again pass 2 | `segment::numerics` | 22.6 % |
 | Walk, pass 1 and again pass 2 | `Walker<true>::command`, `segment::walk`, `Proto::cmd_size`, `delta_size` | 15.3 % |
 | rANS and DEFLATE encode | `Body::new` | 10.9 % |
-| Training | `Tally::add`, `Trainer::models`, `IntModel::put` | 9.6 % |
+| Training | `Tally::add`, `ModelBuilder::models`, `IntModel::put` | 9.6 % |
 | Allocation, copies | | about 2.5 % |
 | SHA-256, CRC-32 | | 2.1 % |
 

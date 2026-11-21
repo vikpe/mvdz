@@ -1476,7 +1476,7 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
 3. **Protocol state**: the first pass walks the segments in order (section 4). Segment k's
    `fte`, `fte2`, `mvd1` are the state at the end of the last segment before it whose
    walk succeeded (0 for the first).
-4. **Models** (`segment.rs:Trainer`, `coder/rans.rs:Tally::file_model`): every
+4. **Models** (`segment.rs:ModelBuilder`, `coder/rans.rs:Tally::file_model`): every
    structural and numeric stream gets one model, built from its symbol counts per
    context summed over every segment whose walk succeeded:
    * Contexts are taken most frequent first (ties: lower context first). A context gets

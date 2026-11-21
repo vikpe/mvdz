@@ -10,8 +10,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), ExitCode> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let Some((command, rest)) = argv.split_first() else {
+    let command_line: Vec<String> = std::env::args().skip(1).collect();
+    let Some((command, rest)) = command_line.split_first() else {
         return Err(usage());
     };
     let args = parse(rest)?;
@@ -57,7 +57,7 @@ struct Args {
     should_remove_inputs: bool,
 }
 
-fn parse(argv: &[String]) -> Result<Args, ExitCode> {
+fn parse(arguments: &[String]) -> Result<Args, ExitCode> {
     let mut args = Args {
         max_threads: 0,
         files: Vec::new(),
@@ -66,10 +66,10 @@ fn parse(argv: &[String]) -> Result<Args, ExitCode> {
         should_remove_inputs: false,
     };
     let mut index = 0;
-    while let Some(arg) = argv.get(index) {
+    while let Some(arg) = arguments.get(index) {
         let mut value = || {
             index += 1;
-            argv.get(index).cloned().ok_or_else(usage)
+            arguments.get(index).cloned().ok_or_else(usage)
         };
         match arg.as_str() {
             "-j" | "--threads" => {
@@ -116,15 +116,15 @@ fn try_write_output(path: &str, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
-/// A regular file is removed again when `fill` fails, as gzip and zstd do.
+/// A regular file is removed again when `write_output` fails, as gzip and zstd do.
 /// ponytail: a failed `-f` overwrite loses the old file and a killed process leaves
 /// a partial one; a temporary file and rename would prevent both.
 fn try_write_with(
     path: &str,
-    fill: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+    write_output: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
 ) -> Result<(), String> {
     if path == "-" {
-        return match fill(&mut std::io::stdout().lock()) {
+        return match write_output(&mut std::io::stdout().lock()) {
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
             result => result.map_err(|error| error.to_string()),
         };
@@ -136,10 +136,10 @@ fn try_write_with(
             .write(true)
             .open(path)
             .map_err(|error| error.to_string())?;
-        return fill(&mut device).map_err(|error| error.to_string());
+        return write_output(&mut device).map_err(|error| error.to_string());
     }
     let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
-    fill(&mut file).map_err(|error| {
+    write_output(&mut file).map_err(|error| {
         let _ = std::fs::remove_file(path);
         error.to_string()
     })

@@ -346,7 +346,7 @@ fn deterministic_output() -> anyhow::Result<()> {
 }
 
 /// A server data message in the second segment changes the proto, so the segments after
-/// it, walked in parallel from the proto before, are walked again (`encode::train`).
+/// it, walked in parallel from the proto before, are walked again (`encode::run_first_pass`).
 #[test]
 fn proto_change_mid_demo() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{}")], false);
