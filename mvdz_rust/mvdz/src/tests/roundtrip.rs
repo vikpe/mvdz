@@ -345,6 +345,37 @@ fn deterministic_output() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A server data message in the second segment changes the proto, so the segments after
+/// it, walked in parallel from the proto before, are walked again (`encode::train`).
+#[test]
+fn proto_change_mid_demo() -> anyhow::Result<()> {
+    let small = synthetic(&[(0, "{}")], false);
+    let copies = 3 * crate::segment::SEGMENT_TARGET_RAW / (2 * small.len());
+    let mut demo = Demo(small.repeat(copies));
+    let server_data = message(
+        crate::proto::SVC_SERVER_DATA,
+        &[
+            b"FTE2",
+            &(1u32 << 30).to_le_bytes(),
+            &crate::proto::PROTOCOL_VERSION.to_le_bytes(),
+            &1u32.to_le_bytes(),
+            &c_string("qw"),
+            &0u32.to_le_bytes(),
+            &c_string("changed"),
+            &[0; 40],
+        ],
+    );
+    demo.frame(0, 6, &server_data);
+    demo.0.extend_from_slice(&small.repeat(2 * copies));
+    let file = crate::encode(&demo.0, 1)?;
+    assert!(
+        file == crate::encode(&demo.0, 4)?,
+        "threads change the output"
+    );
+    assert!(decompress(&file, 4)? == demo.0);
+    Ok(())
+}
+
 #[test]
 fn encoder_matches_encode() -> anyhow::Result<()> {
     let src = several_segments(&synthetic(&[(0, "{}")], false));

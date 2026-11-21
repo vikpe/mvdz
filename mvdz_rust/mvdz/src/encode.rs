@@ -129,7 +129,34 @@ struct Trained {
     durations_ms: Vec<u64>,
 }
 
-/// Pass 1 (FORMAT.md section 8) keeps only counts; pass 2 walks again.
+/// A pass 1 walk of one segment.
+struct Counted {
+    start_proto: Proto,
+    end_proto: Proto,
+    walked: Option<(Walked, Numerics)>,
+}
+
+fn count_segment(raw: &[u8], start_proto: Proto) -> Counted {
+    match segment::walk(raw, start_proto) {
+        Some((walked, end_proto)) => {
+            let numerics = segment::numerics(raw, &walked);
+            Counted {
+                start_proto,
+                end_proto,
+                walked: Some((walked, numerics)),
+            }
+        }
+        None => Counted {
+            start_proto,
+            end_proto: start_proto,
+            walked: None,
+        },
+    }
+}
+
+/// Pass 1 (FORMAT.md section 8) keeps only counts; pass 2 walks again. A segment starts in
+/// the proto the one before ends in, so the segments of a batch are walked in parallel from
+/// the end proto of the batch before, and the few that start in another proto walked again.
 fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
     let segment_count = cuts.len() - 1;
     let segment_bytes = |index: usize| &src[cuts[index]..cuts[index + 1]];
@@ -143,31 +170,33 @@ fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
             .map(|index| frame_scan(segment_bytes(index)).duration_ms)
             .collect(),
     };
-    for first in (0..segment_count).step_by(threads) {
-        let batch_len = threads.min(segment_count - first);
-        let walks: Vec<Option<Walked>> = (first..first + batch_len)
-            .map(|index| {
-                trained.start_protos.push(proto);
-                let (walked, end_proto) = segment::walk(segment_bytes(index), proto)?;
-                proto = end_proto;
-                Some(walked)
-            })
-            .collect();
-        let numerics = par_map(threads, batch_len, |batch_index| {
-            Some(segment::numerics(
-                segment_bytes(first + batch_index),
-                walks[batch_index].as_ref()?,
-            ))
+    let mut first = 0;
+    while first < segment_count {
+        // the first segment alone: it sets the proto of most demos
+        let batch_len = if first == 0 {
+            1
+        } else {
+            threads.min(segment_count - first)
+        };
+        let batch_proto = proto;
+        let mut batch = par_map(threads, batch_len, |batch_index| {
+            count_segment(segment_bytes(first + batch_index), batch_proto)
         });
-        let segments: Vec<(&Walked, &Numerics)> = walks
+        for (batch_index, counted) in batch.iter_mut().enumerate() {
+            if counted.start_proto != proto {
+                *counted = count_segment(segment_bytes(first + batch_index), proto);
+            }
+            proto = counted.end_proto;
+            trained.start_protos.push(counted.start_proto);
+            trained.is_walkable.push(counted.walked.is_some());
+        }
+        let segments: Vec<(&Walked, &Numerics)> = batch
             .iter()
-            .zip(&numerics)
-            .filter_map(|(walked, numerics)| Some((walked.as_ref()?, numerics.as_ref()?)))
+            .filter_map(|counted| counted.walked.as_ref())
+            .map(|(walked, numerics)| (walked, numerics))
             .collect();
         trainer.add(&segments, threads);
-        trained
-            .is_walkable
-            .extend(walks.iter().map(std::option::Option::is_some));
+        first += batch_len;
     }
     trained.file_models = trainer.models(threads);
     trained
