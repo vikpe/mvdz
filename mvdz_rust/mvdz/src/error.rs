@@ -23,15 +23,15 @@ pub enum Error {
 }
 
 impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Format(s) => write!(f, "format: {s}"),
-            Self::Corrupt(s) => write!(f, "corrupt: {s}"),
-            Self::Limit(s) => write!(f, "limit: {s}"),
-            Self::Invalid(s) => write!(f, "invalid argument: {s}"),
-            Self::Io(k) => write!(f, "i/o: {k}"),
-            Self::Internal(s) => write!(f, "internal: {s}"),
-            Self::NotMvd(s) => write!(f, "not an MVD demo: {s}"),
+            Self::Format(message) => write!(formatter, "format: {message}"),
+            Self::Corrupt(message) => write!(formatter, "corrupt: {message}"),
+            Self::Limit(message) => write!(formatter, "limit: {message}"),
+            Self::Invalid(message) => write!(formatter, "invalid argument: {message}"),
+            Self::Io(kind) => write!(formatter, "i/o: {kind}"),
+            Self::Internal(message) => write!(formatter, "internal: {message}"),
+            Self::NotMvd(message) => write!(formatter, "not an MVD demo: {message}"),
         }
     }
 }
@@ -39,19 +39,22 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        match e.get_ref().and_then(|x| x.downcast_ref::<Self>()) {
-            Some(d) => *d,
-            None => Self::Io(e.kind()),
+    fn from(error: std::io::Error) -> Self {
+        match error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<Self>())
+        {
+            Some(own) => *own,
+            None => Self::Io(error.kind()),
         }
     }
 }
 
 impl From<Error> for std::io::Error {
-    fn from(e: Error) -> Self {
-        match e {
-            Error::Io(k) => Self::new(k, e),
-            _ => Self::new(std::io::ErrorKind::InvalidData, e),
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Io(kind) => Self::new(kind, error),
+            _ => Self::new(std::io::ErrorKind::InvalidData, error),
         }
     }
 }

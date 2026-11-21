@@ -4,6 +4,7 @@ use mvdz::Config;
 use mvdz::Limits;
 use std::io::{Read, Write};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 fn main() -> ExitCode {
     match run() {
@@ -58,10 +59,10 @@ struct Args {
     threads: usize,
     max_memory: Option<u64>,
     files: Vec<String>,
-    any_input: bool,
+    is_any_input_allowed: bool,
     output: Option<String>,
-    overwrite: bool,
-    rm: bool,
+    should_overwrite: bool,
+    should_remove_inputs: bool,
 }
 
 /// A size with an optional K, M or G suffix (binary).
@@ -81,13 +82,13 @@ fn size(text: &str) -> Result<u64, ExitCode> {
 
 fn parse(argv: &[String]) -> Result<Args, ExitCode> {
     let mut args = Args {
-        threads: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        threads: available_threads(),
         max_memory: None,
         files: Vec::new(),
-        any_input: false,
+        is_any_input_allowed: false,
         output: None,
-        overwrite: false,
-        rm: false,
+        should_overwrite: false,
+        should_remove_inputs: false,
     };
     let mut index = 0;
     while let Some(arg) = argv.get(index) {
@@ -97,14 +98,18 @@ fn parse(argv: &[String]) -> Result<Args, ExitCode> {
         };
         match arg.as_str() {
             "-j" | "--threads" => {
-                let threads = value()?.parse().map_err(|_| usage())?;
-                args.threads = mvdz::util::threads(threads);
+                let threads: usize = value()?.parse().map_err(|_| usage())?;
+                args.threads = if threads == 0 {
+                    available_threads()
+                } else {
+                    threads
+                };
             }
             "--max-memory" => args.max_memory = Some(size(&value()?)?),
-            "--allow-non-demo" => args.any_input = true,
+            "--allow-non-demo" => args.is_any_input_allowed = true,
             "-o" | "--output" => args.output = Some(value()?),
-            "-f" | "--force" => args.overwrite = true,
-            "--rm" => args.rm = true,
+            "-f" | "--force" => args.should_overwrite = true,
+            "--rm" => args.should_remove_inputs = true,
             "-" => args.files.push(arg.clone()),
             _ if arg.starts_with('-') => return Err(usage()),
             _ => args.files.push(arg.clone()),
@@ -115,34 +120,34 @@ fn parse(argv: &[String]) -> Result<Args, ExitCode> {
 }
 
 /// Reads a whole input file (or standard input), once.
-fn try_read_input(p: &str) -> Result<Vec<u8>, String> {
-    if p == "-" {
-        let mut b = Vec::new();
+fn try_read_input(path: &str) -> Result<Vec<u8>, String> {
+    if path == "-" {
+        let mut buf = Vec::new();
         std::io::stdin()
             .lock()
-            .read_to_end(&mut b)
-            .map_err(|e| e.to_string())?;
-        Ok(b)
+            .read_to_end(&mut buf)
+            .map_err(|error| error.to_string())?;
+        Ok(buf)
     } else {
-        std::fs::read(p).map_err(|e| e.to_string())
+        std::fs::read(path).map_err(|error| error.to_string())
     }
 }
 
 /// Opens an input file (or standard input) to read in order.
-fn open_input(p: &str) -> Result<Box<dyn Read>, String> {
-    if p == "-" {
+fn open_input(path: &str) -> Result<Box<dyn Read>, String> {
+    if path == "-" {
         Ok(Box::new(std::io::stdin().lock()))
     } else {
-        let f = std::fs::File::open(p).map_err(|e| e.to_string())?;
-        Ok(Box::new(std::io::BufReader::new(f)))
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        Ok(Box::new(std::io::BufReader::new(file)))
     }
 }
 
 /// Writes `data` as an output.
-fn try_write_output(p: &str, data: &[u8]) -> Result<(), String> {
-    try_write_with(p, |w| {
-        w.write_all(data)?;
-        w.flush()
+fn try_write_output(path: &str, data: &[u8]) -> Result<(), String> {
+    try_write_with(path, |writer| {
+        writer.write_all(data)?;
+        writer.flush()
     })
 }
 
@@ -151,17 +156,17 @@ fn try_write_output(p: &str, data: &[u8]) -> Result<(), String> {
 /// ponytail: a failed `-f` overwrite loses the old file and a killed process leaves
 /// a partial one; a temporary file and rename would prevent both.
 fn try_write_with(
-    p: &str,
+    path: &str,
     fill: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    if p == "-" {
+    if path == "-" {
         return match fill(&mut std::io::stdout().lock()) {
             // a closed pipe ends the output quietly: the reader wanted no more
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
             result => result.map_err(|error| error.to_string()),
         };
     }
-    let path = std::path::Path::new(p);
+    let path = std::path::Path::new(path);
     let is_special = std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file());
     if is_special {
         let mut device = std::fs::OpenOptions::new()
@@ -177,30 +182,30 @@ fn try_write_with(
     })
 }
 
-/// Whether `name` ends with the ASCII suffix `suf`, ignoring case.
-fn has_suffix(name: &str, suf: &str) -> bool {
-    name.len() >= suf.len()
-        && name.as_bytes()[name.len() - suf.len()..].eq_ignore_ascii_case(suf.as_bytes())
+/// Whether `name` ends with the ASCII suffix `suffix`, ignoring case.
+fn has_suffix(name: &str, suffix: &str) -> bool {
+    name.len() >= suffix.len()
+        && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
 }
 
-/// The output named after input `i`: game.mvd -> game.mvdz; game.mvdz ->
+/// The output named after `input`: game.mvd -> game.mvdz; game.mvdz ->
 /// game.mvd.
-fn output_name(i: &str, compress: bool) -> Result<String, String> {
-    if i == "-" {
+fn output_name(input: &str, should_compress: bool) -> Result<String, String> {
+    if input == "-" {
         return Ok("-".into());
     }
-    if compress {
-        if has_suffix(i, ".mvdz") {
+    if should_compress {
+        if has_suffix(input, ".mvdz") {
             return Err("already .mvdz".into());
         }
-        let stem = if has_suffix(i, ".mvd") {
-            &i[..i.len() - 4]
+        let stem = if has_suffix(input, ".mvd") {
+            &input[..input.len() - 4]
         } else {
-            i
+            input
         };
         Ok(format!("{stem}.mvdz"))
-    } else if has_suffix(i, ".mvdz") {
-        Ok(format!("{}.mvd", &i[..i.len() - 5]))
+    } else if has_suffix(input, ".mvdz") {
+        Ok(format!("{}.mvd", &input[..input.len() - 5]))
     } else {
         Err("not named *.mvdz (-o names the output)".into())
     }
@@ -210,7 +215,7 @@ fn output_name(i: &str, compress: bool) -> Result<String, String> {
 type Job = (String, Result<String, String>);
 
 /// The jobs of a compress or decompress command line.
-fn jobs(args: &Args, compress: bool) -> Result<Vec<Job>, ExitCode> {
+fn jobs(args: &Args, should_compress: bool) -> Result<Vec<Job>, ExitCode> {
     let files = &args.files;
     if let Some(output) = &args.output {
         let [input] = files.as_slice() else {
@@ -222,7 +227,7 @@ fn jobs(args: &Args, compress: bool) -> Result<Vec<Job>, ExitCode> {
         return Err(usage());
     }
     // the two-name form `in out`: the second names an output
-    let is_output = |name: &str| name == "-" || has_suffix(name, ".mvdz") == compress;
+    let is_output = |name: &str| name == "-" || has_suffix(name, ".mvdz") == should_compress;
     if let [input, output] = files.as_slice()
         && is_output(output)
     {
@@ -235,7 +240,7 @@ fn jobs(args: &Args, compress: bool) -> Result<Vec<Job>, ExitCode> {
     Ok(files
         .iter()
         .map(|input| {
-            let output = output_name(input, compress).and_then(|output| {
+            let output = output_name(input, should_compress).and_then(|output| {
                 match seen.insert(output.clone(), input.clone()) {
                     Some(previous) => Err(format!("{output} is also the output of {previous}")),
                     None => Ok(output),
@@ -248,78 +253,102 @@ fn jobs(args: &Args, compress: bool) -> Result<Vec<Job>, ExitCode> {
 
 /// Runs every job of a compress or decompress command line: several files on -j
 /// threads, one file at a time each. Errors are reported per file.
-fn run_jobs(args: &Args, compress: bool) -> Result<(), ExitCode> {
-    let jobs = jobs(args, compress)?;
+fn run_jobs(args: &Args, should_compress: bool) -> Result<(), ExitCode> {
+    let jobs = jobs(args, should_compress)?;
     let (workers, threads) = if jobs.len() > 1 {
         (args.threads, 1)
     } else {
         (1, args.threads)
     };
-    let failed = mvdz::util::par_map(workers, jobs.len(), |index| {
-        let (input, output) = &jobs[index];
-        let result = output.clone().and_then(|output| {
-            let is_existing_file = output != "-"
-                && std::fs::metadata(&output).is_ok_and(|metadata| metadata.is_file());
-            if is_existing_file && !args.overwrite {
-                return Err(format!("{output} exists (-f overwrites)"));
+    // each worker takes the next job until none is left
+    let next = AtomicUsize::new(0);
+    let has_failed = AtomicBool::new(false);
+    let work = || {
+        while let Some((input, output)) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+            if let Err(error) = run_job(args, input, output, should_compress, threads) {
+                eprintln!("error: {input}: {error}");
+                has_failed.store(true, Ordering::Relaxed);
             }
-            if compress {
-                compress_one(args, input, &output, threads)
-            } else {
-                decompress_one(args, input, &output, threads)
-            }?;
-            if args.rm && input != "-" && output != "-" {
-                std::fs::remove_file(input).map_err(|error| format!("--rm: {error}"))?;
-            }
-            Ok(())
-        });
-        if let Err(error) = &result {
-            eprintln!("error: {input}: {error}");
         }
-        result.is_err()
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            scope.spawn(work);
+        }
+        work();
     });
-    if failed.contains(&true) {
+    if has_failed.load(Ordering::Relaxed) {
         return Err(ExitCode::FAILURE);
     }
     Ok(())
 }
 
-fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
-    // non-demos are refused by the library
-    let src = try_read_input(i)?;
-    let cfg = Config { threads };
-    let r = if a.any_input {
-        // store whatever it is (it still round-trips)
-        mvdz::encode::compress(&src, &cfg)
+/// Compresses or decompresses `input` into `output` (or the reason it has none).
+fn run_job(
+    args: &Args,
+    input: &str,
+    output: &Result<String, String>,
+    should_compress: bool,
+    threads: usize,
+) -> Result<(), String> {
+    let output = output.as_ref().map_err(Clone::clone)?;
+    let is_existing_file =
+        output != "-" && std::fs::metadata(output).is_ok_and(|metadata| metadata.is_file());
+    if is_existing_file && !args.should_overwrite {
+        return Err(format!("{output} exists (-f overwrites)"));
+    }
+    if should_compress {
+        compress_one(args, input, output, threads)
     } else {
-        mvdz::compress_info(&src, &cfg)
-    };
-    let (out, _) = r.map_err(|e| match e {
-        mvdz::Error::NotMvd(s) if !s.starts_with("gzip") => {
-            format!("{e} (--allow-non-demo compresses it anyway, mostly stored)")
-        }
-        _ => e.to_string(),
-    })?;
-    try_write_output(o, &out).map_err(|e| format!("{o}: {e}"))
+        decompress_one(args, input, output, threads)
+    }?;
+    if args.should_remove_inputs && input != "-" && output != "-" {
+        std::fs::remove_file(input).map_err(|error| format!("--rm: {error}"))?;
+    }
+    Ok(())
 }
 
-fn decompress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
+/// One per logical core.
+fn available_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+}
+
+fn compress_one(args: &Args, input: &str, output: &str, threads: usize) -> Result<(), String> {
+    // non-demos are refused by the library
+    let src = try_read_input(input)?;
+    let config = Config { threads };
+    let result = if args.is_any_input_allowed {
+        // store whatever it is (it still round-trips)
+        mvdz::compress_any(&src, &config)
+    } else {
+        mvdz::compress_info(&src, &config)
+    };
+    let (file, _) = result.map_err(|error| match error {
+        mvdz::Error::NotMvd(reason) if !reason.starts_with("gzip") => {
+            format!("{error} (--allow-non-demo compresses it anyway, mostly stored)")
+        }
+        _ => error.to_string(),
+    })?;
+    try_write_output(output, &file).map_err(|error| format!("{output}: {error}"))
+}
+
+fn decompress_one(args: &Args, input: &str, output: &str, threads: usize) -> Result<(), String> {
     // decoded and written segment by segment: neither the file nor the
     // demo is held whole
-    let input = open_input(i)?;
-    let limits = read_limits(a);
-    try_write_with(o, |w| {
-        mvdz::decompress_stream(input, w, threads, &limits)?;
+    let reader = open_input(input)?;
+    let limits = read_limits(args);
+    try_write_with(output, |writer| {
+        mvdz::decompress_stream(reader, writer, threads, &limits)?;
         Ok(())
     })
 }
 
-fn read_limits(a: &Args) -> Limits {
-    let mut l = Limits::default();
-    if let Some(m) = a.max_memory {
-        l.memory = m;
+fn read_limits(args: &Args) -> Limits {
+    let mut limits = Limits::default();
+    if let Some(memory) = args.max_memory {
+        limits.memory = memory;
     }
-    l
+    limits
 }
 
 fn info(args: &Args) -> Result<(), ExitCode> {
@@ -349,7 +378,7 @@ fn info_json(file_info: &mvdz::FileInfo) -> String {
     // numbers and hexadecimal strings only: nothing needs escaping
     let mut json = format!(
         "{{\"version\":{},\"file_size\":{},\"size\":{},\"duration_ms\":{},\"crc32\":\"{:08x}\",\"sha256\":\"",
-        mvdz::format::VERSION,
+        mvdz::VERSION,
         file_info.file_size,
         header.size,
         header.duration_ms,
@@ -359,12 +388,12 @@ fn info_json(file_info: &mvdz::FileInfo) -> String {
         let _ = write!(json, "{byte:02x}");
     }
     json.push_str("\",\"segments\":[");
-    for (index, segment) in file_info.index.segs.iter().enumerate() {
+    for (index, segment) in file_info.index.segments.iter().enumerate() {
         let separator = if index > 0 { "," } else { "" };
         let _ = write!(
             json,
             "{separator}{{\"t_start_ms\":{},\"raw_offset\":{},\"raw_len\":{}}}",
-            segment.t_start, segment.raw_off, segment.raw_len
+            segment.start_ms, segment.raw_offset, segment.raw_len
         );
     }
     json.push_str("]}");
@@ -375,6 +404,7 @@ fn info_json(file_info: &mvdz::FileInfo) -> String {
 mod tests {
     use super::*;
     use anyhow::Context as _;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn failed_output_is_removed() -> anyhow::Result<()> {
@@ -382,7 +412,7 @@ mod tests {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("out");
         let name = path.to_str().context("a UTF-8 path")?;
-        try_write_with(name, |out| out.write_all(b"one")).map_err(anyhow::Error::msg)?;
+        try_write_with(name, |writer| writer.write_all(b"one")).map_err(anyhow::Error::msg)?;
         assert_eq!(std::fs::read(&path)?, b"one");
         let failed = try_write_with(name, |_| Err(std::io::Error::other("fill")));
         assert!(failed.is_err());
@@ -394,8 +424,9 @@ mod tests {
     #[test]
     fn info_json_describes_the_file() -> anyhow::Result<()> {
         use std::fmt::Write as _;
-        let demo = vec![7u8; 3 * mvdz::segment::SEGMENT];
-        let (file, _) = mvdz::encode::compress(&demo, &mvdz::Config::default())?;
+        // several segments of 256 KiB
+        let demo = vec![7u8; 1 << 20];
+        let (file, _) = mvdz::compress_any(&demo, &mvdz::Config::default())?;
         let file_info = mvdz::read_info(std::io::Cursor::new(&file))?;
         let json: serde_json::Value = serde_json::from_str(&info_json(&file_info))?;
         let header = &file_info.header;
@@ -403,17 +434,17 @@ mod tests {
             let _ = write!(hex, "{byte:02x}");
             hex
         });
-        assert_eq!(json["version"], mvdz::format::VERSION);
+        assert_eq!(json["version"], mvdz::VERSION);
         assert_eq!(json["file_size"], file.len());
         assert_eq!(json["size"], demo.len());
         assert_eq!(json["duration_ms"], header.duration_ms);
         assert_eq!(json["crc32"], format!("{:08x}", header.crc));
         assert_eq!(json["sha256"], sha256);
         let segments = json["segments"].as_array().context("a segment list")?;
-        assert_eq!(segments.len(), file_info.index.segs.len());
-        for (segment, entry) in file_info.index.segs.iter().zip(segments) {
-            assert_eq!(entry["t_start_ms"], segment.t_start);
-            assert_eq!(entry["raw_offset"], segment.raw_off);
+        assert_eq!(segments.len(), file_info.index.segments.len());
+        for (segment, entry) in file_info.index.segments.iter().zip(segments) {
+            assert_eq!(entry["t_start_ms"], segment.start_ms);
+            assert_eq!(entry["raw_offset"], segment.raw_offset);
             assert_eq!(entry["raw_len"], segment.raw_len);
         }
         Ok(())

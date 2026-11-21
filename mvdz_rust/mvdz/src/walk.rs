@@ -4,7 +4,7 @@
 //! stream (with a side context); on decode it pulls the same bytes from the
 //! streams and writes them to the output. Numeric fields (origins, angles,
 //! sound/TE coordinates, long stats) are not touched: the walker only
-//! reserves their bytes and records where they are ([`Recs`]); the numeric
+//! reserves their bytes and records where they are ([`Records`]); the numeric
 //! groups (`numeric.rs`) fill them in after the walk. The structure of a
 //! demo never depends on a numeric value, so the walk and the numeric
 //! groups are independent.
@@ -13,10 +13,10 @@
 //! panicking, so corrupt input ends the walk early and fails the checksum.
 
 use crate::proto::{
-    DF_EFFECTS, DF_MODEL, DF_SKIN, DF_WEAPONFRAME, FTE_COLOURMOD, FTE_TRANS, Proto, U_ANGLE1,
-    U_ANGLE2, U_ANGLE3, U_COLORMAP, U_EFFECTS, U_EVENMORE, U_FRAME, U_MODEL, U_MOREBITS, U_ORIGIN1,
-    U_ORIGIN2, U_ORIGIN3, U_SKIN, X_COLOURMOD, X_ENTITYDBL, X_ENTITYDBL2, X_FATNESS, X_MODELDBL,
-    X_SCALE, X_TRANS, X_YETMORE, frame_len, le32,
+    DF_EFFECTS, DF_MODEL, DF_SKIN, DF_WEAPON_FRAME, FTE_COLOR_MOD, FTE_TRANS, Proto, U_ANGLE_1,
+    U_ANGLE_2, U_ANGLE_3, U_COLORMAP, U_EFFECTS, U_EVEN_MORE, U_FRAME, U_MODEL, U_MORE_BITS,
+    U_ORIGIN_1, U_ORIGIN_2, U_ORIGIN_3, U_SKIN, X_COLOR_MOD, X_ENTITY_DBL, X_ENTITY_DBL_2,
+    X_FATNESS, X_MODEL_DBL, X_SCALE, X_TRANS, X_YET_MORE, frame_len, le32,
 };
 use crate::streams::{
     CMD, ESCLEN, FRAGS, GEN_BASE, HIDDMG, HIDLEN, HIDMISC, HIDTAG, HIDTYPE, MASK, NAILS, PE_A,
@@ -25,99 +25,99 @@ use crate::streams::{
     SNDF, ST_IDX, ST_VAL, STL_IDX, STL_VAL, TAIL, TE_MISC, TE_TYPE, TEF, TEXT, TIME, TYPE, UC,
 };
 
-pub(crate) const NONE: u32 = u32::MAX;
+pub(crate) const NO_OFFSET: u32 = u32::MAX;
 
 /// Structural symbol I/O.
 ///
-/// Encode: record and return `v`. Decode: return the
-/// decoded symbol (`v` is ignored). Every `ctx` fits in 16 bits, the rans
+/// Encode: record and return `value`. Decode: return the
+/// decoded symbol (`value` is ignored). Every `context` fits in 16 bits, the rans
 /// table key (FORMAT.md §8.3); both implementations debug-assert it.
-pub(crate) trait SymIO {
-    fn byte(&mut self, sid: usize, ctx: u32, v: u8) -> u8;
-    fn put_blob(&mut self, sid: usize, b: &[u8]);
-    fn take_blob(&mut self, sid: usize, n: usize) -> Option<&[u8]>;
-    fn blob_rest(&self, sid: usize) -> &[u8];
+pub(crate) trait SymbolIo {
+    fn byte(&mut self, stream: usize, context: u32, value: u8) -> u8;
+    fn put_blob(&mut self, stream: usize, bytes: &[u8]);
+    fn take_blob(&mut self, stream: usize, len: usize) -> Option<&[u8]>;
+    fn blob_rest(&self, stream: usize) -> &[u8];
 }
 
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C)]
-pub(crate) struct PiRec {
-    pub(crate) off: u32,
-    pub(crate) t: u32,
+pub(crate) struct PlayerInfoRecord {
+    pub(crate) offset: u32,
+    pub(crate) time: u32,
     pub(crate) flags: u16,
-    pub(crate) num: u8,
-    pub(crate) fl: u8, // bit0: float coords
+    pub(crate) number: u8,
+    pub(crate) float_flags: u8, // bit0: float coords
 }
 
-pub(crate) const PE_INPREV: u16 = 64;
+pub(crate) const PE_IN_PREVIOUS: u16 = 64;
 pub(crate) const PE_FLOAT: u16 = 128;
 pub(crate) const PE_WIDE: u16 = 256;
 
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C)]
-pub(crate) struct PeRec {
-    pub(crate) off: u32,
-    pub(crate) t: u32,
-    pub(crate) num: u16,
+pub(crate) struct PacketEntityRecord {
+    pub(crate) offset: u32,
+    pub(crate) time: u32,
+    pub(crate) number: u16,
     pub(crate) bits: u16,
     pub(crate) model: u8,
-    pub(crate) ubits: u8, // U_* bits 9..15 of the entity word
+    pub(crate) update_bits: u8, // U_* bits 9..15 of the entity word
 }
 
-impl PeRec {
-    /// Byte offsets of the three origin coords (NONE if not sent).
+impl PacketEntityRecord {
+    /// Byte offsets of the three origin coords (`NO_OFFSET` if not sent).
     #[inline]
-    pub(crate) fn origin_offs(&self) -> [u32; 3] {
-        let cw = if self.bits & PE_FLOAT != 0 { 4 } else { 2 };
-        let aw = if self.bits & PE_WIDE != 0 { 2 } else { 1 };
-        let mut p = self.off;
-        let mut o = [NONE; 3];
-        for (i, oo) in o.iter_mut().enumerate() {
-            if self.bits & (1 << (2 * i)) != 0 {
-                *oo = p;
-                p += cw;
+    pub(crate) fn origin_offsets(&self) -> [u32; 3] {
+        let coord_width = if self.bits & PE_FLOAT != 0 { 4 } else { 2 };
+        let angle_width = if self.bits & PE_WIDE != 0 { 2 } else { 1 };
+        let mut offset = self.offset;
+        let mut offsets = [NO_OFFSET; 3];
+        for (axis, origin_offset) in offsets.iter_mut().enumerate() {
+            if self.bits & (1 << (2 * axis)) != 0 {
+                *origin_offset = offset;
+                offset += coord_width;
             }
-            if self.bits & (2 << (2 * i)) != 0 {
-                p += aw;
+            if self.bits & (2 << (2 * axis)) != 0 {
+                offset += angle_width;
             }
         }
-        o
+        offsets
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct SndRec {
-    pub(crate) off: u32,
+pub(crate) struct SoundRecord {
+    pub(crate) offset: u32,
     pub(crate) refs: [u32; 3],
     pub(crate) kind: u8,
-    pub(crate) num: u8,
+    pub(crate) number: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TeRec {
-    pub(crate) off: u32,
+pub(crate) struct TempEntityRecord {
+    pub(crate) offset: u32,
     pub(crate) refs: [u32; 3],
-    pub(crate) ty: u8,
+    pub(crate) kind: u8,
 }
 
 /// A usercmd block with angles on the grid: `off` is the pitch's offset
 /// (yaw and roll follow), `grid` bit a set for each axis a on the grid.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct UcRec {
-    pub(crate) off: u32,
-    pub(crate) num: u8,
+pub(crate) struct UsercmdRecord {
+    pub(crate) offset: u32,
+    pub(crate) number: u8,
     pub(crate) grid: u8,
 }
 
 /// A record list: the walker appends, the numeric groups read it after the walk.
 #[derive(Debug, Clone)]
-pub(crate) struct RecBuf<T> {
+pub(crate) struct RecordList<T> {
     records: Vec<T>,
     /// decode: the count from the stream table
     capacity: usize,
 }
 
-impl<T> RecBuf<T> {
+impl<T> RecordList<T> {
     /// At most `capacity` records, allocated up front.
     pub(crate) fn fixed(capacity: usize) -> crate::error::Result<Self> {
         Ok(Self {
@@ -147,23 +147,23 @@ impl<T> RecBuf<T> {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Recs {
-    pub(crate) pi: RecBuf<PiRec>,
-    pub(crate) pe: RecBuf<PeRec>,
-    pub(crate) snd: RecBuf<SndRec>,
-    pub(crate) te: RecBuf<TeRec>,
-    pub(crate) uc: RecBuf<UcRec>,
+pub(crate) struct Records {
+    pub(crate) player_infos: RecordList<PlayerInfoRecord>,
+    pub(crate) packet_entities: RecordList<PacketEntityRecord>,
+    pub(crate) sounds: RecordList<SoundRecord>,
+    pub(crate) temp_entities: RecordList<TempEntityRecord>,
+    pub(crate) usercmds: RecordList<UsercmdRecord>,
 }
 
-impl Recs {
+impl Records {
     /// Encode side: growable, sized by typical densities.
-    pub(crate) fn growable(n: usize) -> Self {
+    pub(crate) fn growable(len: usize) -> Self {
         Self {
-            pi: RecBuf::growable(n / 18),
-            pe: RecBuf::growable(n / 32),
-            snd: RecBuf::growable(n / 400),
-            te: RecBuf::growable(n / 400),
-            uc: RecBuf::growable(0),
+            player_infos: RecordList::growable(len / 18),
+            packet_entities: RecordList::growable(len / 32),
+            sounds: RecordList::growable(len / 400),
+            temp_entities: RecordList::growable(len / 400),
+            usercmds: RecordList::growable(0),
         }
     }
     /// Decode side: exact capacities from the stream table.
@@ -175,80 +175,80 @@ impl Recs {
         uc: usize,
     ) -> crate::error::Result<Self> {
         Ok(Self {
-            pi: RecBuf::fixed(pi)?,
-            pe: RecBuf::fixed(pe)?,
-            snd: RecBuf::fixed(snd)?,
-            te: RecBuf::fixed(te)?,
-            uc: RecBuf::fixed(uc)?,
+            player_infos: RecordList::fixed(pi)?,
+            packet_entities: RecordList::fixed(pe)?,
+            sounds: RecordList::fixed(snd)?,
+            temp_entities: RecordList::fixed(te)?,
+            usercmds: RecordList::fixed(uc)?,
         })
     }
 }
 
 #[derive(Clone, Copy, Default)]
-struct PlState {
+struct PlayerState {
     flags: u16,
     frame: u8,
-    wf: u8,
+    weapon_frame: u8,
 }
 
 /// The previous usercmd fields of one player (§6.11).
 #[derive(Clone, Copy, Default)]
-struct UcState {
+struct UsercmdState {
     drop: u8,
     msec: u8,
     grid: u8,
     buttons: u8,
     impulse: u8,
-    mv: [u16; 3],
+    moves: [u16; 3],
 }
 
 #[derive(Clone, Copy, Default)]
-struct EntState {
-    a: [u8; 3],
-    ares: [u8; 3],
+struct EntityState {
+    angles: [u8; 3],
+    angle_residuals: [u8; 3],
     frame: u8,
     model: u8,
     bits: u8,
-    last_pkt: u32,
+    last_packet: u32,
 }
 
-pub(crate) struct Walker<'a, const ENC: bool, IO: SymIO> {
+pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     pub(crate) src: &'a [u8],
     /// the output segment (decode; empty on encode)
     dst: &'a mut [u8],
-    pub(crate) p: usize,
-    pub(crate) err: bool,
+    pub(crate) offset: usize,
+    pub(crate) has_error: bool,
     pub(crate) io: IO,
     pub(crate) proto: Proto,
-    pub(crate) recs: &'a mut Recs,
-    pl: Box<[PlState; 256]>,
-    ent: Box<[EntState; 2048]>,
-    st: Box<[[u8; 256]; 32]>,
-    pl_off: Box<[[u32; 3]; 256]>,
-    ent_off: Box<[[u32; 3]; 2048]>,
-    t: u32,
+    pub(crate) recs: &'a mut Records,
+    players: Box<[PlayerState; 256]>,
+    entities: Box<[EntityState; 2048]>,
+    stats: Box<[[u8; 256]; 32]>,
+    player_origin_offsets: Box<[[u32; 3]; 256]>,
+    entity_origin_offsets: Box<[[u32; 3]; 2048]>,
+    time: u32,
     target: u8,
     last_type: u8,
-    prev_cmd: u8,
-    prev_pkt: Vec<u16>,
-    cur_pkt: Vec<u16>,
-    pkt_ptr: usize,
-    pkt_no: u32,
-    last_tb: u8,
-    first_by_ty: [u8; 8],
-    pi_prev_num: u8,
-    st_prev_idx: u8,
-    st_prev_val: u8,
-    last_hdr: u8,
-    prev_te: u8,
-    pe_prev_d: u8,
-    uc_prev: [u8; 2],
-    ucs: Box<[UcState; 256]>,
+    previous_command: u8,
+    previous_packet: Vec<u16>,
+    current_packet: Vec<u16>,
+    previous_packet_index: usize,
+    packet_number: u32,
+    last_time_byte: u8,
+    first_command_by_type: [u8; 8],
+    playerinfo_previous_number: u8,
+    stat_previous_index: u8,
+    stat_previous_residual: u8,
+    last_header: u8,
+    previous_temp_entity: u8,
+    previous_entity_gap: u8,
+    usercmd_previous_players: [u8; 2],
+    usercmds: Box<[UsercmdState; 256]>,
     /// demo time at the end of the walk (ms)
-    pub(crate) t_end: u32,
+    pub(crate) end_time: u32,
 }
 
-impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
+impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     /// `dst`: the output segment (decode; empty on encode). The walker writes the
     /// structural bytes; the numeric groups fill in the rest after the walk.
     #[expect(
@@ -258,361 +258,378 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     pub(crate) fn new(
         src: &'a [u8],
         dst: &'a mut [u8],
-        recs: &'a mut Recs,
+        recs: &'a mut Records,
         io: IO,
         proto: Proto,
     ) -> Self {
         Walker {
             src,
             dst,
-            p: 0,
-            err: false,
+            offset: 0,
+            has_error: false,
             io,
             proto,
             recs,
-            pl: Box::new([PlState::default(); 256]),
-            ent: Box::new([EntState::default(); 2048]),
-            st: Box::new([[0u8; 256]; 32]),
-            pl_off: Box::new([[NONE; 3]; 256]),
-            ent_off: Box::new([[NONE; 3]; 2048]),
-            t: 0,
+            players: Box::new([PlayerState::default(); 256]),
+            entities: Box::new([EntityState::default(); 2048]),
+            stats: Box::new([[0u8; 256]; 32]),
+            player_origin_offsets: Box::new([[NO_OFFSET; 3]; 256]),
+            entity_origin_offsets: Box::new([[NO_OFFSET; 3]; 2048]),
+            time: 0,
             target: 0,
             last_type: 0,
-            prev_cmd: 0,
-            prev_pkt: Vec::new(),
-            cur_pkt: Vec::new(),
-            pkt_ptr: 0,
-            pkt_no: 1,
-            last_tb: 0,
-            first_by_ty: [0; 8],
-            pi_prev_num: 255,
-            st_prev_idx: 255,
-            st_prev_val: 0,
-            last_hdr: 0,
-            prev_te: 0,
-            pe_prev_d: 0,
-            uc_prev: [0; 2],
-            ucs: Box::new([UcState::default(); 256]),
-            t_end: 0,
+            previous_command: 0,
+            previous_packet: Vec::new(),
+            current_packet: Vec::new(),
+            previous_packet_index: 0,
+            packet_number: 1,
+            last_time_byte: 0,
+            first_command_by_type: [0; 8],
+            playerinfo_previous_number: 255,
+            stat_previous_index: 255,
+            stat_previous_residual: 0,
+            last_header: 0,
+            previous_temp_entity: 0,
+            previous_entity_gap: 0,
+            usercmd_previous_players: [0; 2],
+            usercmds: Box::new([UsercmdState::default(); 256]),
+            end_time: 0,
         }
     }
 
     #[inline(always)]
     fn limit(&self) -> usize {
-        if ENC { self.src.len() } else { self.dst.len() }
+        if IS_ENCODE {
+            self.src.len()
+        } else {
+            self.dst.len()
+        }
     }
 
     #[inline(always)]
-    fn rd(&mut self) -> u8 {
-        if let Some(&v) = self.src.get(self.p) {
-            self.p += 1;
-            v
+    fn read_byte(&mut self) -> u8 {
+        if let Some(&byte) = self.src.get(self.offset) {
+            self.offset += 1;
+            byte
         } else {
-            self.err = true;
+            self.has_error = true;
             0
         }
     }
 
     #[inline(always)]
-    fn wr(&mut self, v: u8) {
-        if let Some(out) = self.dst.get_mut(self.p) {
-            *out = v;
+    fn write_byte(&mut self, byte: u8) {
+        if let Some(out) = self.dst.get_mut(self.offset) {
+            *out = byte;
         } else {
-            self.err = true;
+            self.has_error = true;
         }
-        self.p += 1;
+        self.offset += 1;
     }
 
     /// A plain byte.
     #[inline(always)]
-    fn b8(&mut self, sid: usize, ctx: u32) -> u8 {
-        if ENC {
-            let v = self.rd();
-            self.io.byte(sid, ctx, v)
+    fn coded_byte(&mut self, stream: usize, context: u32) -> u8 {
+        if IS_ENCODE {
+            let byte = self.read_byte();
+            self.io.byte(stream, context, byte)
         } else {
-            let v = self.io.byte(sid, ctx, 0);
-            self.wr(v);
-            v
+            let byte = self.io.byte(stream, context, 0);
+            self.write_byte(byte);
+            byte
         }
     }
 
-    /// A byte coded as (v - pred) mod 256.
+    /// A byte coded as (byte - prediction) mod 256.
     #[inline(always)]
-    fn r8(&mut self, sid: usize, ctx: u32, pred: u8) -> u8 {
-        if ENC {
-            let v = self.rd();
-            self.io.byte(sid, ctx, v.wrapping_sub(pred));
-            v
+    fn coded_residual(&mut self, stream: usize, context: u32, prediction: u8) -> u8 {
+        if IS_ENCODE {
+            let byte = self.read_byte();
+            self.io.byte(stream, context, byte.wrapping_sub(prediction));
+            byte
         } else {
-            let v = self.io.byte(sid, ctx, 0).wrapping_add(pred);
-            self.wr(v);
-            v
+            let byte = self.io.byte(stream, context, 0).wrapping_add(prediction);
+            self.write_byte(byte);
+            byte
         }
     }
 
-    /// A byte of the demo kept in blob stream `sid`.
+    /// A byte of the demo kept in blob stream `stream`.
     #[inline(always)]
-    fn p8(&mut self, sid: usize) -> u8 {
-        if ENC {
-            let v = self.rd();
-            self.io.put_blob(sid, &[v]);
-            v
+    fn blob_byte(&mut self, stream: usize) -> u8 {
+        if IS_ENCODE {
+            let byte = self.read_byte();
+            self.io.put_blob(stream, &[byte]);
+            byte
         } else {
-            let v = self.tag(sid, 0);
-            self.wr(v);
-            v
+            let byte = self.tag(stream, 0);
+            self.write_byte(byte);
+            byte
         }
     }
 
-    /// A byte of the demo kept in blob stream `sid` as (v - pred) mod 256.
+    /// A byte of the demo kept in blob stream `stream` as (byte - prediction) mod 256.
     #[inline(always)]
-    fn pr8(&mut self, sid: usize, pred: u8) -> u8 {
-        if ENC {
-            let v = self.rd();
-            self.io.put_blob(sid, &[v.wrapping_sub(pred)]);
-            v
+    fn blob_residual(&mut self, stream: usize, prediction: u8) -> u8 {
+        if IS_ENCODE {
+            let byte = self.read_byte();
+            self.io.put_blob(stream, &[byte.wrapping_sub(prediction)]);
+            byte
         } else {
-            let v = self.tag(sid, 0).wrapping_add(pred);
-            self.wr(v);
-            v
+            let byte = self.tag(stream, 0).wrapping_add(prediction);
+            self.write_byte(byte);
+            byte
         }
     }
 
-    /// n little-endian bytes of the demo kept in blob stream `sid`.
+    /// `count` little-endian bytes of the demo kept in blob stream `stream`.
     #[inline]
-    fn pn(&mut self, sid: usize, n: usize) -> u32 {
-        let mut v = 0u32;
-        for k in 0..n {
-            v |= u32::from(self.p8(sid)) << (8 * k);
+    fn blob_le(&mut self, stream: usize, count: usize) -> u32 {
+        let mut value = 0u32;
+        for index in 0..count {
+            value |= u32::from(self.blob_byte(stream)) << (8 * index);
         }
-        v
+        value
     }
 
     /// A byte that is not part of the demo (a tag, a length byte), kept in
-    /// blob stream `sid`: encode stores `v`, decode returns the stored byte.
+    /// blob stream `stream`: encode stores `value`, decode returns the stored byte.
     #[inline(always)]
-    fn tag(&mut self, sid: usize, v: u8) -> u8 {
-        if ENC {
-            self.io.put_blob(sid, &[v]);
-            v
-        } else if let Some(b) = self.io.take_blob(sid, 1) {
-            b[0]
+    fn tag(&mut self, stream: usize, value: u8) -> u8 {
+        if IS_ENCODE {
+            self.io.put_blob(stream, &[value]);
+            value
+        } else if let Some(bytes) = self.io.take_blob(stream, 1) {
+            bytes[0]
         } else {
-            self.err = true;
+            self.has_error = true;
             0
         }
     }
 
-    /// n little-endian bytes, the byte index in context bits 14-15.
+    /// `count` little-endian bytes, the byte index in context bits 14-15.
     #[inline]
-    fn bn(&mut self, sid: usize, ctx: u32, n: usize) -> u32 {
-        let mut v = 0u32;
-        for k in 0..n {
-            v |= u32::from(self.b8(sid, ctx | (k as u32) << 14)) << (8 * k);
+    fn coded_le(&mut self, stream: usize, context: u32, count: usize) -> u32 {
+        let mut value = 0u32;
+        for index in 0..count {
+            value |=
+                u32::from(self.coded_byte(stream, context | (index as u32) << 14)) << (8 * index);
         }
-        v
+        value
     }
 
-    fn copy_blob(&mut self, sid: usize, n: usize) {
-        if ENC {
-            if n > self.src.len() - self.p.min(self.src.len()) {
-                self.err = true;
+    fn copy_blob(&mut self, stream: usize, len: usize) {
+        if IS_ENCODE {
+            if len > self.src.len() - self.offset.min(self.src.len()) {
+                self.has_error = true;
                 return;
             }
-            self.io.put_blob(sid, &self.src[self.p..self.p + n]);
-            self.p += n;
+            self.io
+                .put_blob(stream, &self.src[self.offset..self.offset + len]);
+            self.offset += len;
         } else {
-            let p = self.p;
-            match (self.io.take_blob(sid, n), self.dst.get_mut(p..p + n)) {
+            let start = self.offset;
+            match (
+                self.io.take_blob(stream, len),
+                self.dst.get_mut(start..start + len),
+            ) {
                 (Some(blob), Some(out)) => {
                     out.copy_from_slice(blob);
-                    self.p += n;
+                    self.offset += len;
                 }
-                _ => self.err = true,
+                _ => self.has_error = true,
             }
         }
     }
 
-    /// Reserve n bytes for a numeric field; returns their offset.
+    /// Reserve `len` bytes for a numeric field; returns their offset.
     #[inline(always)]
-    fn reserve(&mut self, n: usize) -> u32 {
-        let off = self.p;
-        self.p += n;
-        if self.p > self.limit() {
-            self.err = true;
+    fn reserve(&mut self, len: usize) -> u32 {
+        let offset = self.offset;
+        self.offset += len;
+        if self.offset > self.limit() {
+            self.has_error = true;
         }
-        off as u32
+        offset as u32
     }
 
     /// Walks the whole segment. Encode: returns the tail length. Decode:
     /// `tail` is the stored tail length.
     pub(crate) fn run(&mut self, tail: usize) -> usize {
-        if ENC {
-            while !self.err && frame_len(self.src, self.p).is_some() {
+        if IS_ENCODE {
+            while !self.has_error && frame_len(self.src, self.offset).is_some() {
                 self.frame();
             }
-            if self.err {
+            if self.has_error {
                 return 0;
             }
-            let t = self.src.len() - self.p;
-            self.copy_blob(TAIL, t);
-            self.t_end = self.t;
-            t
+            let tail_len = self.src.len() - self.offset;
+            self.copy_blob(TAIL, tail_len);
+            self.end_time = self.time;
+            tail_len
         } else {
             let stop = self.dst.len().saturating_sub(tail);
-            while !self.err && self.p < stop {
+            while !self.has_error && self.offset < stop {
                 self.frame();
             }
-            if self.p != stop {
-                self.err = true;
+            if self.offset != stop {
+                self.has_error = true;
             }
             self.copy_blob(TAIL, tail);
-            self.t_end = self.t;
+            self.end_time = self.time;
             tail
         }
     }
 
     fn frame(&mut self) {
-        let lt = u32::from(self.last_type);
-        let tb = self.b8(TIME, lt | u32::from(self.last_tb) << 8);
-        self.last_tb = tb;
-        self.t = self.t.wrapping_add(u32::from(tb));
-        let ty = self.b8(TYPE, lt | u32::from(tb.min(32)) << 8);
-        self.last_type = ty;
-        self.target = ty >> 3;
-        match ty & 7 {
+        let last_type = u32::from(self.last_type);
+        let time_byte = self.coded_byte(TIME, last_type | u32::from(self.last_time_byte) << 8);
+        self.last_time_byte = time_byte;
+        self.time = self.time.wrapping_add(u32::from(time_byte));
+        let frame_type = self.coded_byte(TYPE, last_type | u32::from(time_byte.min(32)) << 8);
+        self.last_type = frame_type;
+        self.target = frame_type >> 3;
+        match frame_type & 7 {
             2 => self.copy_blob(SET, 8),
             3 => {
-                let mask = self.pn(MASK, 4);
-                self.length_prefixed(ty, mask == 0);
+                let mask = self.blob_le(MASK, 4);
+                self.length_prefixed(frame_type, mask == 0);
             }
-            1 | 4 | 5 | 6 => self.length_prefixed(ty, false),
-            _ => self.err = true,
+            1 | 4 | 5 | 6 => self.length_prefixed(frame_type, false),
+            _ => self.has_error = true,
         }
     }
 
-    fn length_prefixed(&mut self, ty: u8, hidden: bool) {
-        if ENC {
-            if self.src.len() - self.p < 4 {
-                self.err = true;
+    fn length_prefixed(&mut self, frame_type: u8, is_hidden: bool) {
+        if IS_ENCODE {
+            if self.src.len() - self.offset < 4 {
+                self.has_error = true;
                 return;
             }
-            let n = le32(&self.src[self.p..]) as usize;
-            self.p += 4;
-            let end = self.p + n;
+            let len = le32(&self.src[self.offset..]) as usize;
+            self.offset += 4;
+            let end = self.offset + len;
             if end > self.src.len() {
-                self.err = true;
+                self.has_error = true;
                 return;
             }
-            if hidden {
+            if is_hidden {
                 self.hidden(end);
             } else {
-                self.payload(end, ty);
+                self.payload(end, frame_type);
             }
         } else {
-            let at = self.p;
+            let len_offset = self.offset;
             self.reserve(4);
-            if self.err {
+            if self.has_error {
                 return;
             }
-            if hidden {
+            if is_hidden {
                 self.hidden(0);
             } else {
-                self.payload(0, ty);
+                self.payload(0, frame_type);
             }
-            let n = (self.p - at - 4) as u32;
-            if let Some(out) = self.dst.get_mut(at..at + 4) {
-                out.copy_from_slice(&n.to_le_bytes());
+            let len = (self.offset - len_offset - 4) as u32;
+            if let Some(out) = self.dst.get_mut(len_offset..len_offset + 4) {
+                out.copy_from_slice(&len.to_le_bytes());
             }
         }
     }
 
     fn escape(&mut self, end: usize) {
-        if ENC {
-            let mut n = (end - self.p) as u32;
+        if IS_ENCODE {
+            let mut len = (end - self.offset) as u32;
             loop {
-                let b = (n & 0x7f) as u8 | if n >= 0x80 { 0x80 } else { 0 };
-                self.tag(ESCLEN, b);
-                n >>= 7;
-                if n == 0 {
+                let byte = (len & 0x7f) as u8 | if len >= 0x80 { 0x80 } else { 0 };
+                self.tag(ESCLEN, byte);
+                len >>= 7;
+                if len == 0 {
                     break;
                 }
             }
-            self.copy_blob(RAW, end - self.p);
+            self.copy_blob(RAW, end - self.offset);
         } else {
-            let mut n = 0u32;
-            for k in 0..5u32 {
-                let b = self.tag(ESCLEN, 0);
-                n |= u32::from(b & 0x7f) << (7 * k);
-                if b < 0x80 {
+            let mut len = 0u32;
+            for group in 0..5u32 {
+                let byte = self.tag(ESCLEN, 0);
+                len |= u32::from(byte & 0x7f) << (7 * group);
+                if byte < 0x80 {
                     break;
                 }
-                if k == 4 {
-                    self.err = true;
+                if group == 4 {
+                    self.has_error = true;
                     return;
                 }
             }
-            self.copy_blob(RAW, n as usize);
+            self.copy_blob(RAW, len as usize);
         }
     }
 
-    fn payload(&mut self, end: usize, ty: u8) {
-        self.prev_cmd = 0;
-        self.pi_prev_num = 255;
-        self.st_prev_idx = 255;
-        self.st_prev_val = 0;
-        let mut idx = 0u32;
-        let tyi = (ty & 7) as usize;
-        let first_prev = u32::from(cmd_class(self.first_by_ty[tyi]));
-        let mut first = 255u8;
+    fn payload(&mut self, end: usize, frame_type: u8) {
+        self.previous_command = 0;
+        self.playerinfo_previous_number = 255;
+        self.stat_previous_index = 255;
+        self.stat_previous_residual = 0;
+        let mut command_index = 0u32;
+        let type_index = (frame_type & 7) as usize;
+        let previous_first_class = u32::from(command_class(self.first_command_by_type[type_index]));
+        let mut first_command = 255u8;
         loop {
-            if self.err {
+            if self.has_error {
                 return;
             }
             // Bit 15 splits the space: a known previous command is named by
             // its class, an "other" one (class 15) by its own number.
-            let cl = u32::from(cmd_class(self.prev_cmd));
-            let ctx = if cl == 15 {
-                0x8000 | u32::from(self.prev_cmd) | (tyi as u32) << 8 | idx.min(7) << 11
+            let class = u32::from(command_class(self.previous_command));
+            let context = if class == 15 {
+                0x8000
+                    | u32::from(self.previous_command)
+                    | (type_index as u32) << 8
+                    | command_index.min(7) << 11
             } else {
-                cl | idx.min(15) << 4 | first_prev << 8 | (tyi as u32) << 12
+                class
+                    | command_index.min(15) << 4
+                    | previous_first_class << 8
+                    | (type_index as u32) << 12
             };
-            idx += 1;
-            if idx == 2 {
-                first = self.prev_cmd;
+            command_index += 1;
+            if command_index == 2 {
+                first_command = self.previous_command;
             }
-            if idx >= 2 {
-                self.first_by_ty[tyi] = first;
+            if command_index >= 2 {
+                self.first_command_by_type[type_index] = first_command;
             } else {
-                self.first_by_ty[tyi] = 255;
+                self.first_command_by_type[type_index] = 255;
             }
-            if ENC {
-                if self.p == end {
-                    self.io.byte(CMD, ctx, 255);
+            if IS_ENCODE {
+                if self.offset == end {
+                    self.io.byte(CMD, context, 255);
                     return;
                 }
-                let cmd = self.src[self.p];
-                let sz = self.proto.cmd_size(cmd, &self.src[self.p + 1..end]);
-                let sz = match sz {
-                    Some(s) if cmd != 0 => s,
+                let command = self.src[self.offset];
+                let size = self
+                    .proto
+                    .command_size(command, &self.src[self.offset + 1..end]);
+                let size = match size {
+                    Some(size) if command != 0 => size,
                     _ => {
-                        self.io.byte(CMD, ctx, 0);
+                        self.io.byte(CMD, context, 0);
                         self.escape(end);
                         return;
                     }
                 };
-                self.io.byte(CMD, ctx, cmd);
-                self.p += 1;
-                let start = self.p;
-                self.command(cmd);
-                if self.p != start + sz {
-                    self.err = true;
+                self.io.byte(CMD, context, command);
+                self.offset += 1;
+                let start = self.offset;
+                self.command(command);
+                if self.offset != start + size {
+                    self.has_error = true;
                     return;
                 }
-                self.prev_cmd = cmd;
+                self.previous_command = command;
             } else {
-                let cmd = self.io.byte(CMD, ctx, 0);
-                match cmd {
+                let command = self.io.byte(CMD, context, 0);
+                match command {
                     255 => return,
                     0 => {
                         self.escape(0);
@@ -620,56 +637,57 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                     }
                     _ => {}
                 }
-                self.wr(cmd);
-                self.command(cmd);
-                self.prev_cmd = cmd;
+                self.write_byte(command);
+                self.command(command);
+                self.previous_command = command;
             }
         }
     }
 
-    fn generic(&mut self, sid: usize, size_cmd: u8) -> usize {
-        let start = self.p;
-        let n = if ENC {
+    fn generic(&mut self, stream: usize, size_command: u8) -> usize {
+        let start = self.offset;
+        let size = if IS_ENCODE {
             self.proto
-                .cmd_size(size_cmd, &self.src[self.p.min(self.src.len())..])
+                .command_size(size_command, &self.src[self.offset.min(self.src.len())..])
         } else {
-            self.proto.cmd_size(size_cmd, self.io.blob_rest(sid))
+            self.proto
+                .command_size(size_command, self.io.blob_rest(stream))
         };
-        match n {
-            Some(n) => self.copy_blob(sid, n),
-            None => self.err = true,
+        match size {
+            Some(size) => self.copy_blob(stream, size),
+            None => self.has_error = true,
         }
         start
     }
 
-    fn command(&mut self, cmd: u8) {
-        match cmd {
+    fn command(&mut self, command: u8) {
+        match command {
             42 => self.playerinfo(),
-            47 | 48 => self.packet_entities(cmd == 48),
+            47 | 48 => self.packet_entities(command == 48),
             3 => {
-                let t = (self.target & 31) as usize;
-                let i = self.b8(
+                let player = (self.target & 31) as usize;
+                let stat = self.coded_byte(
                     ST_IDX,
-                    u32::from(self.st_prev_idx) | u32::from(self.prev_cmd) << 8,
+                    u32::from(self.stat_previous_index) | u32::from(self.previous_command) << 8,
                 );
-                let prev = self.st[t][i as usize];
-                let v = self.r8(
+                let previous = self.stats[player][stat as usize];
+                let value = self.coded_residual(
                     ST_VAL,
-                    u32::from(i) | u32::from(self.st_prev_val) << 8,
-                    prev,
+                    u32::from(stat) | u32::from(self.stat_previous_residual) << 8,
+                    previous,
                 );
-                self.st_prev_idx = i;
-                self.st_prev_val = v.wrapping_sub(prev);
-                self.st[t][i as usize] = v;
+                self.stat_previous_index = stat;
+                self.stat_previous_residual = value.wrapping_sub(previous);
+                self.stats[player][stat as usize] = value;
             }
             38 => {
-                self.p8(STL_IDX);
+                self.blob_byte(STL_IDX);
                 self.copy_blob(STL_VAL, 4);
             }
             6 => self.sound(),
             23 => self.temp_entity(),
             8 => {
-                self.p8(PR_LEVEL);
+                self.blob_byte(PR_LEVEL);
                 self.generic(TEXT, 9);
             }
             9 | 26 => {
@@ -679,419 +697,447 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 self.copy_blob(FRAGS, 3);
             }
             36 | 37 | 53 => {
-                self.generic(PING, cmd);
+                self.generic(PING, command);
             }
             43 | 54 => {
-                self.generic(NAILS, cmd);
+                self.generic(NAILS, command);
             }
             11 => {
                 let start = self.generic(GEN_BASE + 11, 11);
-                if !self.err {
-                    let end = self.p;
+                if !self.has_error {
+                    let end = self.offset;
                     // decode: the serverdata body the walker just wrote
-                    let b: &[u8] = if ENC {
+                    let body: &[u8] = if IS_ENCODE {
                         &self.src[start..end]
                     } else {
                         self.dst.get(start..end).unwrap_or_default()
                     };
-                    let mut pr = self.proto;
-                    pr.observe_server_data(b);
-                    self.proto = pr;
+                    let mut proto = self.proto;
+                    proto.observe_server_data(body);
+                    self.proto = proto;
                 }
             }
             _ => {
-                self.generic(GEN_BASE + cmd as usize, cmd);
+                self.generic(GEN_BASE + command as usize, command);
             }
         }
     }
 
-    /// The DF_* flags as one symbol in the common case: x = flags ^ prev;
+    /// The DF_* flags as one symbol in the common case: changed = flags ^ previous;
     /// the often-toggling bits (sent axes 0-5, weaponframe 10) plus an
     /// escape bit for "a rare bit changed" form one byte; only on escape do
     /// bits 6-9, 11-14 and then bit 15 follow.
-    fn pi_flags(&mut self, prev: u16) -> u16 {
-        // Bit 15 keeps the main symbol's contexts clear of b1's (0x100-0x1ff)
-        // and b2's (0x200); prev's own bit 15 is left out.
-        let cx = 0x8000 | u32::from(prev & 0x7fff);
-        let x = if ENC {
-            let lo = u16::from(self.rd());
-            let x = (lo | u16::from(self.rd()) << 8) ^ prev;
-            let rare = x & !0x43f;
-            let a = (x & 0x3f) as u8 | (((x >> 10) & 1) as u8) << 6 | u8::from(rare != 0) << 7;
-            self.io.byte(PI_FLAGS, cx, a);
-            if rare != 0 {
-                let b1 = ((x >> 6) & 0xf) as u8 | (((x >> 11) & 0xf) as u8) << 4;
-                self.io
-                    .byte(PI_FLAGS, 0x100 | u32::from((prev >> 6) & 0xff), b1);
-                self.io.byte(PI_FLAGS, 0x200, (x >> 15) as u8);
-            }
-            x
-        } else {
-            let a = u16::from(self.io.byte(PI_FLAGS, cx, 0));
-            let mut x = (a & 0x3f) | ((a >> 6) & 1) << 10;
-            if a & 0x80 != 0 {
-                let b1 = u16::from(self.io.byte(
+    fn playerinfo_flags(&mut self, previous: u16) -> u16 {
+        // Bit 15 keeps the main symbol's contexts clear of rare_byte's (0x100-0x1ff)
+        // and bit15_byte's (0x200); previous's own bit 15 is left out.
+        let context = 0x8000 | u32::from(previous & 0x7fff);
+        let changed = if IS_ENCODE {
+            let low = u16::from(self.read_byte());
+            let changed = (low | u16::from(self.read_byte()) << 8) ^ previous;
+            let rare_bits = changed & !0x43f;
+            let main_byte = (changed & 0x3f) as u8
+                | (((changed >> 10) & 1) as u8) << 6
+                | u8::from(rare_bits != 0) << 7;
+            self.io.byte(PI_FLAGS, context, main_byte);
+            if rare_bits != 0 {
+                let rare_byte = ((changed >> 6) & 0xf) as u8 | (((changed >> 11) & 0xf) as u8) << 4;
+                self.io.byte(
                     PI_FLAGS,
-                    0x100 | u32::from((prev >> 6) & 0xff),
+                    0x100 | u32::from((previous >> 6) & 0xff),
+                    rare_byte,
+                );
+                self.io.byte(PI_FLAGS, 0x200, (changed >> 15) as u8);
+            }
+            changed
+        } else {
+            let main_byte = u16::from(self.io.byte(PI_FLAGS, context, 0));
+            let mut changed = (main_byte & 0x3f) | ((main_byte >> 6) & 1) << 10;
+            if main_byte & 0x80 != 0 {
+                let rare_byte = u16::from(self.io.byte(
+                    PI_FLAGS,
+                    0x100 | u32::from((previous >> 6) & 0xff),
                     0,
                 ));
-                let b2 = u16::from(self.io.byte(PI_FLAGS, 0x200, 0));
-                x |= (b1 & 0xf) << 6 | (b1 >> 4) << 11 | (b2 & 1) << 15;
+                let bit15_byte = u16::from(self.io.byte(PI_FLAGS, 0x200, 0));
+                changed |= (rare_byte & 0xf) << 6 | (rare_byte >> 4) << 11 | (bit15_byte & 1) << 15;
             }
-            let f = x ^ prev;
-            let [low, high] = f.to_le_bytes();
-            self.wr(low);
-            self.wr(high);
-            x
+            let flags = changed ^ previous;
+            let [low, high] = flags.to_le_bytes();
+            self.write_byte(low);
+            self.write_byte(high);
+            changed
         };
-        x ^ prev
+        changed ^ previous
     }
 
     fn playerinfo(&mut self) {
-        let num = self.p8(PI_NUM);
-        self.pi_prev_num = num;
-        let ps = self.pl[num as usize];
-        let flags = self.pi_flags(ps.flags);
-        let frame = self.r8(
+        let number = self.blob_byte(PI_NUM);
+        self.playerinfo_previous_number = number;
+        let previous = self.players[number as usize];
+        let flags = self.playerinfo_flags(previous.flags);
+        let frame = self.coded_residual(
             PI_FRAME,
-            u32::from(ps.frame) | u32::from(flags & 0x300),
-            ps.frame,
+            u32::from(previous.frame) | u32::from(flags & 0x300),
+            previous.frame,
         );
-        let cw = self.proto.coord();
-        let nco = (flags & 7).count_ones() as usize;
-        let nan = (flags & 0x38).count_ones() as usize;
-        let off = self.reserve(nco * cw + nan * 2);
-        if !self.recs.pi.push(PiRec {
-            off,
-            t: self.t,
+        let coord_width = self.proto.coord();
+        let origin_count = (flags & 7).count_ones() as usize;
+        let angle_count = (flags & 0x38).count_ones() as usize;
+        let offset = self.reserve(origin_count * coord_width + angle_count * 2);
+        if !self.recs.player_infos.push(PlayerInfoRecord {
+            offset,
+            time: self.time,
             flags,
-            num,
-            fl: u8::from(self.proto.float_coords),
+            number,
+            float_flags: u8::from(self.proto.has_float_coords),
         }) {
-            self.err = true;
+            self.has_error = true;
         }
-        let mut o = off;
-        for i in 0..3 {
-            if flags & (1 << i) != 0 {
-                self.pl_off[num as usize][i] = o;
-                o += cw as u32;
+        let mut origin_offset = offset;
+        for axis in 0..3 {
+            if flags & (1 << axis) != 0 {
+                self.player_origin_offsets[number as usize][axis] = origin_offset;
+                origin_offset += coord_width as u32;
             }
         }
         if flags & DF_MODEL != 0 {
-            self.p8(PI_MODEL);
+            self.blob_byte(PI_MODEL);
         }
         if flags & DF_SKIN != 0 {
-            self.p8(PI_SKIN);
+            self.blob_byte(PI_SKIN);
         }
         if flags & DF_EFFECTS != 0 {
-            self.p8(PI_EFF);
+            self.blob_byte(PI_EFF);
         }
-        let wf = if flags & DF_WEAPONFRAME != 0 {
-            self.r8(PI_WFRAME, u32::from(ps.wf), ps.wf)
+        let weapon_frame = if flags & DF_WEAPON_FRAME != 0 {
+            self.coded_residual(
+                PI_WFRAME,
+                u32::from(previous.weapon_frame),
+                previous.weapon_frame,
+            )
         } else {
-            ps.wf
+            previous.weapon_frame
         };
-        self.pl[num as usize] = PlState { flags, frame, wf };
+        self.players[number as usize] = PlayerState {
+            flags,
+            frame,
+            weapon_frame,
+        };
     }
 
     /// Next entity number in this packet as predicted from the previous
     /// packet's list.
-    fn predict_ent(&mut self, prev: i32) -> i32 {
-        while self.pkt_ptr < self.prev_pkt.len() && i32::from(self.prev_pkt[self.pkt_ptr]) <= prev {
-            self.pkt_ptr += 1;
+    fn predict_entity(&mut self, previous: i32) -> i32 {
+        while self.previous_packet_index < self.previous_packet.len()
+            && i32::from(self.previous_packet[self.previous_packet_index]) <= previous
+        {
+            self.previous_packet_index += 1;
         }
-        if self.pkt_ptr < self.prev_pkt.len() {
-            i32::from(self.prev_pkt[self.pkt_ptr])
+        if self.previous_packet_index < self.previous_packet.len() {
+            i32::from(self.previous_packet[self.previous_packet_index])
         } else {
-            prev + 1
+            previous + 1
         }
     }
 
-    fn packet_entities(&mut self, delta: bool) {
-        if delta {
-            let h = self.pr8(PE_HDR, self.last_hdr);
-            self.last_hdr = h;
+    fn packet_entities(&mut self, is_delta: bool) {
+        if is_delta {
+            let header = self.blob_residual(PE_HDR, self.last_header);
+            self.last_header = header;
         }
-        self.pe_prev_d = 0;
-        let mut prev_ent: i32 = -1;
-        self.pkt_ptr = 0;
-        self.cur_pkt.clear();
-        self.pkt_no = self.pkt_no.wrapping_add(1);
+        self.previous_entity_gap = 0;
+        let mut previous_entity: i32 = -1;
+        self.previous_packet_index = 0;
+        self.current_packet.clear();
+        self.packet_number = self.packet_number.wrapping_add(1);
         loop {
-            if self.err {
+            if self.has_error {
                 break;
             }
-            let pe = self.predict_ent(prev_ent);
-            let ectx =
-                (pe - prev_ent).min(255).cast_unsigned() | u32::from(self.pe_prev_d.min(15)) << 8;
-            let w: u16;
-            let ent: usize;
-            if ENC {
-                if self.src.len() - self.p < 2 {
-                    self.err = true;
+            let predicted = self.predict_entity(previous_entity);
+            let entity_context = (predicted - previous_entity).min(255).cast_unsigned()
+                | u32::from(self.previous_entity_gap.min(15)) << 8;
+            let word: u16;
+            let entity: usize;
+            if IS_ENCODE {
+                if self.src.len() - self.offset < 2 {
+                    self.has_error = true;
                     return;
                 }
-                w = u16::from_le_bytes([self.src[self.p], self.src[self.p + 1]]);
-                self.p += 2;
-                if w == 0 {
-                    self.io.byte(PE_ENT, ectx, 0);
+                word = u16::from_le_bytes([self.src[self.offset], self.src[self.offset + 1]]);
+                self.offset += 2;
+                if word == 0 {
+                    self.io.byte(PE_ENT, entity_context, 0);
                     break;
                 }
-                ent = (w & 511) as usize;
-                let d = ((i32::from(w & 511) - prev_ent - 1) & 511) + 1;
-                if d < 255 {
-                    self.io.byte(PE_ENT, ectx, d.cast_unsigned() as u8);
-                } else {
-                    self.io.byte(PE_ENT, ectx, 255);
-                    self.io.byte(PE_ENT, 1 << 12, d.cast_unsigned() as u8);
+                entity = (word & 511) as usize;
+                let gap = ((i32::from(word & 511) - previous_entity - 1) & 511) + 1;
+                if gap < 255 {
                     self.io
-                        .byte(PE_ENT, 2 << 12, (d >> 8).cast_unsigned() as u8);
+                        .byte(PE_ENT, entity_context, gap.cast_unsigned() as u8);
+                } else {
+                    self.io.byte(PE_ENT, entity_context, 255);
+                    self.io.byte(PE_ENT, 1 << 12, gap.cast_unsigned() as u8);
+                    self.io
+                        .byte(PE_ENT, 2 << 12, (gap >> 8).cast_unsigned() as u8);
                 }
-                let es = self.ent[ent];
+                let state = self.entities[entity];
                 self.io.byte(
                     PE_BITS,
-                    u32::from(es.bits) | u32::from(es.model) << 7,
-                    (w >> 9) as u8 ^ es.bits,
+                    u32::from(state.bits) | u32::from(state.model) << 7,
+                    (word >> 9) as u8 ^ state.bits,
                 );
             } else {
-                let mut d = i32::from(self.io.byte(PE_ENT, ectx, 0));
-                if d == 255 {
-                    d = i32::from(self.io.byte(PE_ENT, 1 << 12, 0));
-                    d |= i32::from(self.io.byte(PE_ENT, 2 << 12, 0)) << 8;
+                let mut gap = i32::from(self.io.byte(PE_ENT, entity_context, 0));
+                if gap == 255 {
+                    gap = i32::from(self.io.byte(PE_ENT, 1 << 12, 0));
+                    gap |= i32::from(self.io.byte(PE_ENT, 2 << 12, 0)) << 8;
                 }
-                if d == 0 {
-                    self.wr(0);
-                    self.wr(0);
+                if gap == 0 {
+                    self.write_byte(0);
+                    self.write_byte(0);
                     break;
                 }
-                ent = ((prev_ent + d) & 511).cast_unsigned() as usize;
-                let es = self.ent[ent];
-                let b = self
-                    .io
-                    .byte(PE_BITS, u32::from(es.bits) | u32::from(es.model) << 7, 0)
-                    ^ es.bits;
-                w = u16::from(b) << 9 | ent as u16;
-                if w == 0 {
+                entity = ((previous_entity + gap) & 511).cast_unsigned() as usize;
+                let state = self.entities[entity];
+                let bits = self.io.byte(
+                    PE_BITS,
+                    u32::from(state.bits) | u32::from(state.model) << 7,
+                    0,
+                ) ^ state.bits;
+                word = u16::from(bits) << 9 | entity as u16;
+                if word == 0 {
                     // a word of zero would end the packet; the encoder never emits it
-                    self.err = true;
+                    self.has_error = true;
                     break;
                 }
-                let [low, high] = w.to_le_bytes();
-                self.wr(low);
-                self.wr(high);
+                let [low, high] = word.to_le_bytes();
+                self.write_byte(low);
+                self.write_byte(high);
             }
-            let ent_number = i32::from(w & 511);
-            self.pe_prev_d = (ent_number - prev_ent).clamp(0, 255).cast_unsigned() as u8;
-            prev_ent = ent_number;
-            self.cur_pkt.push(ent as u16);
-            self.ent[ent].bits = (w >> 9) as u8;
-            self.entity_delta(u32::from(w));
+            let entity_number = i32::from(word & 511);
+            self.previous_entity_gap = (entity_number - previous_entity)
+                .clamp(0, 255)
+                .cast_unsigned() as u8;
+            previous_entity = entity_number;
+            self.current_packet.push(entity as u16);
+            self.entities[entity].bits = (word >> 9) as u8;
+            self.entity_delta(u32::from(word));
         }
-        std::mem::swap(&mut self.prev_pkt, &mut self.cur_pkt);
+        std::mem::swap(&mut self.previous_packet, &mut self.current_packet);
     }
 
-    fn entity_delta(&mut self, w: u32) {
-        let mut bits = w & !511;
+    fn entity_delta(&mut self, word: u32) {
+        let mut bits = word & !511;
         let mut more = 0u32;
-        let mut num = (w & 511) as usize;
-        let m0 = u32::from(self.ent[num].model);
-        if bits & U_MOREBITS != 0 {
-            bits |= u32::from(self.b8(PE_MORE, (bits >> 9) | m0 << 8));
+        let mut number = (word & 511) as usize;
+        let previous_model = u32::from(self.entities[number].model);
+        if bits & U_MORE_BITS != 0 {
+            bits |= u32::from(self.coded_byte(PE_MORE, (bits >> 9) | previous_model << 8));
         }
-        if bits & U_EVENMORE != 0 && self.proto.fte != 0 {
-            more = u32::from(self.b8(PE_MORE, 0x8000));
-            if more & X_YETMORE != 0 {
-                more |= u32::from(self.b8(PE_MORE, 0x8001)) << 8;
+        if bits & U_EVEN_MORE != 0 && self.proto.fte != 0 {
+            more = u32::from(self.coded_byte(PE_MORE, 0x8000));
+            if more & X_YET_MORE != 0 {
+                more |= u32::from(self.coded_byte(PE_MORE, 0x8001)) << 8;
             }
         }
-        if more & X_ENTITYDBL != 0 {
-            num += 512;
+        if more & X_ENTITY_DBL != 0 {
+            number += 512;
         }
-        if more & X_ENTITYDBL2 != 0 {
-            num += 1024;
+        if more & X_ENTITY_DBL_2 != 0 {
+            number += 1024;
         }
-        let in_prev = self.ent[num].last_pkt == self.pkt_no.wrapping_sub(1);
-        self.ent[num].last_pkt = self.pkt_no;
-        let mut es = self.ent[num];
+        let was_in_previous_packet =
+            self.entities[number].last_packet == self.packet_number.wrapping_sub(1);
+        self.entities[number].last_packet = self.packet_number;
+        let mut state = self.entities[number];
         if bits & U_MODEL != 0 {
-            es.model = self.p8(PE_MODEL);
-        } else if more & X_MODELDBL != 0 {
-            self.pn(PE_MODEL, 2);
+            state.model = self.blob_byte(PE_MODEL);
+        } else if more & X_MODEL_DBL != 0 {
+            self.blob_le(PE_MODEL, 2);
         }
-        let model = u32::from(es.model);
+        let model = u32::from(state.model);
         if bits & U_FRAME != 0 {
-            es.frame = self.pr8(PE_FRAME, es.frame);
+            state.frame = self.blob_residual(PE_FRAME, state.frame);
         }
         if bits & U_COLORMAP != 0 {
-            self.p8(PE_MISC);
+            self.blob_byte(PE_MISC);
         }
         if bits & U_SKIN != 0 {
-            self.p8(PE_MISC);
+            self.blob_byte(PE_MISC);
         }
         if bits & U_EFFECTS != 0 {
-            self.p8(PE_MISC);
+            self.blob_byte(PE_MISC);
         }
-        let mut rb = 0u16;
-        for (i, (o, a)) in [
-            (U_ORIGIN1, U_ANGLE1),
-            (U_ORIGIN2, U_ANGLE2),
-            (U_ORIGIN3, U_ANGLE3),
+        let mut record_bits = 0u16;
+        for (axis, (origin_flag, angle_flag)) in [
+            (U_ORIGIN_1, U_ANGLE_1),
+            (U_ORIGIN_2, U_ANGLE_2),
+            (U_ORIGIN_3, U_ANGLE_3),
         ]
         .into_iter()
         .enumerate()
         {
-            if bits & o != 0 {
-                rb |= 1 << (2 * i);
+            if bits & origin_flag != 0 {
+                record_bits |= 1 << (2 * axis);
             }
-            if bits & a != 0 {
-                rb |= 2 << (2 * i);
+            if bits & angle_flag != 0 {
+                record_bits |= 2 << (2 * axis);
             }
         }
-        if in_prev {
-            rb |= PE_INPREV;
+        if was_in_previous_packet {
+            record_bits |= PE_IN_PREVIOUS;
         }
-        if self.proto.float_coords {
-            rb |= PE_FLOAT;
+        if self.proto.has_float_coords {
+            record_bits |= PE_FLOAT;
         }
-        if self.proto.msg_wide {
-            rb |= PE_WIDE;
+        if self.proto.has_wide_messages {
+            record_bits |= PE_WIDE;
         }
-        let rec = PeRec {
-            off: self.p as u32,
-            t: self.t,
-            num: num as u16,
-            bits: rb,
-            model: es.model,
-            ubits: (w >> 9) as u8,
+        let record = PacketEntityRecord {
+            offset: self.offset as u32,
+            time: self.time,
+            number: number as u16,
+            bits: record_bits,
+            model: state.model,
+            update_bits: (word >> 9) as u8,
         };
-        let cw = self.proto.coord();
-        for (i, (o, a)) in [
-            (U_ORIGIN1, U_ANGLE1),
-            (U_ORIGIN2, U_ANGLE2),
-            (U_ORIGIN3, U_ANGLE3),
+        let coord_width = self.proto.coord();
+        for (axis, (origin_flag, angle_flag)) in [
+            (U_ORIGIN_1, U_ANGLE_1),
+            (U_ORIGIN_2, U_ANGLE_2),
+            (U_ORIGIN_3, U_ANGLE_3),
         ]
         .into_iter()
         .enumerate()
         {
-            if bits & o != 0 {
-                let off = self.reserve(cw);
-                self.ent_off[num][i] = off;
+            if bits & origin_flag != 0 {
+                let offset = self.reserve(coord_width);
+                self.entity_origin_offsets[number][axis] = offset;
             }
-            if bits & a != 0 {
-                if self.proto.msg_wide {
-                    self.bn(PE_A, 3 | model << 6, 2);
+            if bits & angle_flag != 0 {
+                if self.proto.has_wide_messages {
+                    self.coded_le(PE_A, 3 | model << 6, 2);
                 } else {
-                    let qa = u32::from(qb(es.ares[i]).min(15));
-                    let v = self.r8(PE_A, i as u32 | qa << 2 | model << 6, es.a[i]);
-                    es.ares[i] = v.wrapping_sub(es.a[i]);
-                    es.a[i] = v;
+                    let residual_bucket = u32::from(qb(state.angle_residuals[axis]).min(15));
+                    let angle = self.coded_residual(
+                        PE_A,
+                        axis as u32 | residual_bucket << 2 | model << 6,
+                        state.angles[axis],
+                    );
+                    state.angle_residuals[axis] = angle.wrapping_sub(state.angles[axis]);
+                    state.angles[axis] = angle;
                 }
             }
         }
-        if !self.recs.pe.push(rec) {
-            self.err = true;
+        if !self.recs.packet_entities.push(record) {
+            self.has_error = true;
         }
         if more & X_TRANS != 0 && self.proto.fte & FTE_TRANS != 0 {
-            self.p8(PE_MISC);
+            self.blob_byte(PE_MISC);
         }
         if more & X_SCALE != 0 {
-            self.p8(PE_MISC);
+            self.blob_byte(PE_MISC);
         }
         if more & X_FATNESS != 0 {
-            self.p8(PE_MISC);
+            self.blob_byte(PE_MISC);
         }
-        if more & X_COLOURMOD != 0 && self.proto.fte & FTE_COLOURMOD != 0 {
-            self.pn(PE_MISC, 3);
+        if more & X_COLOR_MOD != 0 && self.proto.fte & FTE_COLOR_MOD != 0 {
+            self.blob_le(PE_MISC, 3);
         }
-        self.ent[num] = es;
+        self.entities[number] = state;
     }
 
     fn sound(&mut self) {
-        let lo = u32::from(self.b8(SND_CH, u32::from(self.prev_cmd)));
-        let ch = lo | u32::from(self.b8(SND_CH, 1 << 8 | lo)) << 8;
-        if ch & 0x8000 != 0 {
-            self.p8(SND_MISC);
+        let low = u32::from(self.coded_byte(SND_CH, u32::from(self.previous_command)));
+        let channel = low | u32::from(self.coded_byte(SND_CH, 1 << 8 | low)) << 8;
+        if channel & 0x8000 != 0 {
+            self.blob_byte(SND_MISC);
         }
-        if ch & 0x4000 != 0 {
-            self.p8(SND_MISC);
+        if channel & 0x4000 != 0 {
+            self.blob_byte(SND_MISC);
         }
-        let ent = ((ch >> 3) & 1023) as usize;
-        let num = self.b8(SND_NUM, (ch & 7) | (ent.min(33) as u32) << 3);
+        let entity = ((channel >> 3) & 1023) as usize;
+        let sound_number = self.coded_byte(SND_NUM, (channel & 7) | (entity.min(33) as u32) << 3);
         if self.proto.coord() != 2 {
             self.copy_blob(SNDF, 12);
             return;
         }
-        let (refs, kind) = if (1..=32).contains(&ent) {
-            (self.pl_off[ent - 1], 1)
-        } else if ent < 2048 {
-            (self.ent_off[ent], 2)
+        let (refs, kind) = if (1..=32).contains(&entity) {
+            (self.player_origin_offsets[entity - 1], 1)
+        } else if entity < 2048 {
+            (self.entity_origin_offsets[entity], 2)
         } else {
-            ([NONE; 3], 0)
+            ([NO_OFFSET; 3], 0)
         };
-        let off = self.reserve(6);
-        if !self.recs.snd.push(SndRec {
-            off,
+        let offset = self.reserve(6);
+        if !self.recs.sounds.push(SoundRecord {
+            offset,
             refs,
             kind,
-            num,
+            number: sound_number,
         }) {
-            self.err = true;
+            self.has_error = true;
         }
     }
 
     fn temp_entity(&mut self) {
-        let t = self.b8(
+        let kind = self.coded_byte(
             TE_TYPE,
-            u32::from(self.prev_te) | u32::from(self.prev_cmd == 23) << 8,
+            u32::from(self.previous_temp_entity) | u32::from(self.previous_command == 23) << 8,
         );
-        self.prev_te = t;
-        let c = self.proto.coord();
-        if c != 2 {
-            match t {
+        self.previous_temp_entity = kind;
+        let coord_width = self.proto.coord();
+        if coord_width != 2 {
+            match kind {
                 5 | 6 | 9 => {
-                    self.pn(TE_MISC, 2);
-                    self.copy_blob(TEF, 6 * c);
+                    self.blob_le(TE_MISC, 2);
+                    self.copy_blob(TEF, 6 * coord_width);
                 }
                 2 | 12 => {
-                    self.p8(TE_MISC);
-                    self.copy_blob(TEF, 3 * c);
+                    self.blob_byte(TE_MISC);
+                    self.copy_blob(TEF, 3 * coord_width);
                 }
-                _ => self.copy_blob(TEF, 3 * c),
+                _ => self.copy_blob(TEF, 3 * coord_width),
             }
             return;
         }
-        match t {
+        match kind {
             5 | 6 | 9 => {
-                let e = self.pn(TE_MISC, 2) as usize;
-                let refs = if (1..=32).contains(&e) {
-                    self.pl_off[e - 1]
+                let entity = self.blob_le(TE_MISC, 2) as usize;
+                let refs = if (1..=32).contains(&entity) {
+                    self.player_origin_offsets[entity - 1]
                 } else {
-                    [NONE; 3]
+                    [NO_OFFSET; 3]
                 };
-                let off = self.reserve(12);
-                if !self.recs.te.push(TeRec { off, refs, ty: t }) {
-                    self.err = true;
+                let offset = self.reserve(12);
+                if !self
+                    .recs
+                    .temp_entities
+                    .push(TempEntityRecord { offset, refs, kind })
+                {
+                    self.has_error = true;
                 }
             }
             2 | 12 => {
-                self.p8(TE_MISC);
-                let off = self.reserve(6);
-                if !self.recs.te.push(TeRec {
-                    off,
-                    refs: [NONE; 3],
-                    ty: t,
+                self.blob_byte(TE_MISC);
+                let offset = self.reserve(6);
+                if !self.recs.temp_entities.push(TempEntityRecord {
+                    offset,
+                    refs: [NO_OFFSET; 3],
+                    kind,
                 }) {
-                    self.err = true;
+                    self.has_error = true;
                 }
             }
             _ => {
-                let off = self.reserve(6);
-                if !self.recs.te.push(TeRec {
-                    off,
-                    refs: [NONE; 3],
-                    ty: t,
+                let offset = self.reserve(6);
+                if !self.recs.temp_entities.push(TempEntityRecord {
+                    offset,
+                    refs: [NO_OFFSET; 3],
+                    kind,
                 }) {
-                    self.err = true;
+                    self.has_error = true;
                 }
             }
         }
@@ -1101,21 +1147,21 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     /// Tags: 1 block, 2 end, 0 escape (rest raw).
     fn hidden(&mut self, end: usize) {
         loop {
-            if self.err {
+            if self.has_error {
                 return;
             }
-            if ENC {
-                let rem = end - self.p;
-                if rem == 0 {
+            if IS_ENCODE {
+                let remaining = end - self.offset;
+                if remaining == 0 {
                     self.tag(HIDTAG, 2);
                     return;
                 }
-                let mut ok = rem >= 6;
-                if ok {
-                    let bl = u64::from(le32(&self.src[self.p..]));
-                    ok = bl >= 1 && bl <= (rem - 6) as u64;
+                let mut is_block = remaining >= 6;
+                if is_block {
+                    let block_len = u64::from(le32(&self.src[self.offset..]));
+                    is_block = block_len >= 1 && block_len <= (remaining - 6) as u64;
                 }
-                if !ok {
+                if !is_block {
                     self.tag(HIDTAG, 0);
                     self.escape(end);
                     return;
@@ -1130,19 +1176,19 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                     1 => {}
                     2 => return,
                     _ => {
-                        self.err = true;
+                        self.has_error = true;
                         return;
                     }
                 }
             }
-            let bl = self.pn(HIDLEN, 4);
-            let ty = self.pn(HIDTYPE, 2);
-            if ty == 7 && bl == 8 {
+            let block_len = self.blob_le(HIDLEN, 4);
+            let block_type = self.blob_le(HIDTYPE, 2);
+            if block_type == 7 && block_len == 8 {
                 self.copy_blob(HIDDMG, 8);
-            } else if ty == 1 && bl == 23 {
-                self.ucmd();
+            } else if block_type == 1 && block_len == 23 {
+                self.usercmd();
             } else {
-                self.copy_blob(HIDMISC, bl as usize);
+                self.copy_blob(HIDMISC, block_len as usize);
             }
         }
     }
@@ -1150,57 +1196,69 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
     /// One usercmd block (mvdsv `SV_DebugClientCommand`): player, dropnum,
     /// msec, pitch/yaw/roll as f32, forward/side/up as i16, buttons,
     /// impulse. Angles on the 360/65536 grid are left to the numeric group
-    /// (`UcRec`); the rest goes to UC, context kind in bits 12-15.
-    fn ucmd(&mut self) {
-        let [p1, p2] = self.uc_prev;
-        let pl = self.b8(UC, u32::from(p1.min(31)) | u32::from(p2.min(31)) << 5);
-        self.uc_prev = [pl, p1];
-        let mut s = self.ucs[pl as usize];
-        s.drop = self.b8(UC, 1 << 12 | u32::from(s.drop));
-        s.msec = self.b8(UC, 2 << 12 | u32::from(s.msec));
+    /// (`UsercmdRecord`); the rest goes to UC, context kind in bits 12-15.
+    fn usercmd(&mut self) {
+        let [last_player, second_last_player] = self.usercmd_previous_players;
+        let player = self.coded_byte(
+            UC,
+            u32::from(last_player.min(31)) | u32::from(second_last_player.min(31)) << 5,
+        );
+        self.usercmd_previous_players = [player, last_player];
+        let mut state = self.usercmds[player as usize];
+        state.drop = self.coded_byte(UC, 1 << 12 | u32::from(state.drop));
+        state.msec = self.coded_byte(UC, 2 << 12 | u32::from(state.msec));
         // hidden() saw all 23 bytes inside the payload: the angles follow
         let mut grid = 0u8;
-        if ENC {
-            for a in 0..3 {
-                if on_grid(le32(&self.src[self.p + 4 * a..])).is_some() {
-                    grid |= 1 << a;
+        if IS_ENCODE {
+            for axis in 0..3 {
+                if on_grid(le32(&self.src[self.offset + 4 * axis..])).is_some() {
+                    grid |= 1 << axis;
                 }
             }
         }
-        grid = self.io.byte(UC, 3 << 12 | u32::from(s.grid), grid);
+        grid = self.io.byte(UC, 3 << 12 | u32::from(state.grid), grid);
         if grid > 7 {
-            self.err = true;
+            self.has_error = true;
             return;
         }
-        s.grid = grid;
-        let off = self.p as u32;
-        for a in 0..3u32 {
-            if grid & (1 << a) != 0 {
+        state.grid = grid;
+        let offset = self.offset as u32;
+        for axis in 0..3u32 {
+            if grid & (1 << axis) != 0 {
                 self.reserve(4);
             } else {
-                for k in 0..4 {
-                    self.b8(UC, 4 << 12 | a << 2 | k);
+                for byte_index in 0..4 {
+                    self.coded_byte(UC, 4 << 12 | axis << 2 | byte_index);
                 }
             }
         }
-        if grid != 0 && !self.recs.uc.push(UcRec { off, num: pl, grid }) {
-            self.err = true;
+        if grid != 0
+            && !self.recs.usercmds.push(UsercmdRecord {
+                offset,
+                number: player,
+                grid,
+            })
+        {
+            self.has_error = true;
         }
-        for m in 0..3 {
-            let lo = self.b8(UC, 5 << 12 | (m as u32) << 8 | u32::from(s.mv[m] & 0xff));
-            let hi = self.b8(UC, 6 << 12 | (m as u32) << 8 | u32::from(lo));
-            s.mv[m] = u16::from_le_bytes([lo, hi]);
+        for axis in 0..3 {
+            let low = self.coded_byte(
+                UC,
+                5 << 12 | (axis as u32) << 8 | u32::from(state.moves[axis] & 0xff),
+            );
+            let high = self.coded_byte(UC, 6 << 12 | (axis as u32) << 8 | u32::from(low));
+            state.moves[axis] = u16::from_le_bytes([low, high]);
         }
-        s.buttons = self.b8(UC, 7 << 12 | u32::from(s.buttons));
-        s.impulse = self.b8(UC, 8 << 12 | u32::from(s.impulse));
-        self.ucs[pl as usize] = s;
+        state.buttons = self.coded_byte(UC, 7 << 12 | u32::from(state.buttons));
+        state.impulse = self.coded_byte(UC, 8 << 12 | u32::from(state.impulse));
+        self.usercmds[player as usize] = state;
     }
 }
 
-/// Small class of an svc number for the cmd context.
+/// Small class of an svc number for the command context.
 #[inline(always)]
-fn cmd_class(c: u8) -> u8 {
-    match c {
+fn command_class(command: u8) -> u8 {
+    match command {
         0 => 0,
         42 => 1,
         48 => 2,
@@ -1222,27 +1280,27 @@ fn cmd_class(c: u8) -> u8 {
 
 /// Sign/magnitude bucket of a byte residual (as i8).
 #[inline(always)]
-pub(crate) fn qb(v: u8) -> u8 {
-    crate::numeric::q(i32::from(v.cast_signed()))
+pub(crate) fn qb(residual: u8) -> u8 {
+    crate::numeric::residual_bucket(i32::from(residual.cast_signed()))
 }
 
-/// The grid value of a usercmd angle: the s in -32768..=32767 whose
-/// f32(s * 45/8192) has exactly these bits (s * 45/8192 is exact in f32),
+/// The grid value of a usercmd angle: the `grid` in -32768..=32767 whose
+/// f32(grid * 45/8192) has exactly these bits (grid * 45/8192 is exact in f32),
 /// or None (-0.0, NaN, +180 and anything else off the grid).
 #[inline]
 pub(crate) fn on_grid(bits: u32) -> Option<u16> {
     // f * 8192 is exact and the division correctly rounded: an integer
     // quotient comes out exactly
-    let x = f64::from(f32::from_bits(bits)) * 8192.0 / 45.0;
-    if x.fract() != 0.0 || !(-32768.0..=32767.0).contains(&x) {
+    let scaled = f64::from(f32::from_bits(bits)) * 8192.0 / 45.0;
+    if scaled.fract() != 0.0 || !(-32768.0..=32767.0).contains(&scaled) {
         return None;
     }
-    let s = x as i32 as i16;
-    (grid_f32(s.cast_unsigned()) == bits).then_some(s.cast_unsigned())
+    let grid = scaled as i32 as i16;
+    (grid_f32(grid.cast_unsigned()) == bits).then_some(grid.cast_unsigned())
 }
 
-/// The f32 bits of grid value `s` (as i16): s * 45/8192, exact.
+/// The f32 bits of grid value `grid` (as i16): grid * 45/8192, exact.
 #[inline]
-pub(crate) fn grid_f32(s: u16) -> u32 {
-    (f32::from(s.cast_signed()) * (45.0 / 8192.0)).to_bits()
+pub(crate) fn grid_f32(grid: u16) -> u32 {
+    (f32::from(grid.cast_signed()) * (45.0 / 8192.0)).to_bits()
 }

@@ -16,33 +16,31 @@
 
 mod api;
 mod budget;
-#[doc(hidden)]
-pub mod coder;
+mod coder;
 mod decode;
-#[doc(hidden)]
-pub mod deflate;
-#[doc(hidden)]
-pub mod encode;
+mod deflate;
+mod encode;
 mod error;
-#[doc(hidden)]
-pub mod format;
+mod format;
 mod numeric;
-#[doc(hidden)]
-pub mod proto;
-#[doc(hidden)]
-pub mod segment;
+mod proto;
+mod segment;
 mod stream;
-#[doc(hidden)]
-pub mod streams;
-#[doc(hidden)]
-pub mod util;
+mod streams;
+mod util;
 mod walk;
 
+#[cfg(test)]
+mod tests;
+
 pub use api::{
-    Config, FileInfo, Info, check_demo, compress, compress_info, decompress, decompress_stream,
-    decompress_with, is_mvdz, read_info, read_info_with,
+    Config, FileInfo, Info, check_demo, compress, compress_any, compress_info, decompress,
+    decompress_stream, decompress_with, is_mvdz, read_info, read_info_with,
 };
 pub use budget::Limits;
 pub use error::{Error, Result};
-pub use format::{Header, Index, IndexSeg};
+pub use format::{Header, Index, IndexSegment, VERSION};
+/// For the fuzz targets' demo generator only.
+#[doc(hidden)]
+pub use proto::Proto;
 pub use stream::Reader;

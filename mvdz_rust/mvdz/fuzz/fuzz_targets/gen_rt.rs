@@ -6,10 +6,10 @@
 use libfuzzer_sys::fuzz_target;
 mod mgen;
 
-fn rt(file: &[u8], demo: &[u8], what: &str) {
+fn assert_round_trip(file: &[u8], demo: &[u8], what: &str) {
     match mvdz::decompress(file, 1) {
-        Ok(d) => assert!(d == demo, "{what}: decodes to other bytes"),
-        Err(e) => panic!("{what}: does not decode: {e}"),
+        Ok(decoded) => assert!(decoded == demo, "{what}: decodes to other bytes"),
+        Err(error) => panic!("{what}: does not decode: {error}"),
     }
 }
 
@@ -19,13 +19,13 @@ fuzz_target!(|data: &[u8]| {
     }
     let threads = 1 + (data[0] as usize >> 2) % 3;
     let demo = mgen::demo(&data[1..]);
-    let (file, info) = mvdz::encode::compress(&demo, &mvdz::Config { threads }).expect("compress");
+    let (file, info) = mvdz::compress_any(&demo, &mvdz::Config { threads }).expect("compress");
     if info.self_check_fallbacks > 0 {
         if std::env::var("REQUIRE_TRANSFORM_LOSSLESS").is_ok() {
             panic!("the transform is lossy");
         }
         eprintln!("NOTE the transform is lossy here");
     }
-    rt(&file, &demo, "one-shot");
+    assert_round_trip(&file, &demo, "one-shot");
     assert!(mvdz::decompress(&file, 3).unwrap() == demo);
 });

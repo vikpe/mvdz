@@ -22,6 +22,7 @@ anyhow = { version = "1", default-features = false, features = ["std"] }
 # comparison are what is used
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
+pretty_assertions = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = 3

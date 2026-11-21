@@ -5,66 +5,69 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ----------------------------------------------------------------- fields
 
-/// Appends `v` as a little-endian u32, the one integer type inside a
+/// Appends `value` as a little-endian u32, the one integer type inside a
 /// segment and the models block. Every caller's value is bounded by the
 /// 1 MiB segment, the 2 MiB coded segment or the 16 MiB models block.
-pub fn put_u32(out: &mut Vec<u8>, v: usize) {
-    debug_assert!(u32::try_from(v).is_ok(), "{v} does not fit in a u32");
-    out.extend_from_slice(&(v as u32).to_le_bytes());
+pub(crate) fn put_u32(out: &mut Vec<u8>, value: usize) {
+    debug_assert!(
+        u32::try_from(value).is_ok(),
+        "{value} does not fit in a u32"
+    );
+    out.extend_from_slice(&(value as u32).to_le_bytes());
 }
 
 /// Byte cursor over a buffer. Every read is bounds-checked.
-pub struct Rd<'a> {
-    pub(crate) b: &'a [u8],
-    pub(crate) i: usize,
+pub(crate) struct ByteReader<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) offset: usize,
 }
 
-impl<'a> Rd<'a> {
-    pub fn new(b: &'a [u8]) -> Self {
-        Rd { b, i: 0 }
+impl<'a> ByteReader<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+        ByteReader { bytes, offset: 0 }
     }
     pub(crate) fn u32le(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(*self.take(4)?.first_chunk()?))
     }
     /// A little-endian u32 as a count or length; `None` where it does not
     /// fit in a `usize` (a 16-bit target).
-    pub fn u32z(&mut self) -> Option<usize> {
+    pub(crate) fn u32_len(&mut self) -> Option<usize> {
         usize::try_from(self.u32le()?).ok()
     }
-    pub(crate) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let s = self.b.get(self.i..self.i.checked_add(n)?)?;
-        self.i += n;
-        Some(s)
+    pub(crate) fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        let taken = self.bytes.get(self.offset..self.offset.checked_add(len)?)?;
+        self.offset += len;
+        Some(taken)
     }
     /// A length-prefixed byte string (u32 length, bytes).
-    pub fn bytes(&mut self) -> Option<&'a [u8]> {
-        let n = self.u32z()?;
-        self.take(n)
+    pub(crate) fn bytes(&mut self) -> Option<&'a [u8]> {
+        let len = self.u32_len()?;
+        self.take(len)
     }
-    pub fn rest(&self) -> &'a [u8] {
-        &self.b[self.i.min(self.b.len())..]
+    pub(crate) fn rest(&self) -> &'a [u8] {
+        &self.bytes[self.offset.min(self.bytes.len())..]
     }
-    pub(crate) fn done(&self) -> bool {
-        self.i == self.b.len()
+    pub(crate) fn is_done(&self) -> bool {
+        self.offset == self.bytes.len()
     }
 }
 
 /// A count or size as a float, for ratios and estimates.
 #[expect(clippy::cast_precision_loss, reason = "exact below 2^53")]
-pub fn approx_f64(count: u64) -> f64 {
+pub(crate) fn approx_f64(count: u64) -> f64 {
     count as f64
 }
 
-pub(crate) fn usz(v: u64) -> Option<usize> {
-    usize::try_from(v).ok()
+pub(crate) fn to_usize(value: u64) -> Option<usize> {
+    usize::try_from(value).ok()
 }
 
 // ---------------------------------------------------------------- crc32
 
 /// CRC-32 as in zlib, gzip and PNG (ISO 3309; polynomial 0xEDB88320
 /// reflected): the checksum every platform with DEFLATE already has.
-pub fn crc32(b: &[u8]) -> u32 {
-    crc32fast::hash(b)
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
+    crc32fast::hash(bytes)
 }
 
 /// Running CRC-32 over consecutive chunks.
@@ -72,8 +75,8 @@ pub fn crc32(b: &[u8]) -> u32 {
 pub(crate) struct Crc(crc32fast::Hasher);
 
 impl Crc {
-    pub(crate) fn update(&mut self, b: &[u8]) {
-        self.0.update(b);
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
     }
     pub(crate) fn finish(&self) -> u32 {
         self.0.clone().finalize()
@@ -84,9 +87,9 @@ impl Crc {
 
 /// The thread count a caller asked for: 0 means one per logical core (1
 /// where that is unknown or threads cannot be spawned).
-pub fn threads(n: usize) -> usize {
-    if n > 0 {
-        return n;
+pub(crate) fn threads(requested: usize) -> usize {
+    if requested > 0 {
+        return requested;
     }
     if !HAS_THREADS {
         return 1;
@@ -97,25 +100,30 @@ pub fn threads(n: usize) -> usize {
 /// True where the standard library can spawn threads.
 pub(crate) const HAS_THREADS: bool = !cfg!(target_family = "wasm");
 
-/// Runs `f(i)` for i in 0..n on up to `threads` threads; results in order.
-pub fn par_map<T: Send, F: Fn(usize) -> T + Sync>(threads: usize, n: usize, f: F) -> Vec<T> {
-    if threads <= 1 || n <= 1 || !HAS_THREADS {
-        return (0..n).map(f).collect();
+/// Runs `job(index)` for index in 0..count on up to `threads` threads; results
+/// in order.
+pub(crate) fn par_map<T: Send, F: Fn(usize) -> T + Sync>(
+    threads: usize,
+    count: usize,
+    job: F,
+) -> Vec<T> {
+    if threads <= 1 || count <= 1 || !HAS_THREADS {
+        return (0..count).map(job).collect();
     }
     let next = AtomicUsize::new(0);
     // each thread claims the next index and keeps its results; they are put in
     // order once every thread has finished
     let done: Vec<Vec<(usize, T)>> = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..threads.min(n))
+        let workers: Vec<_> = (0..threads.min(count))
             .map(|_| {
                 scope.spawn(|| {
                     let mut results = Vec::new();
                     loop {
                         let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= n {
+                        if index >= count {
                             break results;
                         }
-                        results.push((index, f(index)));
+                        results.push((index, job(index)));
                     }
                 })
             })
@@ -129,7 +137,7 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync>(threads: usize, n: usize, f: F
             })
             .collect()
     });
-    let mut out: Vec<Option<T>> = Vec::from_fn(n, |_| None);
+    let mut out: Vec<Option<T>> = Vec::from_fn(count, |_| None);
     for (index, value) in done.into_iter().flatten() {
         if let Some(slot) = out.get_mut(index) {
             *slot = Some(value);
@@ -142,13 +150,14 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync>(threads: usize, n: usize, f: F
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
     #[test]
     fn crc32_check_value() {
         assert_eq!(super::crc32(b"123456789"), 0xCBF4_3926);
-        let mut c = super::Crc::default();
-        c.update(b"1234");
-        c.update(b"56789");
-        assert_eq!(c.finish(), 0xCBF4_3926);
+        let mut crc = super::Crc::default();
+        crc.update(b"1234");
+        crc.update(b"56789");
+        assert_eq!(crc.finish(), 0xCBF4_3926);
     }
 
     #[test]
@@ -159,7 +168,7 @@ mod tests {
 
     #[test]
     fn par_map_order() {
-        let v = super::par_map(3, 100, |i| i * 2);
-        assert_eq!(v, (0..100).map(|i| i * 2).collect::<Vec<_>>());
+        let doubled = super::par_map(3, 100, |index| index * 2);
+        assert_eq!(doubled, (0..100).map(|index| index * 2).collect::<Vec<_>>());
     }
 }

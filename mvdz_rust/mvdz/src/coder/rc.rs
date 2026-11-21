@@ -2,13 +2,13 @@
 //!
 //! LZMA-style: 32-bit range, byte-wise normalisation, carry propagation
 //! through a cache byte.
-//! `p` is always P(bit = 1) in 1..=4095. Written from the published LZMA
+//! `probability` is always P(bit = 1) in 1..=4095. Written from the published LZMA
 //! range-coder description; no code copied.
 
-pub(crate) const PBITS: u32 = 12;
+pub(crate) const PROBABILITY_BITS: u32 = 12;
 const TOP: u32 = 1 << 24;
 
-pub struct Enc {
+pub(crate) struct Encoder {
     /// binary decisions coded so far
     pub decisions: u64,
     low: u64,
@@ -18,14 +18,14 @@ pub struct Enc {
     pub(crate) out: Vec<u8>,
 }
 
-impl Default for Enc {
+impl Default for Encoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Enc {
-    pub fn new() -> Self {
+impl Encoder {
+    pub(crate) fn new() -> Self {
         Self {
             decisions: 0,
             low: 0,
@@ -40,10 +40,10 @@ impl Enc {
     fn shift_low(&mut self) {
         if (self.low as u32) < 0xFF00_0000 || (self.low >> 32) != 0 {
             let carry = (self.low >> 32) as u8;
-            let mut c = self.cache;
+            let mut byte = self.cache;
             loop {
-                self.out.push(c.wrapping_add(carry));
-                c = 0xFF;
+                self.out.push(byte.wrapping_add(carry));
+                byte = 0xFF;
                 self.cache_size -= 1;
                 if self.cache_size == 0 {
                     break;
@@ -56,9 +56,9 @@ impl Enc {
     }
 
     #[inline(always)]
-    pub(crate) fn bit(&mut self, bit: u32, p: u32) {
+    pub(crate) fn bit(&mut self, bit: u32, probability: u32) {
         self.decisions += 1;
-        let bound = (self.range >> PBITS) * p;
+        let bound = (self.range >> PROBABILITY_BITS) * probability;
         if bit != 0 {
             self.range = bound;
         } else {
@@ -71,7 +71,7 @@ impl Enc {
         }
     }
 
-    pub fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         for _ in 0..5 {
             self.shift_low();
         }
@@ -79,35 +79,35 @@ impl Enc {
     }
 }
 
-pub(crate) struct Dec<'a> {
+pub(crate) struct Decoder<'a> {
     /// binary decisions decoded so far
     pub(crate) decisions: u64,
     code: u32,
     range: u32,
-    b: &'a [u8],
+    input: &'a [u8],
     pos: usize,
 }
 
-impl<'a> Dec<'a> {
-    pub(crate) fn new(b: &'a [u8]) -> Self {
-        let mut d = Dec {
+impl<'a> Decoder<'a> {
+    pub(crate) fn new(input: &'a [u8]) -> Self {
+        let mut decoder = Decoder {
             decisions: 0,
             code: 0,
             range: u32::MAX,
-            b,
+            input,
             pos: 0,
         };
         for _ in 0..5 {
-            d.code = (d.code << 8) | u32::from(d.next());
+            decoder.code = (decoder.code << 8) | u32::from(decoder.next());
         }
-        d
+        decoder
     }
 
     #[inline(always)]
     fn next(&mut self) -> u8 {
-        let v = self.b.get(self.pos).copied().unwrap_or(0);
+        let byte = self.input.get(self.pos).copied().unwrap_or(0);
         self.pos += 1;
-        v
+        byte
     }
 
     /// Bytes read so far (including the zeros past the end).
@@ -116,103 +116,103 @@ impl<'a> Dec<'a> {
     }
 
     /// Bytes consumed beyond the input (a sign of corruption if large).
-    pub(crate) fn overrun(&self) -> bool {
-        self.pos > self.b.len() + 5
+    pub(crate) fn is_overrun(&self) -> bool {
+        self.pos > self.input.len() + 5
     }
 
     #[inline(always)]
-    pub(crate) fn bit(&mut self, p: u32) -> u32 {
+    pub(crate) fn bit(&mut self, probability: u32) -> u32 {
         self.decisions += 1;
-        let bound = (self.range >> PBITS) * p;
-        let b = u32::from(self.code < bound);
-        let m = b.wrapping_neg();
-        self.code -= bound & !m;
-        self.range = (bound & m) | (self.range.wrapping_sub(bound) & !m);
+        let bound = (self.range >> PROBABILITY_BITS) * probability;
+        let bit = u32::from(self.code < bound);
+        let mask = bit.wrapping_neg();
+        self.code -= bound & !mask;
+        self.range = (bound & mask) | (self.range.wrapping_sub(bound) & !mask);
         while self.range < TOP {
             self.range <<= 8;
             self.code = (self.code << 8) | u32::from(self.next());
         }
-        b
+        bit
     }
 }
 
 /// Adaptive probability with a fixed shift (used for side information).
 #[derive(Clone, Copy)]
-pub(crate) struct P(pub(crate) u16);
+pub(crate) struct Probability(pub(crate) u16);
 
-impl Default for P {
+impl Default for Probability {
     fn default() -> Self {
         Self(1 << 15)
     }
 }
 
-impl P {
+impl Probability {
     #[inline(always)]
-    pub(crate) fn p12(self) -> u32 {
+    pub(crate) fn value(self) -> u32 {
         (u32::from(self.0) >> 4).clamp(1, 4095)
     }
     #[inline(always)]
-    pub(crate) fn up(&mut self, bit: u32, sh: u32) {
+    pub(crate) fn update(&mut self, bit: u32, shift: u32) {
         if bit != 0 {
-            self.0 += (65535 - self.0) >> sh;
+            self.0 += (65535 - self.0) >> shift;
         } else {
-            self.0 -= self.0 >> sh;
+            self.0 -= self.0 >> shift;
         }
     }
 }
 
 /// Small adaptive integer coder for headers: Elias-gamma style binarisation
 /// with adaptive bits per (context, position).
-pub struct IntModel {
-    p: Vec<P>,
+pub(crate) struct IntModel {
+    probabilities: Vec<Probability>,
 }
 
 impl IntModel {
-    pub fn new(nctx: usize) -> Self {
+    pub(crate) fn new(context_count: usize) -> Self {
         Self {
-            p: vec![P::default(); nctx * 64],
+            probabilities: vec![Probability::default(); context_count * 64],
         }
     }
-    pub fn put(&mut self, e: &mut Enc, ctx: usize, v: u32) {
-        let v1 = u64::from(v) + 1;
-        let n = v1.ilog2(); // bits below the leading one
-        let base = ctx * 64;
-        for i in 0..n {
-            let p = &mut self.p[base + i as usize];
-            e.bit(1, p.p12());
-            p.up(1, 4);
+    pub(crate) fn put(&mut self, encoder: &mut Encoder, context: usize, value: u32) {
+        let value_plus_one = u64::from(value) + 1;
+        let bit_count = value_plus_one.ilog2(); // bits below the leading one
+        let base = context * 64;
+        for position in 0..bit_count {
+            let probability = &mut self.probabilities[base + position as usize];
+            encoder.bit(1, probability.value());
+            probability.update(1, 4);
         }
-        if n < 32 {
-            let p = &mut self.p[base + n as usize];
-            e.bit(0, p.p12());
-            p.up(0, 4);
+        if bit_count < 32 {
+            let probability = &mut self.probabilities[base + bit_count as usize];
+            encoder.bit(0, probability.value());
+            probability.update(0, 4);
         }
-        for i in (0..n).rev() {
-            let b = ((v1 >> i) & 1) as u32;
-            let p = &mut self.p[base + 33 + (i as usize).min(30)];
-            e.bit(b, p.p12());
-            p.up(b, 5);
+        for position in (0..bit_count).rev() {
+            let bit = ((value_plus_one >> position) & 1) as u32;
+            let probability = &mut self.probabilities[base + 33 + (position as usize).min(30)];
+            encoder.bit(bit, probability.value());
+            probability.update(bit, 5);
         }
     }
-    pub(crate) fn get(&mut self, d: &mut Dec, ctx: usize) -> u32 {
-        let base = ctx * 64;
-        let mut n: usize = 0;
-        while n < 32 {
-            let p = &mut self.p[base + n];
-            let b = d.bit(p.p12());
-            p.up(b, 4);
-            if b == 0 {
+    pub(crate) fn get(&mut self, decoder: &mut Decoder, context: usize) -> u32 {
+        let base = context * 64;
+        let mut bit_count: usize = 0;
+        while bit_count < 32 {
+            let probability = &mut self.probabilities[base + bit_count];
+            let bit = decoder.bit(probability.value());
+            probability.update(bit, 4);
+            if bit == 0 {
                 break;
             }
-            n += 1;
+            bit_count += 1;
         }
-        let mut v1: u64 = 1;
-        for i in (0..n).rev() {
-            let p = &mut self.p[base + 33 + i.min(30)];
-            let b = d.bit(p.p12());
-            p.up(b, 5);
-            v1 = (v1 << 1) | u64::from(b);
+        let mut value_plus_one: u64 = 1;
+        for position in (0..bit_count).rev() {
+            let probability = &mut self.probabilities[base + 33 + position.min(30)];
+            let bit = decoder.bit(probability.value());
+            probability.update(bit, 5);
+            value_plus_one = (value_plus_one << 1) | u64::from(bit);
         }
-        (v1 - 1) as u32
+        (value_plus_one - 1) as u32
     }
 }

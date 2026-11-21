@@ -1,9 +1,9 @@
 //! Round trips through every reader, in one segment and in several; odd
 //! and non-MVD input; determinism.
 
-mod common;
+use super::common::*;
 use anyhow::Context as _;
-use common::*;
+use pretty_assertions::assert_eq;
 use std::assert_matches;
 
 fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
@@ -29,8 +29,8 @@ fn synthetic_demos() -> anyhow::Result<()> {
 
 #[test]
 fn sample_demos() -> anyhow::Result<()> {
-    for (i, src) in samples(3).iter().enumerate() {
-        check_all_ways(src, &format!("sample {i}"))?;
+    for (index, src) in samples(3).iter().enumerate() {
+        check_all_ways(src, &format!("sample {index}"))?;
     }
     Ok(())
 }
@@ -38,10 +38,10 @@ fn sample_demos() -> anyhow::Result<()> {
 /// Input that is not an MVD demo is refused by the encoder.
 /// The bytes a sequential reader at `threads` threads yields before its first
 /// error, and that error.
-fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<mvdz::Error>) {
+fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<crate::Error>) {
     let mut out = Vec::new();
-    let limits = mvdz::Limits::default();
-    let mut reader = match mvdz::Reader::new(std::io::Cursor::new(file), threads, &limits) {
+    let limits = crate::Limits::default();
+    let mut reader = match crate::Reader::new(std::io::Cursor::new(file), threads, &limits) {
         Ok(reader) => reader,
         Err(error) => return (out, Some(error)),
     };
@@ -64,9 +64,9 @@ fn sequential_reader_threads_agree() -> anyhow::Result<()> {
     let file = compress(&demo)?;
     let file_parts = parts(&file)?;
     anyhow::ensure!(
-        file_parts.segs.len() >= 4,
+        file_parts.segments.len() >= 4,
         "{} segments",
-        file_parts.segs.len()
+        file_parts.segments.len()
     );
     let mut cases = Vec::new();
     for eighth in 1..=CUTS {
@@ -76,10 +76,10 @@ fn sequential_reader_threads_agree() -> anyhow::Result<()> {
                 .to_vec(),
         );
     }
-    for segment in 0..file_parts.segs.len() {
+    for segment in 0..file_parts.segments.len() {
         let mut damaged = file_parts.clone();
         let last_byte = damaged
-            .segs
+            .segments
             .get_mut(segment)
             .and_then(|body| body.last_mut())
             .context("a segment body")?;
@@ -115,16 +115,16 @@ fn unused_model_is_ignored() -> anyhow::Result<()> {
     let mut file_parts = parts(&file)?;
     let mut entries = tables_entries(&file_parts.models)?;
     anyhow::ensure!(
-        entries.iter().all(|entry| entry.0 != mvdz::streams::UC),
+        entries.iter().all(|entry| entry.0 != crate::streams::UC),
         "the demo has no usercmd blocks"
     );
     let structural = entries
         .iter()
-        .find(|entry| mvdz::streams::is_lazy(entry.0))
+        .find(|entry| crate::streams::is_lazy(entry.0))
         .context("a structural stream's model")?
         .1
         .clone();
-    entries.push((mvdz::streams::UC, structural));
+    entries.push((crate::streams::UC, structural));
     entries.sort_by_key(|entry| entry.0);
     file_parts.models = tables_body(&entries);
     let with_unused = file_parts.build();
@@ -150,7 +150,7 @@ fn empty_and_tiny_inputs() -> anyhow::Result<()> {
     ];
     for src in inputs {
         let refusal = compress(src).err();
-        assert_matches!(refusal, Some(mvdz::Error::NotMvd(_)), "{refusal:?}");
+        assert_matches!(refusal, Some(crate::Error::NotMvd(_)), "{refusal:?}");
         // the unchecked encoder still round-trips any bytes
         check_all_ways(src, &format!("{src:?}"))?;
     }
@@ -165,26 +165,26 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
     let random: Vec<u8> = Vec::from_fn(10_000, |_| rng.next() as u8);
     let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))?;
     let mut inputs = vec![vec![1u8], random, text];
-    if let Some(d) = duel() {
-        inputs.push(d[..300].to_vec());
+    if let Some(duel) = duel() {
+        inputs.push(duel[..300].to_vec());
         // the first frame cut by one byte
-        let n = 6 + u32::from_le_bytes(d[2..6].try_into()?) as usize;
-        let mut cut = d[..n - 1].to_vec();
-        cut.extend_from_slice(&d[n..200_000]);
+        let first_frame_len = 6 + u32::from_le_bytes(duel[2..6].try_into()?) as usize;
+        let mut cut = duel[..first_frame_len - 1].to_vec();
+        cut.extend_from_slice(&duel[first_frame_len..200_000]);
         inputs.push(cut);
     }
-    for (i, src) in inputs.iter().enumerate() {
+    for (index, src) in inputs.iter().enumerate() {
         // the encoder refuses what is not a demo
-        if mvdz::check_demo(src).is_err() {
-            let r = compress(src);
-            assert_matches!(r, Err(mvdz::Error::NotMvd(_)), "input {i}");
+        if crate::check_demo(src).is_err() {
+            let refusal = compress(src);
+            assert_matches!(refusal, Err(crate::Error::NotMvd(_)), "input {index}");
             continue;
         }
         for src in [src.clone(), several_segments(src)] {
-            let c = compress(&src)?;
+            let file = compress(&src)?;
             assert!(
-                readers_agree(&c, "non-mvd").context("every reader refuses")? == src,
-                "input {i}, {} bytes",
+                readers_agree(&file, "non-mvd").context("every reader refuses")? == src,
+                "input {index}, {} bytes",
                 src.len()
             );
         }
@@ -206,14 +206,15 @@ fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
             ("as is", demo.clone()),
             ("repeated", several_segments(&demo)),
         ] {
-            let (c, info) = all_tail(&src)?;
+            let (file, info) = all_tail(&src)?;
             assert_eq!(
                 info.escaped,
                 src.len(),
                 "{what} {how}: every byte in the tail"
             );
-            assert_eq!(info.segments, parts(&c)?.segs.len());
-            let back = readers_agree(&c, what).with_context(|| format!("{what} {how}: refused"))?;
+            assert_eq!(info.segments, parts(&file)?.segments.len());
+            let back =
+                readers_agree(&file, what).with_context(|| format!("{what} {how}: refused"))?;
             assert!(back == src, "{what} {how}");
         }
     }
@@ -225,14 +226,14 @@ fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
 /// every reader accepts it.
 #[test]
 fn nop_flood_round_trips() -> anyhow::Result<()> {
-    let mut d = Demo(Vec::new());
+    let mut demo = Demo(Vec::new());
     for _ in 0..400 {
-        d.frame(0, 1, &[1u8; 10_000]);
+        demo.frame(0, 1, &[1u8; 10_000]);
     }
-    let src = d.0;
-    let (c, info) = compress_info(&src)?;
+    let src = demo.0;
+    let (file, info) = compress_info(&src)?;
     assert!(info.segments > 1);
-    assert!(readers_agree(&c, "nop").context("every reader refuses")? == src);
+    assert!(readers_agree(&file, "nop").context("every reader refuses")? == src);
     Ok(())
 }
 
@@ -240,7 +241,7 @@ fn nop_flood_round_trips() -> anyhow::Result<()> {
 /// cut at the largest segment length; every reader decodes them.
 #[test]
 fn segments_are_capped() -> anyhow::Result<()> {
-    let max_segment = mvdz::format::MAX_SEG_RAW as usize;
+    let max_segment = crate::format::MAX_SEGMENT_RAW as usize;
     let mut rng = Rng(0x00ca_99ed);
     let unframed: Vec<u8> = Vec::from_fn(3 * max_segment, |_| rng.next() as u8);
     let mut oversized = Demo(synthetic(&[], false));
@@ -256,12 +257,12 @@ fn segments_are_capped() -> anyhow::Result<()> {
             "{what}: {} segments",
             info.segments
         );
-        let index = mvdz::read_info(std::io::Cursor::new(&file))?.index;
+        let index = crate::read_info(std::io::Cursor::new(&file))?.index;
         assert!(
             index
-                .segs
+                .segments
                 .iter()
-                .all(|seg| seg.raw_len as usize <= max_segment),
+                .all(|segment| segment.raw_len as usize <= max_segment),
             "{what}: a segment over the largest length"
         );
         assert!(
@@ -280,37 +281,40 @@ fn edited_demos_round_trip() -> anyhow::Result<()> {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let mut refused = 0;
     for case in 0..30 {
-        let mut d = base.clone();
+        let mut demo = base.clone();
         for _ in 0..=rng.below(4) {
-            let i = rng.below(d.len());
+            let start = rng.below(demo.len());
             match rng.below(4) {
                 0 => {
-                    let j = (i + rng.below(2000)).min(d.len());
-                    d.drain(i..j);
+                    let end = (start + rng.below(2000)).min(demo.len());
+                    demo.drain(start..end);
                 }
                 1 => {
-                    let j = (i + rng.below(2000)).min(d.len());
-                    let chunk = d[i..j].to_vec();
-                    let k = rng.below(d.len());
-                    d.splice(k..k, chunk);
+                    let end = (start + rng.below(2000)).min(demo.len());
+                    let chunk = demo[start..end].to_vec();
+                    let at = rng.below(demo.len());
+                    demo.splice(at..at, chunk);
                 }
                 2 => {
                     for _ in 0..=rng.below(16) {
-                        let k = rng.below(d.len());
-                        d[k] = rng.next() as u8;
+                        let at = rng.below(demo.len());
+                        demo[at] = rng.next() as u8;
                     }
                 }
-                _ => d.truncate(i),
+                _ => demo.truncate(start),
             }
         }
         // an edit that destroys the first frame makes it a non-demo
-        if mvdz::check_demo(&d).is_err() {
+        if crate::check_demo(&demo).is_err() {
             refused += 1;
             continue;
         }
-        let c = compress(&d)?;
-        assert!(mvdz::decompress(&c, 1)? == d, "case {case}");
-        assert!(mvdz::decompress(&c, 2)? == d, "case {case}, 2 threads");
+        let file = compress(&demo)?;
+        assert!(crate::decompress(&file, 1)? == demo, "case {case}");
+        assert!(
+            crate::decompress(&file, 2)? == demo,
+            "case {case}, 2 threads"
+        );
     }
     // edits within the demo keep it a demo: only cuts into the first frame
     // are refused
@@ -322,23 +326,23 @@ fn edited_demos_round_trip() -> anyhow::Result<()> {
 /// demoinfo variants, odd masks, ...), when present.
 #[test]
 fn constructed_demos() -> anyhow::Result<()> {
-    let Some(gdir) = test_data("gen") else {
+    let Some(gen_dir) = test_data("gen") else {
         return Ok(());
     };
-    let Ok(dir) = std::fs::read_dir(gdir) else {
+    let Ok(entries) = std::fs::read_dir(gen_dir) else {
         return Ok(());
     };
-    let mut files: Vec<_> = dir
+    let mut files: Vec<_> = entries
         .filter_map(std::result::Result::ok)
-        .map(|e| e.path())
+        .map(|entry| entry.path())
         .collect();
     files.sort();
-    for p in files {
-        let src = std::fs::read(&p)?;
+    for path in files {
+        let src = std::fs::read(&path)?;
         if src.len() > 20 << 20 {
             continue;
         }
-        let name = p
+        let name = path
             .file_name()
             .context("a file name")?
             .to_string_lossy()
@@ -346,15 +350,15 @@ fn constructed_demos() -> anyhow::Result<()> {
         // a few have no MVD start (only dem_set frames, a cut first
         // frame): refused, and still round-trip through the unchecked
         // encoder
-        if mvdz::check_demo(&src).is_err() {
-            assert_matches!(compress(&src), Err(mvdz::Error::NotMvd(_)));
-            let (c, _) = unchecked(&src)?;
-            assert!(mvdz::decompress(&c, 2)? == src, "{name}");
+        if crate::check_demo(&src).is_err() {
+            assert_matches!(compress(&src), Err(crate::Error::NotMvd(_)));
+            let (file, _) = unchecked(&src)?;
+            assert!(crate::decompress(&file, 2)? == src, "{name}");
             continue;
         }
-        let c = compress(&src)?;
-        assert!(mvdz::decompress(&c, 2)? == src, "{name}");
-        assert!(mvdz::decompress(&c, 1)? == src, "{name}, 1 thread");
+        let file = compress(&src)?;
+        assert!(crate::decompress(&file, 2)? == src, "{name}");
+        assert!(crate::decompress(&file, 1)? == src, "{name}, 1 thread");
     }
     Ok(())
 }
@@ -364,10 +368,14 @@ fn deterministic_output() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{}")], false);
     let src = duel().unwrap_or_else(|| several_segments(&small));
     for src in [small, src] {
-        let threads = |threads| mvdz::Config { threads };
-        let a = mvdz::compress(&src, &threads(1))?;
-        let b = mvdz::compress(&src, &threads(3))?;
-        assert!(a == b, "{} bytes: threads change the output", src.len());
+        let config = |threads| crate::Config { threads };
+        let one_thread = crate::compress(&src, &config(1))?;
+        let three_threads = crate::compress(&src, &config(3))?;
+        assert!(
+            one_thread == three_threads,
+            "{} bytes: threads change the output",
+            src.len()
+        );
     }
     Ok(())
 }
@@ -378,15 +386,19 @@ fn deterministic_output() -> anyhow::Result<()> {
 #[test]
 fn file_tables() -> anyhow::Result<()> {
     let src = usercmd_demo();
-    let has = |c: &[u8]| anyhow::Ok(!parts(c)?.models.is_empty());
-    let (seg, info) = compress_info(&several_segments(&src))?;
+    let has_models = |file: &[u8]| anyhow::Ok(!parts(file)?.models.is_empty());
+    let (segmented, info) = compress_info(&several_segments(&src))?;
     assert!(info.segments > 2);
-    assert!(has(&seg)?, "models");
+    assert!(has_models(&segmented)?, "models");
     assert!(
-        readers_agree(&seg, "tables").context("every reader refuses")? == several_segments(&src)
+        readers_agree(&segmented, "tables").context("every reader refuses")?
+            == several_segments(&src)
     );
     let one = compress(&src)?;
-    assert_eq!(parts(&one)?.segs.len(), 1);
-    assert!(has(&one)?, "a file of one segment has its models there too");
+    assert_eq!(parts(&one)?.segments.len(), 1);
+    assert!(
+        has_models(&one)?,
+        "a file of one segment has its models there too"
+    );
     Ok(())
 }

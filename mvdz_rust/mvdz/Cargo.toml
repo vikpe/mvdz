@@ -20,6 +20,7 @@ miniz_oxide = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 criterion = { workspace = true }
+pretty_assertions = { workspace = true }
 
 # encode and decode speed (benches/codec.rs); needs MVDZ_BENCH_DEMOS
 [[bench]]

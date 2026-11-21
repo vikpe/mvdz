@@ -6,39 +6,60 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let res = mvdz::util::par_map(4, args.len(), |i| {
-        let src = std::fs::read(&args[i]).with_context(|| args[i].clone())?;
-        let want = Sha256::digest(&src);
-        let c = mvdz::compress(&src, &mvdz::Config::default())?;
-        let is_whole_ok = mvdz::decompress(&c, 1).is_ok_and(|d| Sha256::digest(&d) == want);
-        let mut d = Vec::new();
-        let is_sequential_ok =
-            mvdz::Reader::new(std::io::Cursor::new(&c), 1, &mvdz::Limits::default())
-                .is_ok_and(|mut r| r.read_to_end(&mut d).is_ok() && Sha256::digest(&d) == want);
-        let mut fails = Vec::new();
-        if !is_whole_ok {
-            fails.push("whole-file reader");
+    const WORKERS: usize = 4;
+    let paths: Vec<String> = std::env::args().skip(1).collect();
+    let chunk_len = paths.len().div_ceil(WORKERS).max(1);
+    let results: Vec<anyhow::Result<(usize, Vec<&str>)>> = std::thread::scope(|scope| {
+        // every worker starts before the first is joined
+        let mut workers = Vec::new();
+        for chunk in paths.chunks(chunk_len) {
+            workers.push(
+                scope.spawn(move || chunk.iter().map(|path| check(path)).collect::<Vec<_>>()),
+            );
         }
-        if !is_sequential_ok {
-            fails.push("sequential reader");
-        }
-        anyhow::Ok((args[i].clone(), src.len(), fails))
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
     });
-    let (mut n, mut raw, mut bad) = (0, 0usize, 0);
-    for file in res {
-        let (f, len, fails) = file?;
-        n += 1;
+    let (mut raw, mut failed_files) = (0, 0);
+    for (path, result) in paths.iter().zip(results) {
+        let (len, fails) = result?;
         raw += len;
         if !fails.is_empty() {
-            bad += 1;
-            println!("FAIL {f}: {fails:?}");
+            failed_files += 1;
+            println!("FAIL {path}: {fails:?}");
         }
     }
     println!(
-        "files {n}  raw {:.1} MB  round trips {}  failed files {bad}",
-        mvdz::util::approx_f64(raw as u64) / 1e6,
-        n * 2
+        "files {}  raw {raw} bytes  round trips {}  failed files {failed_files}",
+        paths.len(),
+        paths.len() * 2
     );
     Ok(())
+}
+
+/// The length of the demo at `path` and the readers that do not give it back.
+fn check(path: &str) -> anyhow::Result<(usize, Vec<&'static str>)> {
+    let src = std::fs::read(path).with_context(|| path.to_owned())?;
+    let want = Sha256::digest(&src);
+    let file = mvdz::compress(&src, &mvdz::Config::default())?;
+    let is_whole_ok = mvdz::decompress(&file, 1).is_ok_and(|demo| Sha256::digest(&demo) == want);
+    let mut demo = Vec::new();
+    let is_sequential_ok =
+        mvdz::Reader::new(std::io::Cursor::new(&file), 1, &mvdz::Limits::default()).is_ok_and(
+            |mut reader| reader.read_to_end(&mut demo).is_ok() && Sha256::digest(&demo) == want,
+        );
+    let mut fails = Vec::new();
+    if !is_whole_ok {
+        fails.push("whole-file reader");
+    }
+    if !is_sequential_ok {
+        fails.push("sequential reader");
+    }
+    Ok((src.len(), fails))
 }

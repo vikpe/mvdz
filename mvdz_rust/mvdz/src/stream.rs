@@ -9,8 +9,8 @@ use crate::coder::rans::FileTables;
 use crate::decode::{DemoCheck, decode_segment};
 use crate::error::{Error, Result, bad};
 use crate::format::{
-    HEADER_LEN, Header, LEN, Layout, SEG_FIELDS, Sec, SegHdr, TABLES_MAX, check_coded_len,
-    len_field, parse_seg_hdr,
+    HEADER_LEN, Header, LEN, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_LEN, Section, SegmentHeader,
+    check_coded_len, len_field, parse_segment_header,
 };
 use crate::util::par_map;
 use std::collections::VecDeque;
@@ -25,20 +25,20 @@ use std::io::{self, Read};
 /// before its bytes are returned, and the whole demo's size, duration and
 /// CRC-32 before the end is reported. The first error is sticky.
 pub struct Reader<R: Read> {
-    r: R,
-    lay: Layout,
+    input: R,
+    layout: Layout,
     /// the file offset of what is read next
-    pos: u64,
-    cur: Vec<u8>,
+    offset: u64,
+    current: Vec<u8>,
     /// held so the current segment stays charged to the budget
-    cur_charge: Option<Charge>,
+    current_charge: Option<Charge>,
     at: usize,
     /// decoded and checked segments after the current one
     ready: VecDeque<(Vec<u8>, Charge)>,
     /// an error met after the segments in `ready`, reported once they are read
     deferred_error: Option<Error>,
-    done: bool,
-    failed: Option<Error>,
+    is_done: bool,
+    failure: Option<Error>,
     threads: usize,
     budget: Budget,
     /// the whole-demo checks, until the end has passed them
@@ -47,32 +47,32 @@ pub struct Reader<R: Read> {
 
 impl<R: Read> Reader<R> {
     /// Decoding from any reader; reads the file's header.
-    pub fn new(mut r: R, threads: usize, limits: &Limits) -> Result<Self> {
-        let mut p = [0u8; HEADER_LEN];
-        let mut n = 0;
-        while n < HEADER_LEN {
-            match r.read(&mut p[n..]) {
+    pub fn new(mut input: R, threads: usize, limits: &Limits) -> Result<Self> {
+        let mut header = [0u8; HEADER_LEN];
+        let mut filled = 0;
+        while filled < HEADER_LEN {
+            match input.read(&mut header[filled..]) {
                 Ok(0) => break,
-                Ok(k) => n += k.min(HEADER_LEN - n),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e.into()),
+                Ok(read) => filled += read.min(HEADER_LEN - filled),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
             }
         }
         let budget = Budget::new(limits);
-        let lay = Layout::new(&p[..n], &budget)?;
+        let layout = Layout::new(&header[..filled], &budget)?;
         budget.input(HEADER_LEN as u64);
         let check = Some(DemoCheck::default());
         Ok(Self {
-            r,
-            lay,
-            pos: HEADER_LEN as u64,
-            cur: Vec::new(),
-            cur_charge: None,
+            input,
+            layout,
+            offset: HEADER_LEN as u64,
+            current: Vec::new(),
+            current_charge: None,
             at: 0,
             ready: VecDeque::new(),
             deferred_error: None,
-            done: false,
-            failed: None,
+            is_done: false,
+            failure: None,
             threads: crate::util::threads(threads),
             budget,
             check,
@@ -81,32 +81,32 @@ impl<R: Read> Reader<R> {
 
     /// The file's header: the demo's size, duration and hashes.
     pub fn header(&self) -> &Header {
-        &self.lay.header
+        &self.layout.header
     }
 
     /// Reads demo bytes; returns 0 at the end. The first error is returned
     /// again by every later call.
     pub fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.check_failed()?;
-        while self.at == self.cur.len() && !self.done {
-            if let Err(e) = self.advance() {
-                self.failed = Some(e);
-                self.cur = Vec::new();
-                self.cur_charge = None;
+        while self.at == self.current.len() && !self.is_done {
+            if let Err(error) = self.advance() {
+                self.failure = Some(error);
+                self.current = Vec::new();
+                self.current_charge = None;
                 self.ready.clear();
                 self.at = 0;
-                return Err(e);
+                return Err(error);
             }
         }
-        let n = buf.len().min(self.cur.len() - self.at);
-        buf[..n].copy_from_slice(&self.cur[self.at..self.at + n]);
-        self.at += n;
-        Ok(n)
+        let len = buf.len().min(self.current.len() - self.at);
+        buf[..len].copy_from_slice(&self.current[self.at..self.at + len]);
+        self.at += len;
+        Ok(len)
     }
 
     fn check_failed(&self) -> Result<()> {
-        match self.failed {
-            Some(e) => Err(e),
+        match self.failure {
+            Some(error) => Err(error),
             None => Ok(()),
         }
     }
@@ -114,52 +114,52 @@ impl<R: Read> Reader<R> {
     /// The next length field of the stream (None: the stream ends before
     /// its first byte).
     fn read_len(&mut self) -> Result<Option<u64>> {
-        let mut b = [0u8; LEN];
-        let mut n = 0;
-        while n < LEN {
-            match self.r.read(&mut b[n..]) {
-                Ok(0) if n == 0 => return Ok(None),
+        let mut field = [0u8; LEN];
+        let mut filled = 0;
+        while filled < LEN {
+            match self.input.read(&mut field[filled..]) {
+                Ok(0) if filled == 0 => return Ok(None),
                 Ok(0) => return bad("incomplete file"),
-                Ok(k) => n += k.min(LEN - n),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e.into()),
+                Ok(read) => filled += read.min(LEN - filled),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
             }
         }
-        Ok(len_field(&b))
+        Ok(len_field(&field))
     }
 
     /// The `len` bytes of a block, charged to the budget while the charge
     /// lives.
     fn read_body(&mut self, len: u64) -> Result<(Vec<u8>, Charge)> {
-        let c = self.budget.alloc(len)?;
+        let charge = self.budget.alloc(len)?;
         // the data arrives before the buffer grows: a lying length on a
         // short stream allocates nothing
-        let mut v = Vec::new();
-        (&mut self.r).take(len).read_to_end(&mut v)?;
-        if v.len() as u64 != len {
+        let mut body = Vec::new();
+        (&mut self.input).take(len).read_to_end(&mut body)?;
+        if body.len() as u64 != len {
             return bad("incomplete file");
         }
         self.budget.input(len);
-        Ok((v, c))
+        Ok((body, charge))
     }
 
     /// The next segment of the stream: its header and its bytes, charged to the
     /// budget while the charge lives.
-    fn read_segment(&mut self) -> Result<(SegHdr, Vec<u8>, Charge)> {
+    fn read_segment(&mut self) -> Result<(SegmentHeader, Vec<u8>, Charge)> {
         // the stream may end here, short of the demo: `decode_batch` delivers the
         // complete segments before it first
         let Some(coded) = self.read_len()? else {
             return bad("incomplete file");
         };
         check_coded_len(coded)?;
-        let section = Sec {
-            off: self.pos,
-            len: coded + SEG_FIELDS as u64,
+        let section = Section {
+            offset: self.offset,
+            len: coded + SEGMENT_FIELDS_LEN as u64,
         };
         let (body, charge) = self.read_body(section.len)?;
-        let header = parse_seg_hdr(&body[..SEG_FIELDS])?;
-        let header = self.lay.segment(&section, header)?;
-        self.pos = section.end();
+        let header = parse_segment_header(&body[..SEGMENT_FIELDS_LEN])?;
+        let header = self.layout.segment(&section, header)?;
+        self.offset = section.end();
         Ok((header, body, charge))
     }
 
@@ -169,7 +169,7 @@ impl<R: Read> Reader<R> {
     /// slowest segment; a rolling window would overlap them.
     fn decode_batch(&mut self) -> Result<()> {
         let mut segments = Vec::new();
-        while segments.len() < self.threads && !self.lay.complete() {
+        while segments.len() < self.threads && !self.layout.is_complete() {
             match self.read_segment() {
                 Ok(segment) => segments.push(segment),
                 Err(error) if !segments.is_empty() => {
@@ -179,13 +179,13 @@ impl<R: Read> Reader<R> {
                 Err(error) => return Err(error),
             }
         }
-        let (lay, budget) = (&self.lay, &self.budget);
+        let (layout, budget) = (&self.layout, &self.budget);
         let decoded = par_map(self.threads, segments.len(), |index| {
             let (header, body, _) = &segments[index];
             let charge = budget.alloc(u64::from(header.raw_len))?;
             budget.work(u64::from(header.raw_len))?;
             let mut out = zeroed(header.raw_len as usize)?;
-            let timing = decode_segment(lay, body, header, &mut out, budget)?;
+            let timing = decode_segment(layout, body, header, &mut out, budget)?;
             Ok((out, charge, timing))
         });
         for result in decoded {
@@ -209,52 +209,52 @@ impl<R: Read> Reader<R> {
 
     /// Reads on until a segment's bytes are available or the file ends.
     fn advance(&mut self) -> Result<()> {
-        while !self.done && self.at == self.cur.len() {
+        while !self.is_done && self.at == self.current.len() {
             if let Some((out, charge)) = self.ready.pop_front() {
-                self.cur = out;
-                self.cur_charge = Some(charge);
+                self.current = out;
+                self.current_charge = Some(charge);
                 self.at = 0;
                 continue;
             }
-            self.cur = Vec::new();
-            self.cur_charge = None;
+            self.current = Vec::new();
+            self.current_charge = None;
             self.at = 0;
             if let Some(error) = self.deferred_error.take() {
                 return Err(error);
             }
-            if !self.lay.has_models() {
+            if !self.layout.has_models() {
                 let Some(len) = self.read_len()? else {
                     return bad("incomplete file");
                 };
-                if len > TABLES_MAX {
+                if len > MAX_MODELS_LEN {
                     return bad("models too large");
                 }
-                let t = if len > 0 {
-                    let (b, _c) = self.read_body(len)?;
-                    Some(FileTables::new(&b, self.threads, &self.budget)?)
+                let tables = if len > 0 {
+                    let (body, _charge) = self.read_body(len)?;
+                    Some(FileTables::new(&body, self.threads, &self.budget)?)
                 } else {
                     None
                 };
-                self.lay.models(t)?;
-                self.pos += LEN as u64 + len;
+                self.layout.models(tables)?;
+                self.offset += LEN as u64 + len;
                 continue;
             }
-            if self.lay.complete() {
+            if self.layout.is_complete() {
                 // the segments hold the whole demo: the file ends here
                 let mut one = [0u8; 1];
                 loop {
-                    match self.r.read(&mut one) {
+                    match self.input.read(&mut one) {
                         Ok(0) => break,
                         Ok(_) => return bad("trailing bytes"),
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e.into()),
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error.into()),
                     }
                 }
-                self.lay.finish()?;
-                if let Some(c) = self.check.take() {
-                    c.finish(&self.lay)?;
+                self.layout.finish()?;
+                if let Some(check) = self.check.take() {
+                    check.finish(&self.layout)?;
                 }
-                self.done = true;
+                self.is_done = true;
                 break;
             }
             self.decode_batch()?;

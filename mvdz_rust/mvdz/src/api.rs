@@ -12,14 +12,20 @@ use crate::format::{Header, Index};
 
 /// Compresses a demo (a raw `.mvd`). Input that is not an MVD demo is
 /// `Error::NotMvd` (see `check_demo`).
-pub fn compress(src: &[u8], cfg: &Config) -> Result<Vec<u8>> {
-    compress_info(src, cfg).map(|r| r.0)
+pub fn compress(src: &[u8], config: &Config) -> Result<Vec<u8>> {
+    compress_info(src, config).map(|(packed, _)| packed)
 }
 
 /// Compresses a demo (as `compress`) and reports what the encoder did.
-pub fn compress_info(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
+pub fn compress_info(src: &[u8], config: &Config) -> Result<(Vec<u8>, Info)> {
     check_demo(src)?;
-    crate::encode::compress(src, cfg)
+    crate::encode::compress(src, config)
+}
+
+/// As `compress_info`, for any bytes: input that is not an MVD demo is stored
+/// (mostly as tail) and still round-trips.
+pub fn compress_any(src: &[u8], config: &Config) -> Result<(Vec<u8>, Info)> {
+    crate::encode::compress(src, config)
 }
 
 /// Checks that `src` is an MVD demo, as the encoders do before any work.
@@ -45,47 +51,47 @@ pub fn check_demo(src: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// True if `b` starts with the MVDZ magic and a version this library
+/// True if `bytes` starts with the MVDZ magic and a version this library
 /// reads (needs 8 bytes).
-pub fn is_mvdz(b: &[u8]) -> bool {
-    b.len() >= 8 && &b[..4] == MAGIC && b[4..8] == VERSION.to_le_bytes()
+pub fn is_mvdz(bytes: &[u8]) -> bool {
+    bytes.len() >= 8 && &bytes[..4] == MAGIC && bytes[4..8] == VERSION.to_le_bytes()
 }
 
 /// Decompresses a whole file with up to `threads` threads (0: one per
 /// logical core) and the default limits.
-pub fn decompress(b: &[u8], threads: usize) -> Result<Vec<u8>> {
-    crate::decode::decompress(b, threads, &Limits::default())
+pub fn decompress(file: &[u8], threads: usize) -> Result<Vec<u8>> {
+    crate::decode::decompress(file, threads, &Limits::default())
 }
 
 /// Decompresses a whole file under the caller's limits.
-pub fn decompress_with(b: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
-    crate::decode::decompress(b, threads, limits)
+pub fn decompress_with(file: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
+    crate::decode::decompress(file, threads, limits)
 }
 
-/// Decompresses from `r` into `w` segment by segment.
+/// Decompresses from `reader` into `writer` segment by segment.
 ///
 /// The file is read in order; up to `threads` segments are decoded at once
 /// and nothing more is buffered. On an error the bytes already written are
 /// a prefix of the demo.
 pub fn decompress_stream<R: Read, W: Write>(
-    r: R,
-    mut w: W,
+    reader: R,
+    mut writer: W,
     threads: usize,
     limits: &Limits,
 ) -> Result<u64> {
-    let mut rd = Reader::new(r, threads, limits)?;
+    let mut decoder = Reader::new(reader, threads, limits)?;
     let mut buf = vec![0u8; 1 << 16];
-    let mut n = 0u64;
+    let mut total = 0u64;
     loop {
-        let k = rd.read_demo(&mut buf)?;
-        if k == 0 {
+        let len = decoder.read_demo(&mut buf)?;
+        if len == 0 {
             break;
         }
-        w.write_all(&buf[..k])?;
-        n += k as u64;
+        writer.write_all(&buf[..len])?;
+        total += len as u64;
     }
-    w.flush()?;
-    Ok(n)
+    writer.flush()?;
+    Ok(total)
 }
 
 // ---------------------------------------------------------------- file information
@@ -103,19 +109,19 @@ pub struct FileInfo {
 /// Reads the header of a complete file and the header of every segment,
 /// after checking its structure (no segment is decoded). The hashes are
 /// what the file claims: only a full decode verifies them.
-pub fn read_info<R: Read + Seek>(r: R) -> Result<FileInfo> {
-    read_info_with(r, &Limits::default())
+pub fn read_info<R: Read + Seek>(reader: R) -> Result<FileInfo> {
+    read_info_with(reader, &Limits::default())
 }
 
-pub fn read_info_with<R: Read + Seek>(r: R, limits: &Limits) -> Result<FileInfo> {
+pub fn read_info_with<R: Read + Seek>(reader: R, limits: &Limits) -> Result<FileInfo> {
     let budget = Budget::new(limits);
-    let mut src = SeekSrc(r);
+    let mut src = SeekSrc(reader);
     let len = crate::decode::Src::len(&mut src)?;
     budget.input(len);
-    let lay = scan_layout(&mut src, 1, &budget)?;
+    let layout = scan_layout(&mut src, 1, &budget)?;
     Ok(FileInfo {
-        header: lay.header,
-        index: lay.index(),
+        header: layout.header,
+        index: layout.index(),
         file_size: len,
     })
 }

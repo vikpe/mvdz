@@ -6,10 +6,11 @@ use crate::coder::rans::Shared;
 use crate::decode::{DemoCheck, SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::{
-    Header, MAX_SEG_CODED, MAX_SEGMENTS, SEG_FIELDS, models_block, seg_hdr_bytes, segment_block,
+    Header, MAX_SEGMENT_CODED, MAX_SEGMENTS, SEGMENT_FIELDS_LEN, models_block, segment_block,
+    segment_header_bytes,
 };
 use crate::proto::{Proto, frame_len};
-use crate::segment::{self, Nums, StreamStat, Walked, cut_points, frame_scan};
+use crate::segment::{self, Numerics, Walked, cut_points, frame_scan};
 use crate::util::{HAS_THREADS, crc32, par_map};
 use sha2::{Digest, Sha256};
 
@@ -32,13 +33,12 @@ pub struct Info {
     pub segments: usize,
     /// Input bytes the transform stored raw (escapes and unframeable tail).
     pub escaped: usize,
-    pub streams: Vec<StreamStat>,
     /// Segments that failed the self-check and were coded as all tail instead:
     /// nonzero only for a transform bug.
     pub self_check_fallbacks: usize,
 }
 
-/// True if `b` starts like an MVD demo.
+/// True if `bytes` starts like an MVD demo.
 ///
 /// That is a whole first frame that carries
 /// messages (a non-empty `dem_read`/`dem_all`/... payload, or hidden or
@@ -47,32 +47,36 @@ pub struct Info {
 /// frames are whole too. A frame's length field must fit the input, so
 /// other files almost never frame: text, gzip, PNG, TIFF and random bytes
 /// fail on the first frame.
-pub(crate) fn starts_like_mvd(b: &[u8]) -> bool {
-    let bad = |b: &[u8], p: usize| b.len() >= p + 2 && matches!(b[p + 1] & 7, 0 | 7);
-    if b.len() < 2 {
+pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
+    let is_bad_frame = |bytes: &[u8], offset: usize| {
+        bytes.len() >= offset + 2 && matches!(bytes[offset + 1] & 7, 0 | 7)
+    };
+    if bytes.len() < 2 {
         return false;
     }
-    let head = match b[1] & 7 {
+    let head = match bytes[1] & 7 {
         0 | 2 | 7 => return false,
         3 => 10,
         _ => 6,
     };
-    let Some(n) = frame_len(b, 0) else {
+    let Some(first_len) = frame_len(bytes, 0) else {
         return false;
     };
-    if n <= head {
+    if first_len <= head {
         return false;
     }
-    if segment::walk(&b[..n], Proto::default()).is_some_and(|(wk, _)| wk.escaped() == 0) {
+    if segment::walk(&bytes[..first_len], Proto::default())
+        .is_some_and(|(walked, _)| walked.escaped() == 0)
+    {
         return true;
     }
-    let mut p = n;
+    let mut offset = first_len;
     for _ in 0..16 {
-        if bad(b, p) {
+        if is_bad_frame(bytes, offset) {
             return false;
         }
-        match frame_len(b, p) {
-            Some(k) => p += k,
+        match frame_len(bytes, offset) {
+            Some(len) => offset += len,
             None => return false,
         }
     }
@@ -86,9 +90,9 @@ struct Trained {
     /// the protocol state each segment starts in
     protos: Vec<Proto>,
     /// whether the transform can represent the segment
-    walked: Vec<bool>,
+    is_walkable: Vec<bool>,
     /// each segment's frame time: the sum of its frame time bytes
-    durs: Vec<u64>,
+    durations: Vec<u64>,
 }
 
 /// The first pass: walks every segment in order (the protocol state
@@ -96,150 +100,177 @@ struct Trained {
 /// the models (FORMAT.md §12). `threads` segments are held at a time, their
 /// predictors run in parallel; nothing but the counts is kept.
 fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
-    let nseg = cuts.len() - 1;
-    let seg = |i: usize| &src[cuts[i]..cuts[i + 1]];
+    let segment_count = cuts.len() - 1;
+    let segment_bytes = |index: usize| &src[cuts[index]..cuts[index + 1]];
     let trainer = segment::Trainer::default();
     let mut proto = Proto::default();
-    let mut t = Trained {
+    let mut trained = Trained {
         shared: Vec::new(),
-        protos: Vec::with_capacity(nseg),
-        walked: Vec::with_capacity(nseg),
-        durs: (0..nseg).map(|i| frame_scan(seg(i)).1).collect(),
+        protos: Vec::with_capacity(segment_count),
+        is_walkable: Vec::with_capacity(segment_count),
+        durations: (0..segment_count)
+            .map(|index| frame_scan(segment_bytes(index)).1)
+            .collect(),
     };
-    for first in (0..nseg).step_by(threads) {
-        let n = threads.min(nseg - first);
-        let walks: Vec<Option<Walked>> = (first..first + n)
-            .map(|i| {
-                t.protos.push(proto);
-                let (wk, pend) = segment::walk(seg(i), proto)?;
-                proto = pend;
-                Some(wk)
+    for first in (0..segment_count).step_by(threads) {
+        let batch_len = threads.min(segment_count - first);
+        let walks: Vec<Option<Walked>> = (first..first + batch_len)
+            .map(|index| {
+                trained.protos.push(proto);
+                let (walked, end_proto) = segment::walk(segment_bytes(index), proto)?;
+                proto = end_proto;
+                Some(walked)
             })
             .collect();
-        let nums = par_map(threads, n, |k| {
-            Some(segment::numerics(seg(first + k), walks[k].as_ref()?))
+        let numerics = par_map(threads, batch_len, |batch_index| {
+            Some(segment::numerics(
+                segment_bytes(first + batch_index),
+                walks[batch_index].as_ref()?,
+            ))
         });
-        let segs: Vec<(&Walked, &Nums)> = walks
+        let segments: Vec<(&Walked, &Numerics)> = walks
             .iter()
-            .zip(&nums)
-            .filter_map(|(w, n)| Some((w.as_ref()?, n.as_ref()?)))
+            .zip(&numerics)
+            .filter_map(|(walked, numerics)| Some((walked.as_ref()?, numerics.as_ref()?)))
             .collect();
-        trainer.add(&segs, threads);
-        t.walked
+        trainer.add(&segments, threads);
+        trained
+            .is_walkable
             .extend(walks.iter().map(std::option::Option::is_some));
     }
-    t.shared = trainer.models(threads);
-    t
+    trained.shared = trainer.models(threads);
+    trained
 }
 
-/// The body of a walked segment with numeric values `nums`, or None if one
-/// of its streams has no model in `shared` (the file's models) or it is
+/// The body of a walked segment with numeric values `numerics`, or None if
+/// one of its streams has no model in `shared` (the file's models) or it is
 /// longer than a coded segment may be.
 pub(crate) fn transform_body(
-    s: &[u8],
-    wk: &Walked,
-    nums: &Nums,
-    dur_ms: u64,
-    st: &mut Vec<StreamStat>,
+    raw: &[u8],
+    walked: &Walked,
+    numerics: &Numerics,
+    duration_ms: u64,
+    model_ids: &mut Vec<usize>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
-    let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s));
-    b.extend_from_slice(&segment::encode(wk, nums, st, shared)?);
-    ((b.len() - SEG_FIELDS) as u64 <= MAX_SEG_CODED).then_some(b)
+    let mut body = segment_header_bytes(raw.len() as u32, duration_ms as u32, crc32(raw));
+    body.extend_from_slice(&segment::encode(walked, numerics, model_ids, shared)?);
+    ((body.len() - SEGMENT_FIELDS_LEN) as u64 <= MAX_SEGMENT_CODED).then_some(body)
 }
 
 /// Compresses a demo into segments of [`segment::SEGMENT`] raw bytes.
-pub fn compress(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    compress_inner(src, cfg, false)
+pub(crate) fn compress(src: &[u8], config: &Config) -> Result<(Vec<u8>, Info)> {
+    compress_inner(src, config, false)
 }
 
 /// Compresses a demo with every segment coded as all tail: the layout the
 /// encoder falls back to. For tests and test vectors.
-#[doc(hidden)]
-pub fn compress_all_tail(src: &[u8], cfg: &Config) -> Result<(Vec<u8>, Info)> {
-    compress_inner(src, cfg, true)
+#[cfg(test)]
+pub(crate) fn compress_all_tail(src: &[u8], config: &Config) -> Result<(Vec<u8>, Info)> {
+    compress_inner(src, config, true)
 }
 
-fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, Info)> {
-    let threads = crate::util::threads(cfg.threads);
+fn compress_inner(src: &[u8], config: &Config, is_all_tail: bool) -> Result<(Vec<u8>, Info)> {
+    let threads = crate::util::threads(config.threads);
     // an empty demo has no segment
     let cuts = if src.is_empty() {
         vec![0]
     } else {
         cut_points(src)
     };
-    let nseg = cuts.len() - 1;
-    if nseg > MAX_SEGMENTS {
+    let segment_count = cuts.len() - 1;
+    if segment_count > MAX_SEGMENTS {
         return Err(Error::Invalid("too many segments"));
     }
     // the first pass: the models. Its walk runs on one thread: with more,
     // the demo's checksum and SHA-256 are computed beside it
     let hashes = || (crc32(src), <[u8; 32]>::from(Sha256::digest(src)));
     let train = || {
-        if all_tail {
+        if is_all_tail {
             Trained {
                 shared: Vec::new(),
-                protos: vec![Proto::default(); nseg],
-                walked: vec![false; nseg],
-                durs: (0..nseg)
-                    .map(|i| frame_scan(&src[cuts[i]..cuts[i + 1]]).1)
+                protos: vec![Proto::default(); segment_count],
+                is_walkable: vec![false; segment_count],
+                durations: (0..segment_count)
+                    .map(|index| frame_scan(&src[cuts[index]..cuts[index + 1]]).1)
                     .collect(),
             }
         } else {
             train(src, &cuts, threads)
         }
     };
-    let (t, (crc, sha256)) = if threads > 1 && HAS_THREADS {
-        std::thread::scope(|sc| {
-            let h = sc.spawn(hashes);
-            (train(), h.join().expect("hashing"))
+    let (trained, (crc, sha256)) = if threads > 1 && HAS_THREADS {
+        std::thread::scope(|scope| {
+            let hashing = scope.spawn(hashes);
+            (train(), hashing.join().expect("hashing"))
         })
     } else {
         (train(), hashes())
     };
     let header = Header {
         size: src.len() as u64,
-        duration_ms: t.durs.iter().sum(),
+        duration_ms: trained.durations.iter().sum(),
         crc,
         sha256,
     };
-    // the second pass: every segment is walked again, from the protocol
-    // state it starts in, and coded with the models (segments in parallel,
-    // each holding its own walk only). One the transform cannot code is
-    // all tail
-    let tail_body = |i: usize| {
-        let s = &src[cuts[i]..cuts[i + 1]];
-        Body::new(s, &segment::walk_tail(s, t.protos[i]), t.durs[i], &[], true)
-    };
-    let bodies: Vec<Result<Body>> = par_map(threads, nseg, |i| {
-        let s = &src[cuts[i]..cuts[i + 1]];
-        if let Some((wk, _)) = t.walked[i].then(|| segment::walk(s, t.protos[i])).flatten()
-            && let Ok(b) = Body::new(s, &wk, t.durs[i], &t.shared, false)
-        {
-            return Ok(b);
-        }
-        tail_body(i)
-    });
-    let mut bodies = bodies.into_iter().collect::<Result<Vec<Body>>>()?;
-    let shared = &t.shared;
-    let fails = || Error::Internal("the encoder's output does not decode to its input");
+    let mut bodies = code_segments(src, &cuts, &trained, threads)?;
+    let shared = &trained.shared;
+    let self_check_error = || Error::Internal("the encoder's output does not decode to its input");
     let mut fallbacks = 0;
     loop {
         let (out, mut info) = assemble(&header, shared, &bodies);
         // None: the container itself does not decode, nothing to fall back to
-        let bad = failing_segments(&out, src, &cuts, threads).ok_or_else(fails)?;
-        if !bad.contains(&true) {
+        let is_failing =
+            failing_segments(&out, src, &cuts, threads).ok_or_else(self_check_error)?;
+        if !is_failing.contains(&true) {
             info.self_check_fallbacks = fallbacks;
             return Ok((out, info));
         }
-        for i in (0..nseg).filter(|&i| bad[i]) {
-            if bodies[i].is_all_tail {
-                return Err(fails());
+        for index in (0..segment_count).filter(|&index| is_failing[index]) {
+            if bodies[index].is_all_tail {
+                return Err(self_check_error());
             }
-            bodies[i] = tail_body(i)?;
+            bodies[index] = tail_body(src, &cuts, &trained, index)?;
             fallbacks += 1;
         }
     }
+}
+
+/// The second pass: every segment walked again from the protocol state it starts in
+/// and coded with the models, segments in parallel; one the transform cannot code is
+/// all tail.
+fn code_segments(
+    src: &[u8],
+    cuts: &[usize],
+    trained: &Trained,
+    threads: usize,
+) -> Result<Vec<Body>> {
+    let bodies = par_map(threads, cuts.len() - 1, |index| {
+        let raw = &src[cuts[index]..cuts[index + 1]];
+        let walked = trained.is_walkable[index]
+            .then(|| segment::walk(raw, trained.protos[index]))
+            .flatten();
+        if let Some((walked, _)) = walked
+            && let Ok(body) = Body::new(
+                raw,
+                &walked,
+                trained.durations[index],
+                &trained.shared,
+                false,
+            )
+        {
+            return Ok(body);
+        }
+        tail_body(src, cuts, trained, index)
+    });
+    bodies.into_iter().collect()
+}
+
+/// Segment `index` coded as all tail: the layout the encoder falls back to.
+fn tail_body(src: &[u8], cuts: &[usize], trained: &Trained, index: usize) -> Result<Body> {
+    let raw = &src[cuts[index]..cuts[index + 1]];
+    let walked = segment::walk_tail(raw, trained.protos[index]);
+    Body::new(raw, &walked, trained.durations[index], &[], true)
 }
 
 /// One coded segment.
@@ -249,29 +280,30 @@ struct Body {
     is_all_tail: bool,
     /// input bytes the transform stored raw
     escaped: usize,
-    streams: Vec<StreamStat>,
+    /// the streams coded with a model
+    model_ids: Vec<usize>,
 }
 
 impl Body {
-    /// Codes segment `s` from its walk `wk`. An error if a stream has no
-    /// model in `shared` or the body is longer than a coded segment may be
+    /// Codes segment `raw` from its walk `walked`. An error if a stream has
+    /// no model in `shared` or the body is longer than a coded segment may be
     /// (an all-tail body has neither problem).
     fn new(
-        s: &[u8],
-        wk: &Walked,
-        dur_ms: u64,
+        raw: &[u8],
+        walked: &Walked,
+        duration_ms: u64,
         shared: &[Option<Shared>],
         is_all_tail: bool,
     ) -> Result<Self> {
-        let nums = segment::numerics(s, wk);
-        let mut streams = Vec::new();
-        let bytes = transform_body(s, wk, &nums, dur_ms, &mut streams, shared)
+        let numerics = segment::numerics(raw, walked);
+        let mut model_ids = Vec::new();
+        let bytes = transform_body(raw, walked, &numerics, duration_ms, &mut model_ids, shared)
             .ok_or(Error::Internal("a segment that cannot be coded"))?;
         Ok(Self {
             bytes,
             is_all_tail,
-            escaped: wk.escaped(),
-            streams,
+            escaped: walked.escaped(),
+            model_ids,
         })
     }
 }
@@ -280,13 +312,11 @@ impl Body {
 fn assemble(header: &Header, shared: &[Option<Shared>], bodies: &[Body]) -> (Vec<u8>, Info) {
     let mut out = header.bytes().to_vec();
     // the models: the shared model of every stream some segment codes with it
-    let mut used = vec![false; shared.len()];
-    for st in bodies.iter().flat_map(|b| &b.streams) {
-        if st.id != crate::streams::BLOB_BODY && !crate::streams::is_blob(st.id) {
-            used[st.id] = true;
-        }
+    let mut is_used = vec![false; shared.len()];
+    for &id in bodies.iter().flat_map(|body| &body.model_ids) {
+        is_used[id] = true;
     }
-    let ids: Vec<usize> = (0..used.len()).filter(|&sid| used[sid]).collect();
+    let ids: Vec<usize> = (0..is_used.len()).filter(|&id| is_used[id]).collect();
     if ids.is_empty() {
         models_block(&mut out, &[]);
     } else {
@@ -296,10 +326,9 @@ fn assemble(header: &Header, shared: &[Option<Shared>], bodies: &[Body]) -> (Vec
         segments: bodies.len(),
         ..Default::default()
     };
-    for b in bodies {
-        segment_block(&mut out, &b.bytes);
-        info.escaped += b.escaped;
-        info.streams.extend(b.streams.iter().cloned());
+    for body in bodies {
+        segment_block(&mut out, &body.bytes);
+        info.escaped += body.escaped;
     }
     (out, info)
 }
@@ -316,31 +345,33 @@ pub(crate) fn failing_segments(
     threads: usize,
 ) -> Option<Vec<bool>> {
     let budget = Budget::unlimited();
-    let lay = scan_layout(&mut SliceSrc(file), threads, &budget).ok()?;
-    let nseg = lay.segs.len();
-    if nseg != cuts.len() - 1 {
+    let layout = scan_layout(&mut SliceSrc(file), threads, &budget).ok()?;
+    let segment_count = layout.segments.len();
+    if segment_count != cuts.len() - 1 {
         return None;
     }
-    let timings = par_map(threads, nseg, |i| {
-        let (s, h) = &lay.segs[i];
-        let want = &src[cuts[i]..cuts[i + 1]];
+    let timings = par_map(threads, segment_count, |index| {
+        let (section, header) = &layout.segments[index];
+        let want = &src[cuts[index]..cuts[index + 1]];
         let mut dst = vec![0u8; want.len()];
-        let body = file.get(s.body_range()?)?;
-        decode_segment(&lay, body, h, &mut dst, &budget)
+        let body = file.get(section.body_range()?)?;
+        decode_segment(&layout, body, header, &mut dst, &budget)
             .ok()
             .filter(|_| dst == want)
     });
-    let bad: Vec<bool> = timings.iter().map(std::option::Option::is_none).collect();
-    if bad.iter().any(|&x| x) {
-        return Some(bad);
+    let is_failing: Vec<bool> = timings.iter().map(std::option::Option::is_none).collect();
+    if is_failing.iter().any(|&is_failed| is_failed) {
+        return Some(is_failing);
     }
     // the whole-demo checks, over the input: every segment decoded to it.
     // A file whose segments all decode but which fails these is not
     // fixable by falling back
-    let mut chk = DemoCheck::default();
-    for (i, tm) in timings.into_iter().enumerate() {
-        chk.segment(&src[cuts[i]..cuts[i + 1]], tm?).ok()?;
+    let mut check = DemoCheck::default();
+    for (index, timing) in timings.into_iter().enumerate() {
+        check
+            .segment(&src[cuts[index]..cuts[index + 1]], timing?)
+            .ok()?;
     }
-    chk.finish(&lay).ok()?;
-    Some(bad)
+    check.finish(&layout).ok()?;
+    Some(is_failing)
 }

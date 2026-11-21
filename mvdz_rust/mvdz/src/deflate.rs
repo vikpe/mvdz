@@ -11,61 +11,62 @@ use crate::error::{Error, Result};
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::core::{DecompressorOxide, decompress as inflate, inflate_flags};
 
-/// Compresses `b` at `level` (1-9; 0: stored blocks) into one raw DEFLATE
+/// Compresses `data` at `level` (1-9; 0: stored blocks) into one raw DEFLATE
 /// stream. Never empty.
-pub fn compress(b: &[u8], level: u32) -> Vec<u8> {
-    miniz_oxide::deflate::compress_to_vec(b, level as u8)
+pub(crate) fn compress(data: &[u8], level: u32) -> Vec<u8> {
+    miniz_oxide::deflate::compress_to_vec(data, level as u8)
 }
 
-/// Decompresses `b` to exactly `n` bytes. The caller has charged `n` bytes
-/// to its budget.
-pub(crate) fn decompress(b: &[u8], n: usize) -> Result<Vec<u8>> {
-    let mut out = zeroed(n)?;
+/// Decompresses `stream` to exactly `len` bytes. The caller has charged `len`
+/// bytes to its budget.
+pub(crate) fn decompress(stream: &[u8], len: usize) -> Result<Vec<u8>> {
+    let mut out = zeroed(len)?;
     // one call: with the whole output space at hand the stream either ends
     // or does not fit
     let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
-    match inflate(&mut DecompressorOxide::new(), b, &mut out, 0, flags) {
-        (TINFLStatus::Done, read, written) if read == b.len() && written == n => Ok(out),
+    match inflate(&mut DecompressorOxide::new(), stream, &mut out, 0, flags) {
+        (TINFLStatus::Done, read, written) if read == stream.len() && written == len => Ok(out),
         _ => Err(Error::Corrupt("deflate data")),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
     #[test]
     fn streams() -> anyhow::Result<()> {
-        let a = b"hello hello hello hello".repeat(50);
+        let text = b"hello hello hello hello".repeat(50);
         for level in [0, 1, 6, 9] {
-            let z = super::compress(&a, level);
-            assert_eq!(z.len() < a.len(), level > 0);
-            assert_eq!(super::decompress(&z, a.len())?, a);
-            assert!(super::decompress(&z, a.len() - 1).is_err());
-            assert!(super::decompress(&z, a.len() + 1).is_err());
+            let packed = super::compress(&text, level);
+            assert_eq!(packed.len() < text.len(), level > 0);
+            assert_eq!(super::decompress(&packed, text.len())?, text);
+            assert!(super::decompress(&packed, text.len() - 1).is_err());
+            assert!(super::decompress(&packed, text.len() + 1).is_err());
             // nothing may follow the final block
-            let mut more = z.clone();
+            let mut more = packed.clone();
             more.push(0);
-            assert!(super::decompress(&more, a.len()).is_err());
+            assert!(super::decompress(&more, text.len()).is_err());
             // a cut stream
-            assert!(super::decompress(&z[..z.len() - 1], a.len()).is_err());
+            assert!(super::decompress(&packed[..packed.len() - 1], text.len()).is_err());
         }
         assert!(super::decompress(&[], 0).is_err());
         // incompressible input, larger than one stored block
-        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
-        let r: Vec<u8> = (0..200_000)
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let random: Vec<u8> = (0..200_000)
             .map(|_| {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                x as u8
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
             })
             .collect();
-        let z = super::compress(&r, 9);
-        assert!(z.len() <= r.len() + r.len() / 65535 * 5 + 64);
-        assert_eq!(super::decompress(&z, r.len())?, r);
+        let packed = super::compress(&random, 9);
+        assert!(packed.len() <= random.len() + random.len() / 65535 * 5 + 64);
+        assert_eq!(super::decompress(&packed, random.len())?, random);
         // the empty input is a stream of its own
-        let e = super::compress(&[], 9);
-        assert!(!e.is_empty());
-        assert_eq!(super::decompress(&e, 0)?, Vec::<u8>::new());
+        let empty = super::compress(&[], 9);
+        assert!(!empty.is_empty());
+        assert_eq!(super::decompress(&empty, 0)?, Vec::<u8>::new());
         Ok(())
     }
 }

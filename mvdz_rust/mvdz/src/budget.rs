@@ -46,7 +46,7 @@ impl Limits {
 }
 
 struct Inner {
-    mem: u64,
+    memory: u64,
     used: AtomicU64,
     work_per_byte: u64,
     input: AtomicU64,
@@ -58,11 +58,11 @@ struct Inner {
 pub(crate) struct Budget(Arc<Inner>);
 
 impl Budget {
-    pub(crate) fn new(l: &Limits) -> Self {
+    pub(crate) fn new(limits: &Limits) -> Self {
         Self(Arc::new(Inner {
-            mem: l.memory,
+            memory: limits.memory,
             used: AtomicU64::new(0),
-            work_per_byte: l.work_per_byte,
+            work_per_byte: limits.work_per_byte,
             input: AtomicU64::new(0),
             work: AtomicU64::new(0),
         }))
@@ -70,52 +70,60 @@ impl Budget {
 
     /// No limits, whatever input is recorded.
     pub(crate) fn unlimited() -> Self {
-        let b = Self::new(&Limits::unlimited());
+        let budget = Self::new(&Limits::unlimited());
         // the work limit is per input byte: without any it would be the
         // fixed allowance alone
-        b.input(1);
-        b
+        budget.input(1);
+        budget
     }
 
-    /// Records `n` more bytes of input (raises the work limit).
-    pub(crate) fn input(&self, n: u64) {
-        self.0.input.fetch_add(n, Ordering::Relaxed);
+    /// Records `len` more bytes of input (raises the work limit).
+    pub(crate) fn input(&self, len: u64) {
+        self.0.input.fetch_add(len, Ordering::Relaxed);
     }
 
-    /// Reserves `n` bytes until the returned charge is dropped.
-    pub(crate) fn alloc(&self, n: u64) -> Result<Charge> {
-        self.reserve(n)?;
-        Ok(Charge { b: self.clone(), n })
+    /// Reserves `len` bytes until the returned charge is dropped.
+    pub(crate) fn alloc(&self, len: u64) -> Result<Charge> {
+        self.reserve(len)?;
+        Ok(Charge {
+            budget: self.clone(),
+            len,
+        })
     }
 
-    fn reserve(&self, n: u64) -> Result<()> {
-        let i = &self.0;
-        let mut cur = i.used.load(Ordering::Relaxed);
+    fn reserve(&self, len: u64) -> Result<()> {
+        let inner = &self.0;
+        let mut current = inner.used.load(Ordering::Relaxed);
         loop {
-            let new = cur
-                .checked_add(n)
-                .filter(|&v| v <= i.mem)
+            let new = current
+                .checked_add(len)
+                .filter(|&total| total <= inner.memory)
                 .ok_or(Error::Limit("memory"))?;
-            match i
-                .used
-                .compare_exchange_weak(cur, new, Ordering::Relaxed, Ordering::Relaxed)
-            {
+            match inner.used.compare_exchange_weak(
+                current,
+                new,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => return Ok(()),
-                Err(c) => cur = c,
+                Err(actual) => current = actual,
             }
         }
     }
 
-    /// Accounts `n` units of work.
-    pub(crate) fn work(&self, n: u64) -> Result<()> {
-        let i = &self.0;
-        let lim = i
+    /// Accounts `units` of work.
+    pub(crate) fn work(&self, units: u64) -> Result<()> {
+        let inner = &self.0;
+        let limit = inner
             .input
             .load(Ordering::Relaxed)
-            .saturating_mul(i.work_per_byte)
+            .saturating_mul(inner.work_per_byte)
             .saturating_add(1 << 20);
-        let w = i.work.fetch_add(n, Ordering::Relaxed).saturating_add(n);
-        if w > lim {
+        let total = inner
+            .work
+            .fetch_add(units, Ordering::Relaxed)
+            .saturating_add(units);
+        if total > limit {
             return Err(Error::Limit("work"));
         }
         Ok(())
@@ -124,42 +132,48 @@ impl Budget {
 
 /// A reservation of budget memory, released on drop.
 pub(crate) struct Charge {
-    b: Budget,
-    n: u64,
+    budget: Budget,
+    len: u64,
 }
 
 impl Charge {
     /// A charge of nothing.
-    pub(crate) fn none(b: &Budget) -> Self {
-        Self { b: b.clone(), n: 0 }
+    pub(crate) fn none(budget: &Budget) -> Self {
+        Self {
+            budget: budget.clone(),
+            len: 0,
+        }
     }
-    /// Reserves `n` more bytes under this charge.
-    pub(crate) fn grow(&mut self, n: u64) -> Result<()> {
-        self.b.reserve(n)?;
-        self.n += n;
+    /// Reserves `len` more bytes under this charge.
+    pub(crate) fn grow(&mut self, len: u64) -> Result<()> {
+        self.budget.reserve(len)?;
+        self.len += len;
         Ok(())
     }
 }
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        self.b.0.used.fetch_sub(self.n, Ordering::Relaxed);
+        self.budget.0.used.fetch_sub(self.len, Ordering::Relaxed);
     }
 }
 
-/// A zeroed buffer of `n` bytes; allocation failure is an error.
-pub(crate) fn zeroed(n: usize) -> Result<Vec<u8>> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(n)
+/// A zeroed buffer of `len` bytes; allocation failure is an error.
+pub(crate) fn zeroed(len: usize) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(len)
         .map_err(|_| Error::Limit("out of memory"))?;
-    v.resize(n, 0);
-    Ok(v)
+    buffer.resize(len, 0);
+    Ok(buffer)
 }
 
-/// An empty buffer with room for `n` bytes; allocation failure is an error.
-pub(crate) fn with_capacity<T>(n: usize) -> Result<Vec<T>> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(n)
+/// An empty buffer with room for `capacity` bytes; allocation failure is an
+/// error.
+pub(crate) fn with_capacity<T>(capacity: usize) -> Result<Vec<T>> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(capacity)
         .map_err(|_| Error::Limit("out of memory"))?;
-    Ok(v)
+    Ok(buffer)
 }

@@ -7,15 +7,15 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let cfg = mvdz::Config { threads: 1 };
-    let (file, info) = mvdz::encode::compress(data, &cfg).expect("compress");
+    let config = mvdz::Config { threads: 1 };
+    let (file, info) = mvdz::compress_any(data, &config).expect("compress");
     if info.self_check_fallbacks > 0 && std::env::var("REQUIRE_TRANSFORM_LOSSLESS").is_ok() {
         panic!("the transform is lossy");
     }
     assert!(mvdz::decompress(&file, 1).unwrap() == data);
     assert!(mvdz::decompress(&file, 2).unwrap() == data);
     // the checked entry point: refuses exactly what check_demo refuses
-    match mvdz::compress(data, &cfg) {
+    match mvdz::compress(data, &config) {
         Err(mvdz::Error::NotMvd(_)) => assert!(mvdz::check_demo(data).is_err()),
         result => assert!(result.expect("compress") == file),
     }

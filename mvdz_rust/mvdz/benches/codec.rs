@@ -36,15 +36,17 @@ fn demos() -> Vec<Vec<u8>> {
     };
     let dir = PathBuf::from(dir);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
         .map(|entry| entry.expect("a directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "mvd"))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "mvd"))
         .collect();
     paths.sort();
     assert!(!paths.is_empty(), "{}: no .mvd files", dir.display());
     paths
         .iter()
-        .map(|path| std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+        .map(|path| {
+            std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        })
         .collect()
 }
 
@@ -52,7 +54,7 @@ fn config(threads: usize) -> mvdz::Config {
     mvdz::Config { threads }
 }
 
-fn codec(c: &mut Criterion) {
+fn codec(criterion: &mut Criterion) {
     let raw = demos();
     if raw.is_empty() {
         return;
@@ -72,13 +74,13 @@ fn codec(c: &mut Criterion) {
         raw.len()
     );
 
-    measure(c, "compress", raw_bytes, |threads| {
-        let cfg = config(threads);
+    measure(criterion, "compress", raw_bytes, |threads| {
+        let config = config(threads);
         for demo in &raw {
-            black_box(mvdz::compress(black_box(demo), &cfg).expect("compress"));
+            black_box(mvdz::compress(black_box(demo), &config).expect("compress"));
         }
     });
-    measure(c, "decompress", raw_bytes, |threads| {
+    measure(criterion, "decompress", raw_bytes, |threads| {
         for file in &packed {
             black_box(mvdz::decompress(black_box(file), threads).expect("decompress"));
         }
@@ -86,17 +88,20 @@ fn codec(c: &mut Criterion) {
 }
 
 /// One group, `name/4t` and `name/1t`: `run(threads)` codes every demo once.
-fn measure(c: &mut Criterion, name: &str, raw_bytes: usize, run: impl Fn(usize)) {
-    let mut group = c.benchmark_group(name);
+fn measure(criterion: &mut Criterion, name: &str, raw_bytes: usize, run: impl Fn(usize)) {
+    let mut group = criterion.benchmark_group(name);
     group
         .throughput(Throughput::BytesDecimal(raw_bytes as u64))
         .sampling_mode(SamplingMode::Flat)
         .sample_size(10)
         .measurement_time(Duration::from_secs(15));
     for threads in THREADS {
-        group.bench_function(BenchmarkId::from_parameter(format!("{threads}t")), |b| {
-            b.iter(|| run(threads));
-        });
+        group.bench_function(
+            BenchmarkId::from_parameter(format!("{threads}t")),
+            |bencher| {
+                bencher.iter(|| run(threads));
+            },
+        );
     }
     group.finish();
 }

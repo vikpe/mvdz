@@ -2,7 +2,7 @@
 //!
 //! Each group walks one record list (written by the walker) in order,
 //! predicts each numeric field from group-local state, and codes the
-//! residual through a [`NumIO`]. The same code runs in both directions: on
+//! residual through a [`NumericIo`]. The same code runs in both directions: on
 //! encode it reads the value from the input buffer, on decode it writes the
 //! reconstructed value into the output buffer at the recorded offset.
 //! The groups are independent of each other except that sounds and temp
@@ -10,19 +10,21 @@
 //! them last ([`GROUPS`]).
 
 use crate::streams::{PE_F0, PE_OX, PI_AP, PI_F0, PI_OX, SND_O, TE_O, UC_A};
-use crate::walk::{NONE, PE_FLOAT, PE_INPREV, PeRec, PiRec, Recs};
+use crate::walk::{
+    NO_OFFSET, PE_FLOAT, PE_IN_PREVIOUS, PacketEntityRecord, PlayerInfoRecord, Records,
+};
 
 /// Side features of one numeric value. Backends pick which to use.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 #[repr(C)]
-pub(crate) struct NCtx {
-    pub(crate) f: [u8; 6],
+pub(crate) struct NumericContext {
+    pub(crate) features: [u8; 6],
 }
 
-pub(crate) trait NumIO {
-    /// Encode: record `v` on local stream `k`, return it. Decode: return the
-    /// decoded residual.
-    fn code(&mut self, k: usize, ctx: NCtx, v: i32) -> i32;
+pub(crate) trait NumericIo {
+    /// Encode: record `value` on local stream `stream_index`, return it.
+    /// Decode: return the decoded residual.
+    fn code(&mut self, stream_index: usize, context: NumericContext, value: i32) -> i32;
     /// The segment: the input on encode, the output on decode.
     fn bytes(&self) -> &[u8];
     /// The output segment on decode; empty on encode, which writes nothing.
@@ -30,230 +32,252 @@ pub(crate) trait NumIO {
 }
 
 /// Sign and bit-length bucket of a residual: 0 for zero, else
-/// 2*bitlen(|v|) - 1 + sign (0..=64).
+/// 2*bitlen(|residual|) - 1 + sign (0..=64).
 #[inline(always)]
-pub(crate) fn q(v: i32) -> u8 {
-    if v == 0 {
+pub(crate) fn residual_bucket(residual: i32) -> u8 {
+    if residual == 0 {
         return 0;
     }
-    let neg = u32::from(v < 0);
-    let m = v.unsigned_abs();
-    let n = m.bit_width();
-    (2 * n - 1 + neg) as u8
+    let sign = u32::from(residual < 0);
+    let magnitude = residual.unsigned_abs();
+    let bit_length = magnitude.bit_width();
+    (2 * bit_length - 1 + sign) as u8
 }
 
-/// floor(2^40 / d) + 1: n * RECIP[d] >> 40 == n / d exactly for
+/// floor(2^40 / d) + 1: n * RECIPROCALS[d] >> 40 == n / d exactly for
 /// 0 <= n < 2^31, 1 <= d <= 255 (the error n/2^40 < 2^-9 < 1/d).
-static RECIP: [u64; 256] = {
-    let mut t = [0u64; 256];
-    let mut d = 1;
-    while d < 256 {
-        t[d] = (1u64 << 40) / d as u64 + 1;
-        d += 1;
+static RECIPROCALS: [u64; 256] = {
+    let mut table = [0u64; 256];
+    let mut divisor = 1;
+    while divisor < 256 {
+        table[divisor] = (1u64 << 40) / divisor as u64 + 1;
+        divisor += 1;
     }
-    t
+    table
 };
 
-/// Rounded division a / b for b > 0 (halves away from zero).
+/// Rounded division `dividend` / `divisor` for `divisor` > 0 (halves away
+/// from zero).
 #[inline(always)]
-fn div_round(a: i32, b: i32) -> i32 {
-    let n = a.unsigned_abs() + b.cast_unsigned() / 2;
-    let q = if b < 256 {
-        ((u128::from(n) * u128::from(RECIP[b.cast_unsigned() as usize])) >> 40) as u32
+fn div_round(dividend: i32, divisor: i32) -> i32 {
+    let magnitude = dividend.unsigned_abs() + divisor.cast_unsigned() / 2;
+    let quotient = if divisor < 256 {
+        ((u128::from(magnitude) * u128::from(RECIPROCALS[divisor.cast_unsigned() as usize])) >> 40)
+            as u32
     } else {
-        n / b.cast_unsigned()
+        magnitude / divisor.cast_unsigned()
     }
     .cast_signed();
-    if a < 0 { -q } else { q }
+    if dividend < 0 { -quotient } else { quotient }
 }
 
 /// Frame intervals are clamped so the scaled velocity fits 32 bits.
-pub(crate) const DT_MAX: i32 = 32767;
+pub(crate) const TIME_DELTA_MAX: i32 = 32767;
 
-/// dt-scaled linear prediction: last + (last - prev) * `dt_now` / `dt_prev`,
-/// rounded (wrapping 16-bit arithmetic). Intervals are clamped to `DT_MAX`.
+/// Time-delta-scaled linear prediction: last + (last - previous) *
+/// `time_delta_now` / `time_delta_previous`, rounded (wrapping 16-bit
+/// arithmetic). Intervals are clamped to `TIME_DELTA_MAX`.
 #[inline(always)]
-fn pred_dt(last: u16, prev: u16, dt_now: i32, dt_prev: i32) -> u16 {
-    let d = i32::from((last.wrapping_sub(prev)).cast_signed());
-    if dt_now == dt_prev || dt_prev <= 0 || dt_now < 0 {
-        last.wrapping_add(d.cast_unsigned() as u16)
+fn predict_time_scaled(
+    last: u16,
+    previous: u16,
+    time_delta_now: i32,
+    time_delta_previous: i32,
+) -> u16 {
+    let velocity = i32::from((last.wrapping_sub(previous)).cast_signed());
+    if time_delta_now == time_delta_previous || time_delta_previous <= 0 || time_delta_now < 0 {
+        last.wrapping_add(velocity.cast_unsigned() as u16)
     } else {
         last.wrapping_add(
-            div_round(d * dt_now.min(DT_MAX), dt_prev.min(DT_MAX)).cast_unsigned() as u16,
+            div_round(
+                velocity * time_delta_now.min(TIME_DELTA_MAX),
+                time_delta_previous.min(TIME_DELTA_MAX),
+            )
+            .cast_unsigned() as u16,
         )
     }
 }
 
-/// The little-endian u16 at `off` (0 outside `bytes`).
+/// The little-endian u16 at `offset` (0 outside `bytes`).
 #[inline(always)]
-fn rd16(bytes: &[u8], off: u32) -> u16 {
+fn read_u16(bytes: &[u8], offset: u32) -> u16 {
     bytes
-        .get(off as usize..)
+        .get(offset as usize..)
         .and_then(<[u8]>::first_chunk)
-        .map_or(0, |le| u16::from_le_bytes(*le))
+        .map_or(0, |le_bytes| u16::from_le_bytes(*le_bytes))
 }
 
-/// The little-endian u32 at `off` (0 outside `bytes`).
+/// The little-endian u32 at `offset` (0 outside `bytes`).
 #[inline(always)]
-fn rd32(bytes: &[u8], off: u32) -> u32 {
+fn read_u32(bytes: &[u8], offset: u32) -> u32 {
     bytes
-        .get(off as usize..)
+        .get(offset as usize..)
         .and_then(<[u8]>::first_chunk)
-        .map_or(0, |le| u32::from_le_bytes(*le))
+        .map_or(0, |le_bytes| u32::from_le_bytes(*le_bytes))
 }
 
-/// Writes `value` at `off` as little-endian (nothing outside `bytes`).
+/// Writes `value` at `offset` as little-endian (nothing outside `bytes`).
 #[inline(always)]
-fn wr16(bytes: &mut [u8], off: u32, value: u16) {
-    if let Some(le) = bytes
-        .get_mut(off as usize..)
+fn write_u16(bytes: &mut [u8], offset: u32, value: u16) {
+    if let Some(le_bytes) = bytes
+        .get_mut(offset as usize..)
         .and_then(<[u8]>::first_chunk_mut)
     {
-        *le = value.to_le_bytes();
+        *le_bytes = value.to_le_bytes();
     }
 }
 
-/// Writes `value` at `off` as little-endian (nothing outside `bytes`).
+/// Writes `value` at `offset` as little-endian (nothing outside `bytes`).
 #[inline(always)]
-fn wr32(bytes: &mut [u8], off: u32, value: u32) {
-    if let Some(le) = bytes
-        .get_mut(off as usize..)
+fn write_u32(bytes: &mut [u8], offset: u32, value: u32) {
+    if let Some(le_bytes) = bytes
+        .get_mut(offset as usize..)
         .and_then(<[u8]>::first_chunk_mut)
     {
-        *le = value.to_le_bytes();
+        *le_bytes = value.to_le_bytes();
     }
 }
 
 #[inline(always)]
-fn x16<const ENC: bool, IO: NumIO>(
-    off: u32,
-    pred: u16,
+fn code_u16<const IS_ENCODE: bool, IO: NumericIo>(
+    offset: u32,
+    prediction: u16,
     io: &mut IO,
-    k: usize,
-    c: NCtx,
+    stream_index: usize,
+    context: NumericContext,
 ) -> (u16, i32) {
-    if ENC {
-        let v = rd16(io.bytes(), off);
-        let r = i32::from(v.wrapping_sub(pred).cast_signed());
-        io.code(k, c, r);
-        (v, r)
+    if IS_ENCODE {
+        let value = read_u16(io.bytes(), offset);
+        let residual = i32::from(value.wrapping_sub(prediction).cast_signed());
+        io.code(stream_index, context, residual);
+        (value, residual)
     } else {
-        let r = io.code(k, c, 0);
-        let v = pred.wrapping_add(r.cast_unsigned() as u16);
-        wr16(io.bytes_mut(), off, v);
-        (v, i32::from(r as i16))
+        let residual = io.code(stream_index, context, 0);
+        let value = prediction.wrapping_add(residual.cast_unsigned() as u16);
+        write_u16(io.bytes_mut(), offset, value);
+        (value, i32::from(residual as i16))
     }
 }
 
 #[inline(always)]
-fn x32<const ENC: bool, IO: NumIO>(
-    off: u32,
-    pred: u32,
+fn code_u32<const IS_ENCODE: bool, IO: NumericIo>(
+    offset: u32,
+    prediction: u32,
     io: &mut IO,
-    k: usize,
-    c: NCtx,
+    stream_index: usize,
+    context: NumericContext,
 ) -> (u32, i32) {
-    if ENC {
-        let v = rd32(io.bytes(), off);
-        let r = v.wrapping_sub(pred).cast_signed();
-        io.code(k, c, r);
-        (v, r)
+    if IS_ENCODE {
+        let value = read_u32(io.bytes(), offset);
+        let residual = value.wrapping_sub(prediction).cast_signed();
+        io.code(stream_index, context, residual);
+        (value, residual)
     } else {
-        let r = io.code(k, c, 0);
-        let v = pred.wrapping_add(r.cast_unsigned());
-        wr32(io.bytes_mut(), off, v);
-        (v, r)
+        let residual = io.code(stream_index, context, 0);
+        let value = prediction.wrapping_add(residual.cast_unsigned());
+        write_u32(io.bytes_mut(), offset, value);
+        (value, residual)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Group {
-    PeO(u8),
-    PiA(u8),
-    PiO(u8),
-    Snd,
-    Te,
+    EntityOrigin(u8),
+    PlayerAngle(u8),
+    PlayerOrigin(u8),
+    Sound,
+    TempEntity,
     /// usercmd angles on the grid
-    Uc,
+    Usercmd,
 }
 
 /// Every group, in decoding order: sounds and temp entities last, as they
 /// read the origins the others write.
 pub(crate) const GROUPS: [Group; 12] = [
-    Group::PiA(1),
-    Group::PiA(0),
-    Group::PiO(0),
-    Group::PiO(1),
-    Group::PiO(2),
-    Group::PeO(0),
-    Group::PeO(1),
-    Group::PeO(2),
-    Group::PiA(2),
-    Group::Uc,
-    Group::Snd,
-    Group::Te,
+    Group::PlayerAngle(1),
+    Group::PlayerAngle(0),
+    Group::PlayerOrigin(0),
+    Group::PlayerOrigin(1),
+    Group::PlayerOrigin(2),
+    Group::EntityOrigin(0),
+    Group::EntityOrigin(1),
+    Group::EntityOrigin(2),
+    Group::PlayerAngle(2),
+    Group::Usercmd,
+    Group::Sound,
+    Group::TempEntity,
 ];
 
 impl Group {
     /// Stream ids by local index.
     pub(crate) fn streams(self) -> &'static [usize] {
         match self {
-            Self::PiO(0) => &[PI_OX, PI_F0],
-            Self::PiO(1) => &[PI_OX + 1, PI_F0 + 1],
-            Self::PiO(_) => &[PI_OX + 2, PI_F0 + 2],
-            Self::PiA(0) => &[PI_AP],
-            Self::PiA(1) => &[PI_AP + 1],
-            Self::PiA(_) => &[PI_AP + 2],
-            Self::PeO(0) => &[PE_OX, PE_F0],
-            Self::PeO(1) => &[PE_OX + 1, PE_F0 + 1],
-            Self::PeO(_) => &[PE_OX + 2, PE_F0 + 2],
-            Self::Uc => &[UC_A],
-            Self::Snd => &[SND_O],
-            Self::Te => &[TE_O],
+            Self::PlayerOrigin(0) => &[PI_OX, PI_F0],
+            Self::PlayerOrigin(1) => &[PI_OX + 1, PI_F0 + 1],
+            Self::PlayerOrigin(_) => &[PI_OX + 2, PI_F0 + 2],
+            Self::PlayerAngle(0) => &[PI_AP],
+            Self::PlayerAngle(1) => &[PI_AP + 1],
+            Self::PlayerAngle(_) => &[PI_AP + 2],
+            Self::EntityOrigin(0) => &[PE_OX, PE_F0],
+            Self::EntityOrigin(1) => &[PE_OX + 1, PE_F0 + 1],
+            Self::EntityOrigin(_) => &[PE_OX + 2, PE_F0 + 2],
+            Self::Usercmd => &[UC_A],
+            Self::Sound => &[SND_O],
+            Self::TempEntity => &[TE_O],
         }
     }
 
-    pub(crate) fn run<const ENC: bool, IO: NumIO>(self, recs: &Recs, io: &mut IO) {
+    pub(crate) fn run<const IS_ENCODE: bool, IO: NumericIo>(self, records: &Records, io: &mut IO) {
         match self {
-            Self::PiO(a) => {
-                let mut st = vec![Track::default(); 256];
-                let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.iter() {
-                    let (dn, dp) = times(&mut tm[r.num as usize], r.t);
-                    pi_origin_step::<ENC, IO>(
-                        a as usize,
-                        &mut st[r.num as usize],
-                        r,
-                        dn,
-                        dp,
+            Self::PlayerOrigin(axis) => {
+                let mut tracks = vec![Track::default(); 256];
+                let mut frame_times = vec![(0u32, 0u32); 256];
+                for record in records.player_infos.iter() {
+                    let (time_delta_now, time_delta_previous) =
+                        times(&mut frame_times[record.number as usize], record.time);
+                    pi_origin_step::<IS_ENCODE, IO>(
+                        axis as usize,
+                        &mut tracks[record.number as usize],
+                        record,
+                        time_delta_now,
+                        time_delta_previous,
                         io,
                         0,
                     );
                 }
             }
-            Self::PiA(a) => {
-                let mut st = vec![Track::default(); 256];
-                let mut tm = vec![(0u32, 0u32); 256];
-                for r in recs.pi.iter() {
-                    let (dn, dp) = times(&mut tm[r.num as usize], r.t);
-                    pi_angle_step::<ENC, IO>(a as usize, &mut st[r.num as usize], r, dn, dp, io, 0);
-                }
-            }
-            Self::PeO(a) => {
-                let mut st = vec![Track::default(); 2048];
-                for r in recs.pe.iter() {
-                    pe_origin_step::<ENC, IO>(
-                        a as usize,
-                        &mut st[(r.num & 2047) as usize],
-                        r,
+            Self::PlayerAngle(axis) => {
+                let mut tracks = vec![Track::default(); 256];
+                let mut frame_times = vec![(0u32, 0u32); 256];
+                for record in records.player_infos.iter() {
+                    let (time_delta_now, time_delta_previous) =
+                        times(&mut frame_times[record.number as usize], record.time);
+                    pi_angle_step::<IS_ENCODE, IO>(
+                        axis as usize,
+                        &mut tracks[record.number as usize],
+                        record,
+                        time_delta_now,
+                        time_delta_previous,
                         io,
                         0,
                     );
                 }
             }
-            Self::Uc => uc::<ENC, IO>(recs, io),
-            Self::Snd => snd::<ENC, IO>(recs, io),
-            Self::Te => te::<ENC, IO>(recs, io),
+            Self::EntityOrigin(axis) => {
+                let mut tracks = vec![Track::default(); 2048];
+                for record in records.packet_entities.iter() {
+                    pe_origin_step::<IS_ENCODE, IO>(
+                        axis as usize,
+                        &mut tracks[(record.number & 2047) as usize],
+                        record,
+                        io,
+                        0,
+                    );
+                }
+            }
+            Self::Usercmd => usercmd_angles::<IS_ENCODE, IO>(records, io),
+            Self::Sound => sound_origins::<IS_ENCODE, IO>(records, io),
+            Self::TempEntity => temp_entity_origins::<IS_ENCODE, IO>(records, io),
         }
     }
 }
@@ -261,252 +285,327 @@ impl Group {
 #[derive(Clone, Copy, Default)]
 struct Track {
     last: u16,
-    prev: u16,
-    prev2: u16,
-    res: i32,
+    previous: u16,
+    before_previous: u16,
+    residual: i32,
     // float-coord state (IEEE bit patterns)
-    flast: u32,
-    fprev: u32,
-    fres: i32,
+    float_last: u32,
+    float_previous: u32,
+    float_residual: i32,
     // entity times
-    t_last: u32,
+    last_time: u32,
 }
 
-/// Per-player frame times: returns (`dt_now`, `dt_prev`) and advances.
+/// Per-player frame times: returns (`time_delta_now`, `time_delta_previous`)
+/// and advances.
 #[inline(always)]
-fn times(tm: &mut (u32, u32), t: u32) -> (i32, i32) {
-    let (t_last, t_prev) = *tm;
-    *tm = (t, t_last);
+fn times(frame_times: &mut (u32, u32), time: u32) -> (i32, i32) {
+    let (last, previous) = *frame_times;
+    *frame_times = (time, last);
     (
-        t.wrapping_sub(t_last).cast_signed(),
-        t_last.wrapping_sub(t_prev).cast_signed(),
+        time.wrapping_sub(last).cast_signed(),
+        last.wrapping_sub(previous).cast_signed(),
     )
 }
 
 #[inline(always)]
-fn dd(now: i32, prev: i32) -> u8 {
-    ((now - prev).clamp(-3, 3) + 3).cast_unsigned() as u8
+fn time_delta_change(now: i32, previous: i32) -> u8 {
+    ((now - previous).clamp(-3, 3) + 3).cast_unsigned() as u8
 }
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn pi_origin_step<const ENC: bool, IO: NumIO>(
+fn pi_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     axis: usize,
-    s: &mut Track,
-    r: &PiRec,
-    dt_now: i32,
-    dt_prev: i32,
+    track: &mut Track,
+    record: &PlayerInfoRecord,
+    time_delta_now: i32,
+    time_delta_previous: i32,
     io: &mut IO,
-    k: usize,
+    stream_index: usize,
 ) {
-    let sent = r.flags & (1 << axis) != 0;
-    if r.fl & 1 != 0 {
-        if sent {
-            let off = r.off + 4 * (r.flags & ((1 << axis) - 1)).count_ones();
-            let pred = s.flast.wrapping_add(s.flast.wrapping_sub(s.fprev));
-            let c = NCtx {
-                f: [q(s.fres), axis as u8, 0, 0, 0, 0],
-            };
-            let (v, d) = x32::<ENC, IO>(off, pred, io, k + 1, c);
-            s.fprev = s.flast;
-            s.flast = v;
-            s.fres = d;
-        } else {
-            s.fprev = s.flast;
-            s.fres = 0;
-        }
-    } else {
-        let v = if sent {
-            let pred = pred_dt(s.last, s.prev, dt_now, dt_prev);
-            let off = r.off + 2 * (r.flags & ((1 << axis) - 1)).count_ones();
-            let vel = i32::from(s.last.wrapping_sub(s.prev).cast_signed());
-            let c = NCtx {
-                f: [
-                    q(s.res),
-                    q(vel),
-                    dt_now.clamp(0, 63).cast_unsigned() as u8,
-                    (r.flags & 7) as u8,
-                    dd(dt_now, dt_prev),
+    let is_sent = record.flags & (1 << axis) != 0;
+    if record.float_flags & 1 != 0 {
+        if is_sent {
+            let offset = record.offset + 4 * (record.flags & ((1 << axis) - 1)).count_ones();
+            let prediction = track
+                .float_last
+                .wrapping_add(track.float_last.wrapping_sub(track.float_previous));
+            let context = NumericContext {
+                features: [
+                    residual_bucket(track.float_residual),
+                    axis as u8,
+                    0,
+                    0,
+                    0,
                     0,
                 ],
             };
-            let (v, d) = x16::<ENC, IO>(off, pred, io, k, c);
-            s.res = d;
-            v
+            let (value, residual) =
+                code_u32::<IS_ENCODE, IO>(offset, prediction, io, stream_index + 1, context);
+            track.float_previous = track.float_last;
+            track.float_last = value;
+            track.float_residual = residual;
         } else {
-            s.res = 0;
-            s.last
+            track.float_previous = track.float_last;
+            track.float_residual = 0;
+        }
+    } else {
+        let value = if is_sent {
+            let prediction = predict_time_scaled(
+                track.last,
+                track.previous,
+                time_delta_now,
+                time_delta_previous,
+            );
+            let offset = record.offset + 2 * (record.flags & ((1 << axis) - 1)).count_ones();
+            let velocity = i32::from(track.last.wrapping_sub(track.previous).cast_signed());
+            let context = NumericContext {
+                features: [
+                    residual_bucket(track.residual),
+                    residual_bucket(velocity),
+                    time_delta_now.clamp(0, 63).cast_unsigned() as u8,
+                    (record.flags & 7) as u8,
+                    time_delta_change(time_delta_now, time_delta_previous),
+                    0,
+                ],
+            };
+            let (value, residual) =
+                code_u16::<IS_ENCODE, IO>(offset, prediction, io, stream_index, context);
+            track.residual = residual;
+            value
+        } else {
+            track.residual = 0;
+            track.last
         };
-        s.prev = s.last;
-        s.last = v;
+        track.previous = track.last;
+        track.last = value;
     }
 }
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn pi_angle_step<const ENC: bool, IO: NumIO>(
+fn pi_angle_step<const IS_ENCODE: bool, IO: NumericIo>(
     axis: usize,
-    s: &mut Track,
-    r: &PiRec,
-    dt_now: i32,
-    dt_prev: i32,
+    track: &mut Track,
+    record: &PlayerInfoRecord,
+    time_delta_now: i32,
+    time_delta_previous: i32,
     io: &mut IO,
-    k: usize,
+    stream_index: usize,
 ) {
-    let v = if r.flags & (8 << axis) != 0 {
-        let pred = pred_dt(s.last, s.prev, dt_now, dt_prev);
-        let cw = if r.fl & 1 != 0 { 4 } else { 2 };
-        let off = r.off
-            + cw * (r.flags & 7).count_ones()
-            + 2 * ((r.flags >> 3) & ((1 << axis) - 1)).count_ones();
-        let dprev = i32::from(s.prev.wrapping_sub(s.prev2).cast_signed());
-        let c = NCtx {
-            f: [
-                q(s.res),
-                q(dprev),
-                dt_now.clamp(0, 63).cast_unsigned() as u8,
-                ((r.flags >> 3) & 7) as u8,
-                dd(dt_now, dt_prev),
+    let value = if record.flags & (8 << axis) != 0 {
+        let prediction = predict_time_scaled(
+            track.last,
+            track.previous,
+            time_delta_now,
+            time_delta_previous,
+        );
+        let coord_width = if record.float_flags & 1 != 0 { 4 } else { 2 };
+        let offset = record.offset
+            + coord_width * (record.flags & 7).count_ones()
+            + 2 * ((record.flags >> 3) & ((1 << axis) - 1)).count_ones();
+        let previous_velocity = i32::from(
+            track
+                .previous
+                .wrapping_sub(track.before_previous)
+                .cast_signed(),
+        );
+        let context = NumericContext {
+            features: [
+                residual_bucket(track.residual),
+                residual_bucket(previous_velocity),
+                time_delta_now.clamp(0, 63).cast_unsigned() as u8,
+                ((record.flags >> 3) & 7) as u8,
+                time_delta_change(time_delta_now, time_delta_previous),
                 0,
             ],
         };
-        let (v, d) = x16::<ENC, IO>(off, pred, io, k, c);
-        s.res = d;
-        v
+        let (value, residual) =
+            code_u16::<IS_ENCODE, IO>(offset, prediction, io, stream_index, context);
+        track.residual = residual;
+        value
     } else {
-        s.res = 0;
-        s.last
+        track.residual = 0;
+        track.last
     };
-    s.prev2 = s.prev;
-    s.prev = s.last;
-    s.last = v;
+    track.before_previous = track.previous;
+    track.previous = track.last;
+    track.last = value;
 }
 
 #[inline(always)]
-fn pe_origin_step<const ENC: bool, IO: NumIO>(
+fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     axis: usize,
-    s: &mut Track,
-    r: &PeRec,
+    track: &mut Track,
+    record: &PacketEntityRecord,
     io: &mut IO,
-    k: usize,
+    stream_index: usize,
 ) {
-    let dt_now = r.t.wrapping_sub(s.t_last).cast_signed();
-    s.t_last = r.t;
-    let sent = r.bits & (1 << (2 * axis)) != 0;
-    if sent {
-        let off = r.origin_offs()[axis];
-        if r.bits & PE_FLOAT != 0 {
-            let pred = s.flast.wrapping_add(s.flast.wrapping_sub(s.fprev));
-            let c = NCtx {
-                f: [q(s.fres), axis as u8, 0, 0, 0, 0],
-            };
-            let (v, d) = x32::<ENC, IO>(off, pred, io, k + 1, c);
-            s.fprev = s.flast;
-            s.flast = v;
-            s.fres = d;
-        } else {
-            let vel = i32::from(s.last.wrapping_sub(s.prev).cast_signed());
-            let pred = s.last.wrapping_add(vel.cast_unsigned() as u16);
-            let ip = u8::from(r.bits & PE_INPREV != 0);
-            let c = NCtx {
-                f: [
-                    q(s.res),
-                    q(vel),
-                    r.model,
-                    ip | (r.ubits & 7) << 1,
-                    dt_now.clamp(0, 63).cast_unsigned() as u8,
+    let time_delta_now = record.time.wrapping_sub(track.last_time).cast_signed();
+    track.last_time = record.time;
+    let is_sent = record.bits & (1 << (2 * axis)) != 0;
+    if is_sent {
+        let offset = record.origin_offsets()[axis];
+        if record.bits & PE_FLOAT != 0 {
+            let prediction = track
+                .float_last
+                .wrapping_add(track.float_last.wrapping_sub(track.float_previous));
+            let context = NumericContext {
+                features: [
+                    residual_bucket(track.float_residual),
+                    axis as u8,
+                    0,
+                    0,
+                    0,
                     0,
                 ],
             };
-            let (v, d) = x16::<ENC, IO>(off, pred, io, k, c);
-            s.res = d;
-            s.prev = s.last;
-            s.last = v;
+            let (value, residual) =
+                code_u32::<IS_ENCODE, IO>(offset, prediction, io, stream_index + 1, context);
+            track.float_previous = track.float_last;
+            track.float_last = value;
+            track.float_residual = residual;
+        } else {
+            let velocity = i32::from(track.last.wrapping_sub(track.previous).cast_signed());
+            let prediction = track.last.wrapping_add(velocity.cast_unsigned() as u16);
+            let in_previous_bit = u8::from(record.bits & PE_IN_PREVIOUS != 0);
+            let context = NumericContext {
+                features: [
+                    residual_bucket(track.residual),
+                    residual_bucket(velocity),
+                    record.model,
+                    in_previous_bit | (record.update_bits & 7) << 1,
+                    time_delta_now.clamp(0, 63).cast_unsigned() as u8,
+                    0,
+                ],
+            };
+            let (value, residual) =
+                code_u16::<IS_ENCODE, IO>(offset, prediction, io, stream_index, context);
+            track.residual = residual;
+            track.previous = track.last;
+            track.last = value;
         }
     } else {
-        s.prev = s.last;
-        s.res = 0;
-        s.fprev = s.flast;
-        s.fres = 0;
+        track.previous = track.last;
+        track.residual = 0;
+        track.float_previous = track.float_last;
+        track.float_residual = 0;
     }
 }
 
 /// usercmd angles (FORMAT.md §7.6): per player and axis, the grid value
 /// against the linear prediction from that axis's last two grid values.
-fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
-    let mut st = vec![[Track::default(); 3]; 256];
-    for r in recs.uc.iter() {
-        let s = &mut st[r.num as usize];
-        for (a, t) in s.iter_mut().enumerate() {
-            if r.grid & (1 << a) == 0 {
+fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
+    let mut tracks = vec![[Track::default(); 3]; 256];
+    for record in records.usercmds.iter() {
+        let player_tracks = &mut tracks[record.number as usize];
+        for (axis, track) in player_tracks.iter_mut().enumerate() {
+            if record.grid & (1 << axis) == 0 {
                 continue;
             }
-            let off = r.off + 4 * a as u32;
-            let d = i32::from(t.last.wrapping_sub(t.prev).cast_signed());
-            let d2 = i32::from(t.prev.wrapping_sub(t.prev2).cast_signed());
-            let pred = t.last.wrapping_add(d.cast_unsigned() as u16);
-            let c = NCtx {
-                f: [q(t.res), q(d), q(d2), a as u8, 0, 0],
+            let offset = record.offset + 4 * axis as u32;
+            let velocity = i32::from(track.last.wrapping_sub(track.previous).cast_signed());
+            let previous_velocity = i32::from(
+                track
+                    .previous
+                    .wrapping_sub(track.before_previous)
+                    .cast_signed(),
+            );
+            let prediction = track.last.wrapping_add(velocity.cast_unsigned() as u16);
+            let context = NumericContext {
+                features: [
+                    residual_bucket(track.residual),
+                    residual_bucket(velocity),
+                    residual_bucket(previous_velocity),
+                    axis as u8,
+                    0,
+                    0,
+                ],
             };
-            let v = if ENC {
-                let v = crate::walk::on_grid(rd32(io.bytes(), off))
+            let value = if IS_ENCODE {
+                let value = crate::walk::on_grid(read_u32(io.bytes(), offset))
                     .expect("the walker saw it on the grid");
-                io.code(0, c, i32::from(v.wrapping_sub(pred).cast_signed()));
-                v
+                io.code(
+                    0,
+                    context,
+                    i32::from(value.wrapping_sub(prediction).cast_signed()),
+                );
+                value
             } else {
-                let v = pred.wrapping_add(io.code(0, c, 0).cast_unsigned() as u16);
-                wr32(io.bytes_mut(), off, crate::walk::grid_f32(v));
-                v
+                let value = prediction.wrapping_add(io.code(0, context, 0).cast_unsigned() as u16);
+                write_u32(io.bytes_mut(), offset, crate::walk::grid_f32(value));
+                value
             };
-            t.res = i32::from(v.wrapping_sub(pred).cast_signed());
-            t.prev2 = t.prev;
-            t.prev = t.last;
-            t.last = v;
+            track.residual = i32::from(value.wrapping_sub(prediction).cast_signed());
+            track.before_previous = track.previous;
+            track.previous = track.last;
+            track.last = value;
         }
     }
 }
 
 #[inline(always)]
-fn rd_ref(bytes: &[u8], r: u32) -> u16 {
-    if r == NONE { 0 } else { rd16(bytes, r) }
+fn read_reference(bytes: &[u8], reference: u32) -> u16 {
+    if reference == NO_OFFSET {
+        0
+    } else {
+        read_u16(bytes, reference)
+    }
 }
 
-fn snd<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
-    for r in recs.snd.iter() {
-        for i in 0..3u32 {
-            let pred = rd_ref(io.bytes(), r.refs[i as usize]);
-            let c = NCtx {
-                f: [i as u8 | r.kind << 2, r.num, 0, 0, 0, 0],
+fn sound_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
+    for record in records.sounds.iter() {
+        for axis in 0..3u32 {
+            let prediction = read_reference(io.bytes(), record.refs[axis as usize]);
+            let context = NumericContext {
+                features: [axis as u8 | record.kind << 2, record.number, 0, 0, 0, 0],
             };
-            x16::<ENC, IO>(r.off + 2 * i, pred, io, 0, c);
+            code_u16::<IS_ENCODE, IO>(record.offset + 2 * axis, prediction, io, 0, context);
         }
     }
 }
 
-fn te<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
+fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
     let mut last = [0u16; 3];
-    for r in recs.te.iter() {
-        if matches!(r.ty, 5 | 6 | 9) {
+    for record in records.temp_entities.iter() {
+        if matches!(record.kind, 5 | 6 | 9) {
             let mut start = [0u16; 3];
-            for i in 0..3u32 {
-                let pred = rd_ref(io.bytes(), r.refs[i as usize]);
-                let c = NCtx {
-                    f: [i as u8 | 1 << 2, r.ty, 0, 0, 0, 0],
+            for axis in 0..3u32 {
+                let prediction = read_reference(io.bytes(), record.refs[axis as usize]);
+                let context = NumericContext {
+                    features: [axis as u8 | 1 << 2, record.kind, 0, 0, 0, 0],
                 };
-                start[i as usize] = x16::<ENC, IO>(r.off + 2 * i, pred, io, 0, c).0;
+                start[axis as usize] =
+                    code_u16::<IS_ENCODE, IO>(record.offset + 2 * axis, prediction, io, 0, context)
+                        .0;
             }
-            for i in 0..3u32 {
-                let c = NCtx {
-                    f: [i as u8 | 2 << 2, r.ty, 0, 0, 0, 0],
+            for axis in 0..3u32 {
+                let context = NumericContext {
+                    features: [axis as u8 | 2 << 2, record.kind, 0, 0, 0, 0],
                 };
-                last[i as usize] = x16::<ENC, IO>(r.off + 6 + 2 * i, start[i as usize], io, 0, c).0;
+                last[axis as usize] = code_u16::<IS_ENCODE, IO>(
+                    record.offset + 6 + 2 * axis,
+                    start[axis as usize],
+                    io,
+                    0,
+                    context,
+                )
+                .0;
             }
         } else {
-            for i in 0..3u32 {
-                let c = NCtx {
-                    f: [i as u8, r.ty, 0, 0, 0, 0],
+            for axis in 0..3u32 {
+                let context = NumericContext {
+                    features: [axis as u8, record.kind, 0, 0, 0, 0],
                 };
-                last[i as usize] = x16::<ENC, IO>(r.off + 2 * i, last[i as usize], io, 0, c).0;
+                last[axis as usize] = code_u16::<IS_ENCODE, IO>(
+                    record.offset + 2 * axis,
+                    last[axis as usize],
+                    io,
+                    0,
+                    context,
+                )
+                .0;
             }
         }
     }
@@ -515,43 +614,45 @@ fn te<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn div_round_ref(a: i64, b: i64) -> i64 {
-        if (a < 0) == (b < 0) {
-            (a + b / 2) / b
+    use pretty_assertions::assert_eq;
+    fn div_round_ref(dividend: i64, divisor: i64) -> i64 {
+        if (dividend < 0) == (divisor < 0) {
+            (dividend + divisor / 2) / divisor
         } else {
-            -((-a + b / 2) / b)
+            -((-dividend + divisor / 2) / divisor)
         }
     }
     #[test]
     fn div_round_matches_reference() {
-        let mut x = 12345u64;
-        for b in 1..600i32 {
+        let mut rng_state = 12345u64;
+        for divisor in 1..600i32 {
             for _ in 0..2000 {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                let a = (x % (2 * 32768 * 32767) as u64).cast_signed() - 32768 * 32767;
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 7;
+                rng_state ^= rng_state << 17;
+                let dividend =
+                    (rng_state % (2 * 32768 * 32767) as u64).cast_signed() - 32768 * 32767;
                 assert_eq!(
-                    i64::from(div_round(a as i32, b)),
-                    div_round_ref(a, i64::from(b)),
-                    "{a} / {b}"
+                    i64::from(div_round(dividend as i32, divisor)),
+                    div_round_ref(dividend, i64::from(divisor)),
+                    "{dividend} / {divisor}"
                 );
             }
-            for a in [
+            for dividend in [
                 -32768 * 32767,
                 32767 * 32767,
                 0,
                 1,
                 -1,
-                b / 2,
-                -(b / 2),
-                b,
-                -b,
+                divisor / 2,
+                -(divisor / 2),
+                divisor,
+                -divisor,
             ] {
                 assert_eq!(
-                    i64::from(div_round(a, b)),
-                    div_round_ref(i64::from(a), i64::from(b)),
-                    "{a} / {b}"
+                    i64::from(div_round(dividend, divisor)),
+                    div_round_ref(i64::from(dividend), i64::from(divisor)),
+                    "{dividend} / {divisor}"
                 );
             }
         }

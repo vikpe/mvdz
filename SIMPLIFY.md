@@ -96,6 +96,7 @@ A format simple enough to stay unchanged for 10+ years.
 | Output files (tool) | Written directly with `File::create`, removed when the write fails; no temporary file, no fsync | As gzip and zstd; fsync cost 2.9 ms a file (18 % of a batch decompression). Ceiling: a failed `-f` overwrite loses the old file, a killed process leaves a partial one |
 | Crates | A virtual workspace (`mvdz_rust/Cargo.toml`: members, shared dependency pins, lints, profiles) with the library `mvdz` in `mvdz/` and the tool `mvdz_cli` (binary `mvdz`) in `mvdz_cli/` | Not every user needs a CLI: a library user builds no tool code. Directory names match crate names (rust AGENTS rule) |
 | Library scope | No file writing, no JSON: `mvdz info`'s JSON is built in `mvdz_cli/src/main.rs` | Not the codec's job |
+| Public API | Every module is private. Public: `compress`, `compress_info`, `compress_any` (any bytes, for `--allow-non-demo` and fuzzing), `check_demo`, `decompress`, `decompress_with`, `decompress_stream`, `Reader`, `read_info`, `read_info_with`, `is_mvdz`, `Config`, `Info`, `FileInfo`, `Header`, `Index`, `IndexSeg`, `Limits`, `Error`, `Result`, `VERSION`; `Proto` hidden, for the fuzz generator only. Tests that build files by hand are unit tests in `src/tests/` | What a crate exposes is its contract; the tool keeps its own job loop |
 | Tool exit status | `main` returns `ExitCode` (2 bad command line, 1 a failed file, 0 when standard output closes early); no `process::exit` | Errors return to `main` instead of ending the process where they occur |
 | Dependencies | Library: `sha2`, `crc32fast`, `miniz_oxide`. No rayon (the scoped-thread `par_map` stays), no `mimalloc`, no built-in profiler | rayon: no gain that repeats, 6 more crates. mimalloc: no gain on glibc, 2-4 times the memory |
 
@@ -286,49 +287,41 @@ Rule: between commits no test may fail that is not on this list.
 
 | Tests | Why they fail | Resolved by |
 |---|---|---|
-| `closed_stdout_is_quiet`, `non_demos_are_refused`, `outputs_named_after_inputs` (cli), `vectors_decode` | read the vectors in `tests/vectors/`, written by rc.4 in the old format | regenerating the vectors |
+| `closed_stdout_is_quiet`, `non_demos_are_refused`, `outputs_named_after_inputs` (`mvdz_cli`), `tests::vectors::vectors_decode` (`mvdz`) | read the vectors in `tests/vectors/`, written by rc.4 in the old format | regenerating the vectors |
 
 ## Open tasks
 
 Code:
 
-1. Naming, module by module: spell names out unless well known (`crc`, `id`, `ms`):
-   `dur`, `durs`, `Sec`, `seg`, `hdr`, `wk`, `st`, `gi`, `sid`, `ctx`, `cfg`, `tm`,
-   `nums`, `recs`, `lay`, `chk` and their kind; about 620 single-letter names, about 20
-   booleans without a prefix, 7 bit constants written as hex. Delete each comment the
-   new name makes redundant. Removes the allow `many_single_char_names`. No logic
-   changes in the same commit.
-2. `pretty_assertions` in the tests.
-3. Truncating casts: 86 in the library under one allow; about 37 are positions
+1. Naming: mostly done 2026-11-21 (not committed). Local and file-private names in every
+   file, and the shared types, fields, constants and methods (e.g. `Section`,
+   `SegmentHeader`, `ByteReader`, record types and fields, `Group` variants, protocol
+   flags with underscores, `IS_ENCODE`, range-coder `Encoder`/`Decoder`/`Probability`).
+   Left: the C names as comments on the renamed protocol constants (`proto.rs`); the
+   allow `many_single_char_names` in `Cargo.toml` (check whether it can go); stream-id
+   constants (`PI_OX`, ...) kept on purpose, they mirror the stream names in FORMAT.md.
+2. Truncating casts: 86 in the library under one allow; about 37 are positions
    narrowed from `usize` to `u32` (a `u32` walker cursor would remove them; hot loop:
    measure).
-4. Eight `#[doc(hidden)] pub` modules (`coder`, `deflate`, `encode`, `format`, `proto`,
-   `segment`, `streams`, `util`) are public for tests that build files by hand and for
-   the tool (`util::par_map`, `util::threads`, `encode::compress`, `format::VERSION`);
-   moving those tests into the crate and re-exporting the tool's items lets every
-   module be private.
-5. The work budget (`Limits::work_per_byte`): with segments at 1 MiB and models at
+3. The work budget (`Limits::work_per_byte`): with segments at 1 MiB and models at
    16 MiB the work a file can demand is bounded by its size; maybe only the memory limit
    is needed. Check what the hostile-file tests rely on first.
-6. Pass 2 of the encoder is an inline closure; pass 1 is a named function (`train`).
-   Name pass 2.
-7. Public with no outside user: `Info::streams`, `streams::name`. `benches/codec.rs`:
-   which demos (set8 is 18.9 MB; 6 of its 8 are in the download).
-8. Streaming input for the encoder (read the demo twice instead of holding it): peak
+4. `benches/codec.rs`: which demos (set8 is 18.9 MB; 6 of its 8 are in the download).
+5. Streaming input for the encoder (read the demo twice instead of holding it): peak
    drops by the raw size; 250 MB works today at about 410 MiB.
 
 API gaps:
 
-9. Part of a file (a time range, the last segment) cannot be decoded from outside the
+6. Part of a file (a time range, the last segment) cannot be decoded from outside the
     crate. If wanted: one public function, and each segment's starting protocol state.
-10. `Reader::header` has no test.
-11. No regression test for the `Budget::unlimited()` bug (needs a demo whose models
+7. `Reader::header` has no test.
+8. No regression test for the `Budget::unlimited()` bug (needs a demo whose models
     take more than 2^20 decisions to build).
 
 Format and specification:
 
-12. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
-13. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
+9. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
+10. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
     sharing, attachments, streaming (sections 3, 4, 5.3, 10, 11) and the C interface.
     State: the 1 MiB segment rule (it still gives 4 GiB and "only the last segment may
     end inside a frame"); `MAX_SEGMENTS` as a 16 GiB demo limit; section 12 rule 1 as
@@ -337,17 +330,17 @@ Format and specification:
     a model no segment uses is allowed and ignored.
     Stale: line 668 (decode waves), line 357 (`FileInfo::to_json`, now `info_json` in
     `mvdz_cli/src/main.rs`).
-14. README: passages pointing at removed sections and features (CLI options, API
+11. README: passages pointing at removed sections and features (CLI options, API
     examples, the fuzz target list).
-15. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
-16. Later: implementations in C, Go and other languages from the settled
+12. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
+13. Later: implementations in C, Go and other languages from the settled
     specification, with a shared test suite.
 
 Not measured:
 
-17. Size of a decoder-only wasm build.
-18. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-19. rayon on the final code (optional).
+14. Size of a decoder-only wasm build.
+15. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
+16. rayon on the final code (optional).
 
 ## Verification
 

@@ -4,14 +4,14 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let l = mvdz::Limits {
+    let limits = mvdz::Limits {
         memory: 256 << 20,
         ..Default::default()
     };
-    let a = mvdz::decompress_with(data, 1, &l);
-    let b = mvdz::decompress_with(data, 2, &l);
-    assert_eq!(a.is_ok(), b.is_ok());
-    if let (Ok(a), Ok(b)) = (a, b) {
-        assert!(a == b);
+    let one_thread = mvdz::decompress_with(data, 1, &limits);
+    let two_threads = mvdz::decompress_with(data, 2, &limits);
+    assert_eq!(one_thread.is_ok(), two_threads.is_ok());
+    if let (Ok(one_thread), Ok(two_threads)) = (one_thread, two_threads) {
+        assert!(one_thread == two_threads);
     }
 });
