@@ -5,7 +5,6 @@
 mod common;
 use common::*;
 use mvdz::budget::Limits;
-use mvdz::capi::*;
 use mvdz::format::*;
 use mvdz::util::put_uv;
 use mvdz::Error;
@@ -99,11 +98,6 @@ fn r_m3_json_limit() {
         fi.to_json_with(j.len() - 1).unwrap_err(),
         Error::Limit("file information rendering")
     );
-    let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
-    assert_eq!(
-        unsafe { mvdz_info_json_memory(f.as_ptr() as *const _, f.len(), 64, &mut out, &mut n) },
-        MVDZ_E_LIMIT
-    );
 }
 
 /// R-M4: a long run of tiny segments is charged to the budget: a
@@ -129,65 +123,6 @@ fn r_m4_section_bookkeeping() {
     let mut r = mvdz::Reader::new(Cursor::new(&f), 1, &l).unwrap();
     let mut out = Vec::new();
     assert!(std::io::Read::read_to_end(&mut r, &mut out).is_err());
-}
-
-struct Reent {
-    c: Cursor<Vec<u8>>,
-    handle: *mut std::ffi::c_void,
-    inner: Vec<i64>,
-}
-
-unsafe extern "C" fn re_read(
-    user: *mut std::ffi::c_void,
-    buf: *mut std::ffi::c_void,
-    n: usize,
-) -> std::ffi::c_longlong {
-    let u = unsafe { &mut *(user as *mut Reent) };
-    if !u.handle.is_null() {
-        // calls on the handle from inside its own callback
-        u.inner.push(unsafe { mvdz_raw_size(u.handle) });
-        unsafe { mvdz_close(u.handle) };
-    }
-    let b = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, n) };
-    std::io::Read::read(&mut u.c, b).map_or(-1, |k| k as i64)
-}
-
-/// R-M6: a callback that calls back into its own handle gets an error
-/// instead of a deadlock; closing from inside is ignored.
-#[test]
-fn r_m6_reentrant_callbacks() {
-    let (demo, f) = base();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut u = Box::new(Reent {
-            c: Cursor::new(f),
-            handle: std::ptr::null_mut(),
-            inner: Vec::new(),
-        });
-        let up = &mut *u as *mut Reent as *mut std::ffi::c_void;
-        let mut err = 0;
-        let r = unsafe { mvdz_open_callbacks(Some(re_read), up, 1, 0, &mut err) };
-        assert!(!r.is_null());
-        u.handle = r;
-        let mut out = Vec::new();
-        let mut buf = vec![0u8; 4096];
-        loop {
-            let n = unsafe { mvdz_read(r, buf.as_mut_ptr() as *mut _, buf.len()) };
-            assert!(n >= 0, "read {n}");
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n as usize]);
-        }
-        unsafe { mvdz_close(r) };
-        tx.send((out, u.inner.clone())).unwrap();
-    });
-    let (out, inner) = rx.recv_timeout(Duration::from_secs(60)).expect("deadlock");
-    assert_eq!(out, demo);
-    assert!(
-        !inner.is_empty() && inner.iter().all(|&x| x == MVDZ_E_INVALID as i64),
-        "{inner:?}"
-    );
 }
 
 /// A demo of a dem_read frame holding one svc_nop, then `n` dem_set
@@ -235,13 +170,6 @@ fn sha256_is_not_checked_on_decode() {
     let mut o = Vec::new();
     std::io::Read::read_to_end(&mut r, &mut o).unwrap();
     assert_eq!(o, d);
-    let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
-    assert_eq!(
-        unsafe { mvdz_decompress(other.as_ptr() as *const _, other.len(), 1, 0, &mut out, &mut n) },
-        MVDZ_OK
-    );
-    assert_eq!(unsafe { std::slice::from_raw_parts(out, n) }, &d[..]);
-    unsafe { mvdz_free(out as *mut _, n) };
     // one byte of an untransformed segment changed: the segment CRC catches it
     let demo = synthetic(&[], false);
     let c = untransformed(&[demo.clone(), vec![0; 5000]].concat(), &cfg(0));

@@ -13,7 +13,6 @@
 
 pub mod api;
 pub mod budget;
-pub mod capi;
 pub mod coder;
 pub mod decode;
 pub mod deflate;

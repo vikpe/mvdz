@@ -45,10 +45,9 @@ jobs:
             dir=target; [ -n "$variant" ] && dir=target-v3
             name="mvdz-$version-$TARGET$variant"
             mkdir "$name"
-            cp "$dir/$TARGET/release/mvdz" "$dir/$TARGET/release/libmvdz.a" "$name/"
+            cp "$dir/$TARGET/release/mvdz" "$name/"
             strip "$name/mvdz"
-            strip --strip-debug "$name/libmvdz.a"
-            cp include/mvdz.h LICENSE README.md "$name/"
+            cp LICENSE README.md "$name/"
             tar czf "dist/$name.tar.gz" "$name"
           done
           (cd dist && sha256sum *.tar.gz > SHA256SUMS)

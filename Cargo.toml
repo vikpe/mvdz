@@ -11,10 +11,7 @@ documentation = "https://github.com/galfthan/mvdz"
 readme = "README.md"
 keywords = ["quakeworld", "mvd", "demo", "compression", "rans"]
 categories = ["compression", "game-development", "command-line-utilities"]
-exclude = ["/fuzz", "/interop", "/scripts", "/.github"]
-
-[lib]
-crate-type = ["rlib", "staticlib", "cdylib"]
+exclude = ["/fuzz", "/scripts", "/.github"]
 
 [dependencies]
 sha2 = "0.10"

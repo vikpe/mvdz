@@ -28,13 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # for the Go conformance decoder (tests/interop.rs)
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: interop/specdec/go.mod
-          cache-dependency-path: interop/specdec/go.sum
-      # includes the C example (tests/c_api.rs) and the Go decoder over
-      # the vectors; tests that need real demos skip without MVDZ_TEST_DATA
+      # tests that need real demos skip without MVDZ_TEST_DATA
       - run: cargo test --profile fast
       - run: cargo test --profile fast --features pure-zstd
 

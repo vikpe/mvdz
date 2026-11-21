@@ -8,18 +8,18 @@ carries the demo's metadata (identity hash, server info, roster, a census
 of its contents, wall-clock time) so catalogues can read it without
 decoding. Files can also carry attachments stored beside the demo.
 
-It comes as a command-line tool, a Rust library, a C library (static or
-shared, for engines such as ezQuake and FTE) and builds for WebAssembly.
-The format is specified in [FORMAT.md](FORMAT.md), precisely enough to
-write an independent decoder; [`interop/specdec`](interop/specdec) is one,
-in Go, written from the specification as a conformance check, and
-`tests/vectors/` holds valid and hostile test files.
+It comes as a command-line tool and a Rust library, and builds for
+WebAssembly. The format is specified in [FORMAT.md](FORMAT.md), precisely
+enough to write an independent decoder, and `tests/vectors/` holds valid
+and hostile test files. The work now is the specification and this Rust
+implementation; implementations in C, Go and other languages follow once
+the format is settled.
 
 **Status: 1.0.0-rc.4, a release candidate for comments.** The file format
 may still change before 1.0: files written by a release candidate are not
 guaranteed to be readable by 1.0, so keep the original `.mvd` files for
 now. Later additions after 1.0 will use the forward-compatible extension
-points of FORMAT.md. A Go library is planned. Media attachments (voice,
+points of FORMAT.md. Media attachments (voice,
 commentary, transcripts) are
 [proposed for version 2, open for discussion](proposals/media-attachments.md).
 
@@ -34,19 +34,14 @@ round-trips.
 
 ## What reads .mvdz today?
 
-The `mvdz` command-line tool, the Rust library, the C library and the
-WebAssembly build. **No QuakeWorld client plays `.mvdz` files yet**: to
-watch one, decompress it to `.mvd` first (`mvdz decompress game.mvdz
-game.mvd`). A client or demo player can add support through the C
-library ([C](#c)): decode at load time, which takes about 0.3 to 0.5 s for
-a 4on4 demo, or, for a segmented file, decode segment by segment through
-its own file system callbacks as it plays.
+The `mvdz` command-line tool, the Rust library and the WebAssembly build.
+**No QuakeWorld client plays `.mvdz` files yet**: to watch one, decompress
+it to `.mvd` first (`mvdz decompress game.mvdz game.mvd`).
 
 ## Install and build
 
 **Linux binaries.** Each release on GitHub has static Linux binaries
-(x86-64, any distribution), with the C library and header beside the
-`mvdz` tool, and a `SHA256SUMS` file:
+(x86-64, any distribution) of the `mvdz` tool, and a `SHA256SUMS` file:
 
 | download | for |
 |---|---|
@@ -58,7 +53,7 @@ and a C compiler (for the bundled libzstd).
 
 ```
 git clone https://github.com/galfthan/mvdz && cd mvdz
-cargo build --release            # target/release/mvdz, libmvdz.a, libmvdz.so
+cargo build --release            # target/release/mvdz
 cargo install --path .           # or: put mvdz on your PATH
 ```
 
@@ -290,49 +285,6 @@ input; they return an error. Every size a file declares is bounded by the
 bytes actually present (FORMAT.md §9), and `Limits` caps the memory one
 decode may use.
 
-## C
-
-`cargo build --release` builds `target/release/libmvdz.a` and `libmvdz.so`;
-the interface is [`include/mvdz.h`](include/mvdz.h). Link the static
-library with `-lpthread -ldl -lm`, or the shared one with `-lmvdz` (and
-`LD_LIBRARY_PATH` or an rpath). The release profile keeps debug info for
-profiling; `strip` the libraries for distribution. The release archives
-carry only the static library; the shared one is built from source and
-has no SONAME (packagers can add one with `RUSTFLAGS="-C
-link-arg=-Wl,-soname,libmvdz.so.1"`).
-
-```c
-#include "mvdz.h"
-
-/* decode through the engine's VFS read callback, in order */
-int err;
-mvdz_reader *r = mvdz_open_callbacks(vfs_read, file, 2, 0, &err);
-if (!r) { printf("%s\n", mvdz_strerror(err)); return; }
-long long n;
-while ((n = mvdz_read(r, buf, sizeof buf)) > 0) feed_demo(buf, n);
-mvdz_close(r);
-
-/* record straight to .mvdz; segment 0 = 1 MiB for the writer */
-mvdz_writer *w = mvdz_writer_open(vfs_write, out, MVDZ_LEVEL_NORMAL, 0, 1, &err);
-mvdz_writer_set_ext(w, "source", "myserver", 8);  /* optional metadata */
-mvdz_writer_write(w, data, len);          /* as the demo is recorded */
-mvdz_writer_finish(w);                     /* or mvdz_writer_abort(w) */
-```
-
-Handles are ids (a stale handle is an error, not a crash), errors are
-sticky, buffers are freed with `mvdz_free` (but the static strings of
-`mvdz_version` and `mvdz_strerror` never are), and callbacks must return
-normally (no `longjmp`) and must not call back into their own handle.
-`mvdz_writer_write` codes each segment on the calling thread when it
-fills, about 0.15 s per MiB at the normal level (0.08 s at the fast
-level): a server should feed the writer from a recording thread, not
-from its frame loop.
-Attachments are listed in the JSON of `mvdz_info_json`, read with
-`mvdz_attachment_read` (which needs both read and seek callbacks), and
-filtered into a copy with `mvdz_attachments_export`.
-`examples/c/example.c` shows every call; the test `tests/c_api.rs`
-compiles and runs it.
-
 ## WebAssembly
 
 The library builds for `wasm32-unknown-unknown` and `wasm32-wasip1`
@@ -345,8 +297,7 @@ reads them. The format's resource rules bound memory by the input, and
 ## Tests
 
 `cargo test --release` runs the unit tests, the golden vectors (valid and
-hostile files through every reader including the C interface, and through
-the Go conformance decoder when Go is installed), round trips at both
+hostile files through every reader), round trips at both
 levels, segmented and streamed, corrupt-input and hostile-file tests,
 metadata and attachment tests, and the regressions of the pre-release
 reviews. `cargo test --features pure-zstd` runs them with the pure-Rust
@@ -357,7 +308,7 @@ real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors (it needs the sample
 demos they were made from). Fuzz targets are in `fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
-`stream_writer`, `capi`, `compress_rt` and the structure-aware `gen_rt`).
+`stream_writer`, `compress_rt` and the structure-aware `gen_rt`).
 The feature `scalar` forces the portable code paths (as on wasm).
 
 ## FAQ
@@ -391,8 +342,7 @@ alike.
 
 Issues and pull requests are welcome on GitHub. Please run `cargo fmt`,
 `cargo clippy --all-targets` and `cargo test` (CI runs them on Linux, with
-the pure-zstd tests, a wasm build, the C example, the Go decoder and the
-minimum Rust version). Changes to the file format go through FORMAT.md first; larger
+the pure-zstd tests, a wasm build and the minimum Rust version). Changes to the file format go through FORMAT.md first; larger
 ideas fit `proposals/`. See [CHANGELOG.md](CHANGELOG.md) for releases.
 Pull requests from automated agents without a human author who reviews
 and answers for them are closed.

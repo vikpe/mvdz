@@ -2,7 +2,6 @@
 //! the sample demos (skipped when absent) and the every-reader check.
 #![allow(dead_code)]
 
-use mvdz::capi::*;
 use mvdz::format::*;
 use mvdz::Config;
 use std::io::{Cursor, Read};
@@ -321,34 +320,6 @@ impl Read for Dribble<'_> {
     }
 }
 
-unsafe extern "C" fn cb_read(
-    user: *mut std::ffi::c_void,
-    buf: *mut std::ffi::c_void,
-    n: usize,
-) -> std::ffi::c_longlong {
-    let c = unsafe { &mut *(user as *mut Cursor<&[u8]>) };
-    let b = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, n) };
-    c.read(b).map_or(-1, |k| k as i64)
-}
-
-fn capi_read_all(r: *mut std::ffi::c_void) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    let mut buf = vec![0u8; 50_000];
-    loop {
-        let n = unsafe { mvdz_read(r, buf.as_mut_ptr() as *mut _, buf.len()) };
-        if n < 0 {
-            unsafe { mvdz_close(r) };
-            return Err(format!("capi {n}"));
-        }
-        if n == 0 {
-            break;
-        }
-        out.extend_from_slice(&buf[..n as usize]);
-    }
-    unsafe { mvdz_close(r) };
-    Ok(out)
-}
-
 /// Decodes `b` with every reader: (reader, result).
 pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     let e = |x: mvdz::Error| x.to_string();
@@ -373,43 +344,6 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
             Ok(std::mem::take(&mut out))
         });
     v.push(("sequential dribble", r));
-    let mut err = 0;
-    let r = unsafe { mvdz_open_memory(b.as_ptr() as *const _, b.len(), 1, 0, &mut err) };
-    v.push((
-        "c memory",
-        if r.is_null() {
-            Err(format!("capi {err}"))
-        } else {
-            capi_read_all(r)
-        },
-    ));
-    let mut cur = Cursor::new(b);
-    let u = &mut cur as *mut Cursor<&[u8]> as *mut std::ffi::c_void;
-    let r = unsafe { mvdz_open_callbacks(Some(cb_read), u, 1, 0, &mut err) };
-    v.push((
-        "c sequential",
-        if r.is_null() {
-            Err(format!("capi {err}"))
-        } else {
-            capi_read_all(r)
-        },
-    ));
-    let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
-    let rc = unsafe { mvdz_decompress(b.as_ptr() as *const _, b.len(), 2, 0, &mut out, &mut n) };
-    v.push((
-        "c decompress",
-        if rc != 0 {
-            Err(format!("capi {rc}"))
-        } else {
-            let d = if n == 0 {
-                Vec::new()
-            } else {
-                unsafe { std::slice::from_raw_parts(out, n) }.to_vec()
-            };
-            unsafe { mvdz_free(out as *mut _, n) };
-            Ok(d)
-        },
-    ));
     v
 }
 

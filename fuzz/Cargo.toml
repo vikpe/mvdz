@@ -34,12 +34,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "capi"
-path = "fuzz_targets/capi.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "gen_rt"
 path = "fuzz_targets/gen_rt.rs"
 test = false

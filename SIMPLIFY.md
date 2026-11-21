@@ -15,7 +15,7 @@ container fields, five speed changes. See Decisions and Results per change.
 Also done: one fallback (ad53e50; see "One fallback" under Results per change), and
 measured at 1, 4 and 12 threads and in WebAssembly (see "Threads and WebAssembly").
 
-Tests: 44 pass, 5 fail, all five on the list under "Known failing tests".
+Tests: 41 pass, 4 fail, all four on the list under "Known failing tests".
 
 Whole session against `master`: see "Whole session" under Results per change.
 
@@ -25,8 +25,8 @@ Next, in this order (nothing below is started):
    specify).
 2. The other open questions (5 to 7, 10, 11).
 3. Finishing work, once the format no longer changes: regenerate the test vectors
-   (clears 8 of the 9 failing tests), update the Go decoder (`interop/specdec`), rewrite
-   FORMAT.md and README, update BENCHMARKS.md.
+   (clears the 4 failing tests), rewrite FORMAT.md and README, update BENCHMARKS.md.
+   Implementations in C, Go and other languages come after that (see Decisions).
 
 How changes are measured from the fallback change on: `mvdz bench -r 3 -j 4` on the 500
 demos listed in `~/dev/mvdz-bench/rand500.txt` (1,786,252,992 bytes raw; drawn by
@@ -67,6 +67,7 @@ All implemented unless marked.
 | Live QTV streams | Not compressed | 4-11 KB/s raw does not justify it |
 | QWD demos | Not supported; MVD only | Needs a second frame walker and a second playerinfo model in every port; 75 of 2,200 archive files (3.4 %) |
 | Streaming writer | Removed; finished `.mvd` only | One encoder path; shared models always available |
+| C interface and Go decoder | Removed (2026-11-21): `src/capi.rs`, `include/mvdz.h`, `examples/c`, `interop/specdec` and their tests and fuzz target; the crate builds as a Rust library only | The work is the specification and one very good Rust implementation; C, Go and other implementations are written once the format is settled, from the specification and a shared test suite |
 | Seeking reader | Removed (2026-11-21): `Reader::open`, `seek_time`, `seek_segment`, `mvdz_seek_time`, `mvdz_seek_segment`, `mvdz_segment_count`, the seek callback of `mvdz_open_callbacks`. One reader, in order | A demo has no keyframes, so playback cannot start mid-file; part of a file is read by listing the segments and decoding the ones wanted; one reading mode for every port |
 | Gzip input and output | Removed (2026-11-21): library, C interface and tool take and give raw demos; a gzip file is refused with a message | Not part of the format; every user has gzip (`gzip -dc x.mvd.gz \| mvdz compress - x.mvdz`); one input type for every port |
 | Structural transform | Keep | Most of the compression (zstd -19 alone: 0.553 of raw) |
@@ -166,8 +167,7 @@ All Viktor's to decide. Of those left, 4, 9, 12 and 13 can change the file forma
 2. The whole-demo CRC pass: decided, it stays (see Decisions).
 3. Checksum algorithm: decided, the CRC-32 of zlib (see "Checksum: CRC-32").
 4. The stream table inside a chunk: fixed width too? Not measured.
-5. The C interface: keep it here, move it to its own crate, or remove it. 659 lines and
-   60 of the 85 `unsafe` occurrences; whether any engine links it is not known.
+5. The C interface: decided, removed (see Decisions).
 6. Encoder self-check default: on (as now) or off like `flac -V`. Recommended: on.
 7. Gzip input (`.mvd.gz`) accepted by compress? Decided: no (see Decisions).
 8. Thread count: decided and implemented (see Decisions).
@@ -451,8 +451,9 @@ encode; release, fat LTO, `panic = "abort"`, stripped.
 - All 500 decode to the original bytes; the files the WebAssembly encoder writes are
   identical to the native ones (341,169,945 bytes).
 - The module is the whole library: the exported functions of the C interface keep the
-  encoder in. Without the encode export it is 662 bytes smaller. A decoder-only size
-  needs the C interface behind a feature (open question 5).
+  encoder in. Without the encode export it is 662 bytes smaller. (The C interface has
+  since been removed: a decoder-only size can now be measured from a wrapper that
+  exports decoding alone.)
 - One checksum pass as a share of a decode (speeds from "Checksum candidates"), no SIMD
   and SIMD: CRC-32C table 2.4 % and 3.2 %, CRC-32 of zlib 2.3 % and 3.1 %, XXH64 0.32 %
   and 0.43 %, XXH3-64 0.38 % and 0.35 %. A decode makes two passes (each chunk, the
@@ -630,7 +631,6 @@ keys, unknown sections, demoinfo sharing).
 | Tests | Passed on rc.4 | Why they fail | Resolved by |
 |---|---|---|---|
 | `closed_stdout_is_quiet`, `non_demos_are_refused`, `outputs_named_after_inputs` (cli), `vectors_decode` | yes | read the vectors in `tests/vectors/`, written by rc.4 in the old format | regenerating the vectors after the last format change |
-| `c_example_builds_and_runs` | no | fails on unmodified rc.4 | outside this work |
 
 Off the list since: `r_m2_padded_model` and `trusted_mode` (rewritten for the new
 container), `ratio_limit_fallback` (passes since the fast level went), `c_handles`
@@ -754,7 +754,7 @@ estimates, not a rebuilt codec. Change in file size if the model is dropped:
 
 Not measured yet:
 
-1. The size of a decoder-only wasm build (needs the C interface behind a feature).
+1. The size of a decoder-only wasm build (the C interface is gone: measurable now).
 2. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
 3. XXH3 without SIMD from the reference C code (a download was blocked; the WebAssembly
    run without SIMD stands in for it).
@@ -768,17 +768,18 @@ After the format decisions (open questions 4, 9, 12, 13):
 
 1. Regenerate the vectors in `tests/vectors/`; hostile vectors for the header, checksums
    and chunk sums are already generated by `tests/vectors.rs`.
-2. Go conformance decoder (`interop/specdec`): the new container, `compress/flate` in
-   place of `klauspost/compress`, the 20 streams as blobs, no model in a chunk.
-3. FORMAT.md: rewrite the container (§2); delete metadata, index, demoinfo sharing,
-   attachments and streaming (§3, §4, §5.3, §10, §11); adjust the rest. README and
-   `include/mvdz.h` comments that still point at removed sections.
-4. BENCHMARKS.md from the final measurements.
+2. FORMAT.md: rewrite the container (§2); delete metadata, index, demoinfo sharing,
+   attachments and streaming (§3, §4, §5.3, §10, §11) and what it says of the C
+   interface; adjust the rest. README passages that still point at removed sections.
+3. BENCHMARKS.md from the final measurements.
+4. Later, from the settled specification: implementations in C, Go and other
+   languages, with a test suite they share.
 
 ## Verification
 
 - Every benchmark sample round-trips byte for byte (2,000 of 2,000 in every run so far).
-- The Rust and Go decoders agree on every vector (after the Go decoder is updated).
+- A second, independent decoder agrees on every vector (once one is written from the
+  settled specification; the Go decoder that did this for rc.4 is removed).
 - Refused: truncated file, dropped or swapped chunk, trailing bytes, a flipped bit in
   a chunk, wrong header size, duration or hash.
 - Refused: a chunk's blob data that decodes to the wrong length, has bytes after its

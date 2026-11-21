@@ -73,21 +73,6 @@ fn non_demos_are_refused() {
         tiff
     );
     std::fs::remove_file(&o).unwrap();
-    // through the C interface: the same refusal
-    for (_, bytes, _) in &cases {
-        let (mut out, mut n) = (std::ptr::null_mut(), 0usize);
-        let rc = unsafe {
-            mvdz::capi::mvdz_compress(
-                bytes.as_ptr() as *const _,
-                bytes.len(),
-                1,
-                &mut out,
-                &mut n,
-            )
-        };
-        assert_eq!(rc, mvdz::capi::MVDZ_E_NOTMVD);
-        assert!(out.is_null() && n == 0);
-    }
     let _ = std::fs::remove_dir_all(&d);
 }
 
