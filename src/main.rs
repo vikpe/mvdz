@@ -146,17 +146,33 @@ fn read_input(p: &str) -> Vec<u8> {
     try_read_input(p).unwrap_or_else(|e| die(format!("{p}: {e}")))
 }
 
-/// Writes `data` to `w`.
-fn put(w: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
-    w.write_all(data)?;
-    w.flush()
+/// Opens an input file (or standard input) to read in order.
+fn open_input(p: &str) -> Result<Box<dyn Read>, String> {
+    if p == "-" {
+        Ok(Box::new(std::io::stdin().lock()))
+    } else {
+        let f = std::fs::File::open(p).map_err(|e| e.to_string())?;
+        Ok(Box::new(std::io::BufReader::new(f)))
+    }
 }
 
-/// Writes an output: standard output, a device or pipe directly, a regular
-/// file atomically (temporary file and rename).
+/// Writes `data` as an output.
 fn try_write_output(p: &str, data: &[u8]) -> Result<(), String> {
+    try_write_with(p, |w| {
+        w.write_all(data)?;
+        w.flush()
+    })
+}
+
+/// Writes an output with `fill`: standard output, a device or pipe
+/// directly, a regular file atomically (temporary file and rename: when
+/// `fill` fails, no file is left).
+fn try_write_with(
+    p: &str,
+    fill: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) -> Result<(), String> {
     if p == "-" {
-        put(&mut std::io::stdout().lock(), data).unwrap_or_else(|e| stdout_failed(e));
+        fill(&mut std::io::stdout().lock()).unwrap_or_else(|e| stdout_failed(e));
         return Ok(());
     }
     let path = std::path::Path::new(p);
@@ -166,9 +182,9 @@ fn try_write_output(p: &str, data: &[u8]) -> Result<(), String> {
                 .write(true)
                 .open(path)
                 .map_err(|e| e.to_string())?;
-            put(&mut f, data).map_err(|e| e.to_string())
+            fill(&mut f).map_err(|e| e.to_string())
         }
-        _ => api::write_file_atomic_with(path, |f| put(f, data)).map_err(|e| e.to_string()),
+        _ => api::write_file_atomic_with(path, |f| fill(f)).map_err(|e| e.to_string()),
     }
 }
 
@@ -300,10 +316,14 @@ fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String
 }
 
 fn decompress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
-    let src = try_read_input(i)?;
-    let out = api::decompress_with(&src, threads, &read_limits(a)).map_err(|e| e.to_string())?;
-    drop(src);
-    try_write_output(o, &out).map_err(|e| format!("{o}: {e}"))
+    // decoded and written segment by segment: neither the file nor the
+    // demo is held whole
+    let input = open_input(i)?;
+    let limits = read_limits(a);
+    try_write_with(o, |w| {
+        api::decompress_stream(input, w, threads, &limits)?;
+        Ok(())
+    })
 }
 
 fn read_limits(a: &Args) -> Limits {
