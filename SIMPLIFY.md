@@ -182,6 +182,10 @@ The archive (293,929 MVD files): median 2,032,160 bytes, p99 14,010,690, largest
 
 ## Measurements
 
+The current figures (ratios on stratified, speeds against rc.4 on set8, memory, round
+trips; 2026-11-21, i5-12400F) are in BENCHMARKS.md. The sections below are earlier
+measurements, kept for the decisions they support.
+
 ### Current speed and memory (3f737db, 72d5175)
 
 32 demos of stratified (108,606,042 bytes raw), cores 0, 2, 4, 6, silent machine;
@@ -317,19 +321,17 @@ Format and specification:
 
 3. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
    list are current (2026-11-21). Still rc.4: the intro (levels, metadata, attachments,
-   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 4's numbers,
+   C), Install (the AVX2 speed claim), Ratios and speeds (numbers now in BENCHMARKS.md,
    mentions `--trusted` and the fast level), the FAQ (metadata, attachments) and the
    Tests paragraph's `MVDZ_WRITE_VECTORS` note (updated 2026-11-21).
-4. BENCHMARKS.md from the final measurements, on the new set8 (18.4 MB; README and
-   BENCHMARKS.md still say 18.9 MB); drop Miri (no `unsafe` left).
-5. Later: implementations in C, Go and other languages from the settled
+4. Later: implementations in C, Go and other languages from the settled
    specification, with a shared test suite.
 
 Not measured:
 
-6. Size of a decoder-only wasm build.
-7. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-8. rayon on the final code (optional).
+5. Size of a decoder-only wasm build.
+6. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
+7. rayon on the final code (optional).
 
 ## Verification
 

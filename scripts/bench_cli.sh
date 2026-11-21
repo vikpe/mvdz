@@ -1,8 +1,9 @@
 #!/bin/bash
 # CLI-path benchmark: every codec is timed the same way, one process per
 # file, reading the compressed file and writing the decoded demo to a file
-# (tmpfs by default), as a consumer would. Baselines: the archive's own
-# gzip files (when ARCHIVE is set), xz -9 and zstd -19 made here.
+# (tmpfs by default), as a consumer would. Baselines: gzip -9 (or the archive's
+# own gzip files when ARCHIVE is set), xz -9 and zstd -19, made here. mvdz is
+# timed with one thread (mvdz) and with four (mvdz-4t).
 #
 #   scripts/bench_cli.sh WORKDIR FILELIST     (FILELIST: one .mvd path per line)
 #
@@ -12,12 +13,13 @@
 # decode MB/s (MB = 10^6 bytes of raw demo) for 1 thread and for a batch of
 # 4 processes in parallel: median [min-max] over REPS runs.
 set -eu
+export LC_ALL=C
 W=$1
 LIST=$2
 MVDZ=${MVDZ:-mvdz_rust/target/release/mvdz}
 OUT=${OUT:-/dev/shm/mvdz-bench.out}
 REPS=${REPS:-3}
-mkdir -p "$W"/normal "$W"/fast "$W"/xz "$W"/zstd "$W"/gz
+mkdir -p "$W"/mvdz "$W"/mvdz-4t "$W"/xz "$W"/zstd "$W"/gz
 mapfile -t FILES < "$LIST"
 raw=0
 for f in "${FILES[@]}"; do raw=$((raw + $(stat -c %s "$f"))); done
@@ -25,18 +27,21 @@ for f in "${FILES[@]}"; do raw=$((raw + $(stat -c %s "$f"))); done
 # library bench's job
 prep() {
   n=$(basename "$1")
-  [ -s "$W/normal/$n.mvdz" ] || "$MVDZ" compress -j 1 "$1" "$W/normal/$n.mvdz"
-  [ -s "$W/fast/$n.mvdz" ] || "$MVDZ" compress --fast -j 1 "$1" "$W/fast/$n.mvdz"
+  [ -s "$W/mvdz/$n.mvdz" ] || "$MVDZ" compress -j 1 "$1" "$W/mvdz/$n.mvdz"
+  [ -s "$W/mvdz-4t/$n.mvdz" ] || cp "$W/mvdz/$n.mvdz" "$W/mvdz-4t/$n.mvdz"
   [ -s "$W/xz/$n.xz" ] || xz -9 -T1 -c "$1" > "$W/xz/$n.xz"
   [ -s "$W/zstd/$n.zst" ] || zstd -q -19 -c "$1" > "$W/zstd/$n.zst"
-  if [ -n "${ARCHIVE:-}" ] && [ ! -s "$W/gz/$n.gz" ]; then cp "$ARCHIVE/$n.gz" "$W/gz/$n.gz"; fi
+  if [ ! -s "$W/gz/$n.gz" ]; then
+    if [ -n "${ARCHIVE:-}" ]; then cp "$ARCHIVE/$n.gz" "$W/gz/$n.gz"; else gzip -9 -c "$1" > "$W/gz/$n.gz"; fi
+  fi
 }
 export -f prep
 export W MVDZ ARCHIVE="${ARCHIVE:-}"
 printf '%s\n' "${FILES[@]}" | xargs -P 4 -I{} bash -c 'prep "$1"' _ {}
 dec() { # codec file
   case $1 in
-    normal|fast) "$MVDZ" decompress -j 1 "$2" "$OUT.$$" ;;
+    mvdz) "$MVDZ" decompress -j 1 "$2" "$OUT.$$" ;;
+    mvdz-4t) "$MVDZ" decompress -j 4 "$2" "$OUT.$$" ;;
     xz) xz -dc "$2" > "$OUT.$$" ;;
     zstd) zstd -qdc "$2" > "$OUT.$$" ;;
     gz) gzip -dc "$2" > "$OUT.$$" ;;
@@ -49,7 +54,7 @@ stats() { sort -g | awk '{a[NR]=$1} END {m=(NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1]
 gzbytes=$(cat "$W"/gz/* 2>/dev/null | wc -c)
 printf 'files %d  raw %.2f MB (10^6 bytes)  reps %d  load %s\n' ${#FILES[@]} "$(echo "$raw/1000000" | bc -l)" $REPS "$(cut -d' ' -f1-3 /proc/loadavg)"
 printf '%-7s %12s %8s %8s  %-22s %-22s\n' codec bytes ratio "vs gz" "decode 1t MB/s" "decode batch(4) MB/s"
-for c in normal fast zstd xz gz; do
+for c in mvdz mvdz-4t zstd xz gz; do
   ls "$W/$c" | grep -q . || continue
   bytes=$(cat "$W/$c"/* | wc -c)
   one=(); bat=()

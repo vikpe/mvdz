@@ -1,395 +1,151 @@
 # mvdz benchmarks
 
-Compression ratios, speeds and test campaigns of mvdz 1.0 (1.0.0-rc.4),
-measured on an archive of QuakeWorld MVD demos. MB = 10^6 bytes of **raw
-demo**; speeds are MB/s of raw demo, so a codec's speed does not depend on
-how well it compresses.
+Compression ratios, speeds, memory and round trips of mvdz (format version 2), and of
+rc.4 (`master`, format version 1) under the same premise: 256 KiB segments
+(`-s 256K`), compression with its self-check, decompression with CRC checks only (rc.4's
+`--trusted`: this version never recomputes the SHA-256). MB = 10^6
+bytes of **raw demo**; speeds are MB/s of raw demo, so a codec's speed does not depend
+on how well it compresses.
 
 ## Machine
 
-A virtual machine (KVM) on a shared host: 4 vCPUs of an Intel Xeon
-(Skylake; AVX2 and AVX-512, no SHA extensions), 7 GB of memory, Linux.
-Other tenants share the host's cores, so speeds vary by a few percent from
-run to run and are given as the median over rounds, with [min-max]:
-
-* the speed tables use **set8**, 8 demos (18.9 MB raw; Samples), so that
-  every build can be measured several times in a few minutes;
-* 5 rounds, in each of which every build (and, for the command line, every
-  codec) runs once, in an order rotated per round, so a busy spell on the
-  host spreads over all of them;
-* each run starts only when the machine is idle (under 20 % of the 4 cores
-  busy over 5 s; the background services alone use 10-13 %).
-
-The tables were measured on rc.3. The normal level's compression speeds
-were measured again after its encoder got faster (1.0.0-rc.4 in
-CHANGELOG.md; output byte-identical), on the same machine with the same
-build configurations and method, 7 rounds; the other figures stand (in
-the same runs, the release build before that change and the one after
-decode, and compress at the fast level, within 4 % of each other at 1t
-and 4t and 10 % in batch, the noisiest column).
-
-The speeds quoted by the README are those of the **release downloads**
-(Builds, below).
+An Intel Core i5-12400F (6 cores, 12 threads; AVX2 and SHA extensions), 62 GB of
+memory, Linux 6.8, Rust 1.100, `cargo build --release` (glibc, system allocator,
+portable `x86-64`). Speeds ran pinned to four physical cores (`taskset -c 0,2,4,6`)
+with an editor using about one core in the background; master and this version ran
+in rotated order in every round, so background load falls on both alike. Figures are
+the median over rounds, with [min-max].
 
 ## Samples
 
-The archive: 50,951 gzip-compressed demos, 72.0 GB as gzip, about 112 GB
-raw, from QuakeWorld servers between about 2000 and 2026, named by the
-SHA-256 of the raw demo.
+The archive: 50,951 gzip-compressed demos, 72.0 GB as gzip, about 112 GB raw, from
+QuakeWorld servers between about 2000 and 2026, named by the SHA-256 of the raw demo.
 
-| sample | n | raw | how it was drawn |
+| sample | n | raw | used for |
 |---|---|---|---|
-| holdout | 200 | 462 MB | seeded shuffle of the whole archive (Python `random.Random(20261102)`), demos whose first frame is not svc_serverdata dropped |
-| fresh | 100 | 252 MB | the same, independent seed (`0xF2E5B`), drawn by a reviewer |
-| sample40 | 40 | 140 MB | the development sample: 27 archive demos and 13 recent hub games from a test corpus |
-| set8 | 8 | 18.9 MB | 8 demos of sample40 spread over its sizes (0.65 to 6.2 MB): the speed set |
-| stratified | 585 | 1.19 GB | stratified by era (7 classes, from `matchdate`, the date in the server info or the server version) x gz-size tercile (21 cells); half proportional, half equal allocation, at least 8 per cell; seed 20261102; weights cell size / picks, scaled to the archive |
-| campaign | 110 | 239 MB | `shuf --random-source` seeded 20261102 |
+| stratified | 379 of 585 | 969 MB | ratios: stratified by era x gzip-size tercile, weighted to the archive |
+| set8 | 8 | 18.4 MB | speeds: 8 demos of sample40 from 0.69 to 6.2 MB |
+| sample40 | 32 of 40 | 125 MB | development |
 
-The lists of every sample (the SHA-256 of each raw demo, which is the
-hub's `demo_sha256`), with their seeds and, for the stratified sample, the
-cells and weights, are in [`benchmarks/samples/`](benchmarks/samples).
-
-The demos of set8, sample40 and stratified can be downloaded, unpacked
-(`<sha256>.mvd`), from `https://dev.quake.world/mvdz/<set>.tar.gz`;
-`scripts/fetch_samples.sh <set> <dir>` downloads one, unpacks it and checks
-every SHA-256. Not every listed demo could be found again: the
-downloads have 6 of set8's 8, 32 of sample40's 40 and 379 of stratified's
-585, and each lists the missing ones in `MISSING.txt`. holdout, fresh and
-campaign are not published as downloads.
-
-The headline ratios use the stratified sample, weighted to the archive,
-with 95 % stratified bootstrap intervals (2,000 resamples). The 300 =
-holdout + fresh give 0.204 (normal) and 0.248 (fast), inside the same
-sampling error (their own interval is about ±0.007).
+The lists (the SHA-256 of each raw demo; for stratified also the cells and weights)
+are in [`benchmarks/samples/`](benchmarks/samples). `scripts/fetch_samples.sh <set>
+<dir>` downloads a set from `https://dev.quake.world/mvdz/<set>.tar.gz`, unpacks it
+and checks every SHA-256. Not every demo of the original samples could be found again:
+stratified and sample40 have 379 and 32 of their demos; set8 is complete (two of its
+demos were replaced by the sample40 demos nearest in size).
 
 ## Ratios
 
-Ratio = total compressed bytes / total raw bytes (byte-weighted: large
-demos count for more).
+Ratio = compressed bytes / raw bytes, weighted to the archive (each stratified demo
+counts for the archive demos of its cell; the weights are rescaled to the demos
+present), with 95 % intervals from a bootstrap within the cells. On the 379 stratified
+demos:
 
 | format | size / raw | size / archive gzip |
 |---|---|---|
-| mvdz normal | 0.211 [0.206-0.216] | 0.328 [0.320-0.338] |
-| mvdz fast | 0.255 [0.250-0.261] | 0.397 [0.388-0.407] |
-| mvdz normal, `-s 256K` | 0.218 | |
-| mvdz normal, `-s 1M` | 0.213 | |
-| mvdz fast, `-s 1M` | 0.259 | |
-| archive gzip | 0.642 [0.635-0.648] | 1 |
-| gzip -9 | 0.614 | |
-| xz -9e (xz -9 on the 300: 0.468) | 0.473 [0.467-0.478] | |
-| zstd -19 | 0.553 [0.547-0.559] | |
-| zstd -3 --long | 0.612 | |
+| **mvdz** | **0.193** [0.190-0.197] | 0.326 |
+| mvdz rc.4, `-s 256K` | 0.192 | |
+| archive gzip | 0.593 [0.581-0.603] | 1 |
+| gzip -9 | 0.566 [0.554-0.577] | 0.956 |
+| xz -9e | 0.429 [0.422-0.435] | 0.724 |
+| zstd -19 | 0.508 [0.498-0.517] | 0.858 |
 
-Projected onto the whole archive (72.0 GB as gzip): 23.7 [23.0-24.3] GB at
-the normal level, 28.6 [28.0-29.3] GB at the fast level.
+Projected onto the whole archive (72.0 GB as gzip): 23.5 GB. Unweighted, the 379
+demos (968,979,765 bytes raw) compress to 211,736,432 bytes (0.2185); the median demo
+to 0.241. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
+-9e.
 
-The fast level uses zstd level 6 (normal: 17), which keeps compression
-fast: at level 19, as in rc.2, the fast level was 0.242 [0.237-0.249] of
-raw but compressed at about 2.2 MB/s, slower than the normal level. Four
-demos of this sample carry a text prefix before the demo; compress refuses
-them unless asked (`--allow-non-demo`, used here, as the earlier figures
-were made before that check existed).
+Against rc.4 at the same segment size: +0.9 % (raw DEFLATE instead of zstd for the blob
+streams, fixed-width integers).
 
-A typical demo compresses a little less well than the total: the per-demo
-median is 0.231 (normal) and 0.269 (fast). Demos of a few KB can come out
-larger than their gzip (6 of 585 here): the metadata is about 2-4 KB per
-file. The normal level is not smaller than fast on every demo: rANS codes
-each stream with static, per-context tables, while zstd also finds
-repeated runs of values. On a demo that repeats long runs of identical
-content, which constructed demos do, the fast level can be smaller: the
-test vector `float-mvd1` (a constructed MVD1 demo with float coordinates)
-is 114,248 bytes at normal and 84,017 at fast. It is not a cold start on a
-small file: eight copies of the same demo in a row cost normal 2.2 bytes
-per float coordinate, as one copy does, while zstd codes the copies almost
-for free. On the real FTE float-coordinate vector (`float-fte`) normal is
-the smaller (0.411 against 0.450 of raw). Segmenting costs about +1 to +2 %
-at `-s 1M` (+0.9 % normal, +1.6 % fast). At the normal level the segments
-of a one-shot file share one model per rANS stream, stored once (the
-TABLES section, FORMAT.md §2.6); with a model in every segment, as the
-streaming writer still writes them, `-s 1M` costs +3.8 % (0.219) and
-`-s 256K` +11 % (0.235; with shared models 0.218, +3.3 %). On set8 and three
-full-size 4on4 demos (12.8-14.2 MB raw each), at the normal level:
+**By era** (year of the demo; weighted, 95 % intervals):
 
-| | set8, `-s 64K` | set8, `-s 256K` | set8, `-s 1M` | 4on4s, `-s 64K` | 4on4s, `-s 256K` | 4on4s, `-s 1M` |
-|---|---:|---:|---:|---:|---:|---:|
-| a model in every segment | 0.2696 | 0.2351 | 0.2191 | 0.2393 | 0.2076 | 0.1921 |
-| shared models (TABLES) | 0.2345 | 0.2187 | 0.2134 | 0.2054 | 0.1888 | 0.1833 |
-| one segment | 0.2118 | 0.2118 | 0.2118 | 0.1806 | 0.1806 | 0.1806 |
+| era | n | mvdz | gzip -9 | xz -9e | zstd -19 |
+|---|---|---|---|---|---|
+| up to 2006 | 127 | 0.262 [0.258-0.266] | 0.611 | 0.508 | 0.554 |
+| 2007-2010 | 95 | 0.238 [0.231-0.243] | 0.609 | 0.492 | 0.552 |
+| 2011-2020 | 49 | 0.251 [0.241-0.264] | 0.622 | 0.508 | 0.566 |
+| 2021-2022 | 19 | 0.180 [0.175-0.184] | 0.610 | 0.442 | 0.546 |
+| 2023-2024 | 43 | 0.180 [0.175-0.185] | 0.599 | 0.433 | 0.536 |
+| 2025-2026 | 45 | 0.156 [0.147-0.163] | 0.493 | 0.359 | 0.439 |
 
-At `-s 256K`, one thread (`mvdz bench --levels normal -s 256K -j 1` on
-set8, median of 5 idle-gated rounds, release builds with and without
-shared models): compression 6.1 [5.8-6.4] to 8.0 [7.7-8.1] MB/s (the
-segments code with the file's models instead of building their own),
-decoding 22.8 [21.0-24.1] to 25.5 [24.6-26.1] MB/s (each shared model is
-built once per file, not once per segment). The models are trained from
-per-context counts summed over the segments: compressing a 14.2 MB 4on4
-demo with one thread peaks at 96 MB at `-s 256K` and 94 MB at `-s 1M`
-(87 MB for both with a model in every segment); one segment, 133 MB.
-
-**By era** (year of the demo; byte-weighted, archive-weighted, 95 %
-intervals; the 9 demos before 2007 are merged into the first group):
-
-| era | n | normal | fast | median demo, normal (demos >= 60 s) | snapshots/s (median) | compressed B/s of game, normal (median) |
-|---|---|---|---|---|---|---|
-| up to 2014 | 95 | 0.232 [0.225-0.238] | 0.286 [0.277-0.292] | 0.237 | 26 | 467 |
-| 2015-2022 | 124 | 0.241 [0.219-0.271] | 0.285 [0.261-0.316] | 0.241 | 27 | 682 |
-| 2023-2026 | 215 | 0.183 [0.178-0.188] | 0.222 [0.216-0.228] | 0.189 | 62 | 669 |
-| year unknown | 151 | 0.252 [0.248-0.257] | 0.305 [0.300-0.310] | 0.254 | 19 | 393 |
-| all | 585 | 0.211 [0.206-0.216] | 0.255 [0.250-0.261] | 0.230 | - | 599 |
-
-Snapshots/s counts the demo's time steps (blocks with a non-zero time
-delta; one server frame can write several blocks), as a median over 40
-demos per era. Current mvdsv records every server frame (`sv_demofps`
-defaults to 77; about 62 a second in practice), while older demos mostly
-hold 20-27. The compressed bytes per second of game stay about flat
-(about 670 B/s from 2015 on), so the extra snapshots are nearly free: the
-smaller time step makes each one easier to predict. (The last three
-columns are of the normal level as measured for rc.2; rc.3 changes its
-size by 0.15 %.)
-
-**Demos with usercmd blocks.** mvdsv can record every player input as a
-hidden block (type 1, 23 bytes, `SV_DebugClientCommand`; about 77 a
-second per player). Such demos are rare in the archive so far and are not
-in the sample above. On four 4on4 demos that record them (schloss, e1m2,
-dm3, dm2 of 2026-10-02; 36.1 MB raw each, the blocks 60 % of it), the
-blocks are coded field by field (FORMAT.md §6.11):
-
-| | size per demo | / raw | / gzip |
-|---|---|---|---|
-| raw | 36.08 MB | 1 | 2.50 |
-| gzip (the hub's `.mvd.gz`) | 14.46 MB | 0.401 | 1 |
-| normal, rc.3 (blocks as zstd) | 6.25 MB | 0.173 | 0.433 |
-| normal | 3.61 MB | 0.100 | 0.250 |
-| fast, rc.3 | 7.27 MB | 0.202 | 0.503 |
-| fast | 4.80 MB | 0.133 | 0.332 |
-
-Library speed on these four, one thread (MB/s of raw demo, median of 3
-interleaved rounds, rc.3 release build against this version, both with
-mimalloc): normal compress 2.8 to 6.8, decode 42.6 to 32.4; fast compress
-15.1 to 15.5, decode 56.6 to 53.2. Normal compression gets faster because
-zstd 17 on the block bytes was its slow part; decoding gets slower because
-each block is now about 15 coded symbols. With the faster normal-level
-encoder (Unreleased in CHANGELOG.md) normal compression on these four is
-9.3 [9.1-9.9] MB/s (3 rounds, measured later; the same runs gave normal
-decode 33.3, fast compress 14.6 and fast decode 57.5).
+(One undated demo is not listed.) Current mvdsv records a snapshot every server frame
+(`sv_demofps 77`; about 62 a second in practice) where older demos mostly hold 20-27;
+the smaller time step makes each snapshot easier to predict.
 
 ## Speeds
 
-The release download (`mvdz-<version>-x86_64-unknown-linux-musl`, a
-static musl build, at the time with mimalloc; Builds), set8 (normal level 0.212 of raw
-on these, fast 0.255).
+`mvdz compress` and `mvdz decompress`, one process per file over the 8 demos of set8,
+the output written to tmpfs; 5 rounds. `-j 4` encodes and decodes up to 4 segments at
+once.
 
-**Library, in memory** (`mvdz bench`; decode with every check, including
-the SHA-256; compression including the self-check decode). "4t" is one
-file at a time with 4 threads, "batch" 4 files in parallel, one thread
-each.
+| | rc.4 `-s 256K` | **this version** |
+|---|---|---|
+| size / raw (set8) | 0.2207 | 0.2218 |
+| compress, `-j 1` | 22.1 [21.3-22.5] | **29.5** [28.8-29.6] |
+| compress, `-j 4` | 41.1 [38.6-41.5] | **73.0** [66.1-73.8] |
+| decompress, `-j 1` | 72.1 [71.3-72.4] | **80.7** [78.4-81.6] |
+| decompress, `-j 4` | 142.1 [136.9-142.8] | **222.6** [178.4-224.0] |
 
-| level | compress 1t | compress 4t | compress batch | decode 1t | decode 4t | decode batch |
-|---|---|---|---|---|---|---|
-| normal | 8.1 [7.6-8.4] | 11.7 [11.0-12.2] | 22.2 [21.1-23.8] | 26.8 [25.5-27.5] | 33.5 [29.8-35.8] | 71 [63-83] |
-| fast | 12.8 [11.1-13.3] | 17.8 [16.8-18.5] | 39.2 [28.8-40.6] | 44.2 [39.6-45.3] | 47.8 [44.9-51.7] | 110 [96-121] |
+Compression is 1.3 times faster on one thread and 1.8 times on four (raw DEFLATE
+instead of zstd for the blob streams; segments encode in parallel). Decompression is
+1.1 times faster on one thread and 1.6 times on four (segments decode in parallel).
 
-**Command line**, `mvdz decompress`, one process per file, the decoded
-demo written to tmpfs. `mvdz decompress` writes a regular file atomically
-(temporary file, fsync, rename); the others write through a shell
-redirect.
+**Against general-purpose decompressors** (`scripts/bench_cli.sh`, same files, one
+process per file; "batch" = 4 processes in parallel, one thread each; 3 rounds):
 
-| format | size / raw (set8) | decode, release download | decode, -v3 download |
+| format | size / raw | decode, 1 process | decode, batch of 4 |
 |---|---|---|---|
-| mvdz normal | 0.212 | 21.8 [20.1-24.8] | 24.8 [23.8-27.7] |
-| mvdz fast | 0.255 | 34.3 [29.4-35.0] | 36.7 [35.0-38.8] |
-| gzip -6 (`gzip -dc`) | 0.611 | 78.9 [76.6-86.4] | |
-| xz -9 (`xz -dc`) | 0.473 | 27.0 [26.2-28.4] | |
-| zstd -19 (`zstd -dc`) | 0.550 | 104 [71-117] | |
+| mvdz, `-j 1` | 0.222 | 80.5 [79.6-80.8] | 171.6 [170.4-173.8] |
+| mvdz, `-j 4` | 0.222 | 211.1 [200.8-219.1] | 251.9 [249.4-253.0] |
+| gzip -9 (`gzip -dc`) | 0.603 | 144.2 [138.2-146.0] | 310.2 [309.1-310.4] |
+| xz -9 (`xz -dc`) | 0.475 | 37.9 [37.8-38.2] | 80.8 [80.5-81.3] |
+| zstd -19 (`zstd -dc`) | 0.545 | 406.1 [397.5-408.0] | 773.3 [767.8-781.0] |
 
-## Builds
+## Memory
 
-The release downloads are static musl builds (they run on any Linux).
-musl's own allocator is slow, above all when several threads allocate, and
-costs these builds 15-40 % against a glibc build. Up to rc.4 they were
-built with mimalloc as the allocator (a cargo feature, since removed: the
-crate has no allocator dependency), which came close to glibc; the
-"mimalloc" columns below are those builds.
-The `-v3` download is built for `target-cpu=x86-64-v3` (AVX2, BMI2,
-LZCNT; any x86-64 CPU from about 2015 on). `cargo build --release` gives a
-glibc build with the system allocator, portable unless `RUSTFLAGS="-C
-target-cpu=native"` is set. Speeds on set8 (library, or CLI as marked):
+Peak resident memory of the command line (`/usr/bin/time -f %M`), rc.4 `-s 256K` ->
+this version:
 
-| measure | musl | musl -v3 | musl, mimalloc (rc.4 release) | musl -v3, mimalloc (rc.4 release -v3) | glibc (`cargo build`) | glibc, native |
-|---|---|---|---|---|---|---|
-| compress, normal, 1t | 6.0 | 6.5 | 8.1 | 8.4 | 8.4 | 8.1 |
-| compress, normal, batch | 15.4 | 16.0 | 22.2 | 23.6 | 24.7 | 24.4 |
-| decode, normal, 1t | 22.9 | 25.5 | 26.8 | 31.8 | 27.2 | 30.6 |
-| decode, normal, 4t | 23.7 | 25.5 | 33.5 | 39.4 | 38.0 | 40.3 |
-| decode, normal, batch | 56 | 64 | 71 | 82 | 84 | 87 |
-| decode, normal, trusted, 1t | 27.4 | 27.6 | 34.2 | 39.1 | 34.9 | 36.0 |
-| compress, fast, 1t | 11.5 | 12.1 | 12.8 | 13.8 | 15.4 | 15.7 |
-| compress, fast, batch | 30.8 | 32.5 | 39.2 | 36.4 | 42.6 | 43.9 |
-| decode, fast, 1t | 38.8 | 42.4 | 44.2 | 51.3 | 50.1 | 53.6 |
-| decode, fast, 4t | 42.0 | 49.0 | 47.8 | 55.9 | 57.3 | 61.4 |
-| decode, fast, batch | 94 | 107 | 110 | 125 | 134 | 143 |
-| decode, fast, trusted, 1t | 56.9 | 59.7 | 67.4 | 71.8 | 76.5 | 69.3 |
-| CLI decode, normal | 18.1 | 20.8 | 23.1 | 25.5 | 23.3 | 23.7 |
-| CLI decode, fast | 33.8 | 34.9 | 35.0 | 40.7 | 36.7 | 36.6 |
-
-(Medians of 5 rounds, the normal level's compression of 7; the ranges,
-about ±5-10 %, are in the raw results.)
-
-* mimalloc (no longer a feature) brought the musl build within about 5 % of glibc at one thread
-  at the normal level, and restored multi-threaded decoding (4 threads:
-  23.7 to 33.5 MB/s; glibc 38.0). At the fast level, mostly zstd, it stayed
-  10-20 % behind glibc, probably in musl's C library itself (`memcpy`)
-  rather than the allocator.
-* x86-64-v3 is about 10-20 % faster at decoding (a little less for
-  compression). The gain is spread over the whole decoder (rANS, walker,
-  numeric predictors, SHA-256), so it cannot be had by dispatching one
-  function at run time: a test that compiled the segment decoder entry
-  point twice and chose at run time recovered only a few percent, because
-  most of the hot code is called through functions that are not inlined
-  into it.
-* `native` on this AVX-512 CPU gains about as much over the portable
-  glibc build as x86-64-v3 does over the portable musl one.
-
-## Identity check and trusted decoding
-
-A full decode recomputes the SHA-256 of the demo and compares it with the
-identity stored in the file. On this CPU (no SHA extensions) the `sha2`
-crate runs at about 150-190 MB/s (rc.2 measurement), which is about 20 %
-of the decode time at the normal level and 30 % at the fast level.
-
-`--trusted` (library `ReadOptions::trusted`, C `MVDZ_TRUSTED`) skips the
-SHA-256 and keeps every CRC-32C check. Library decode, one thread, set8:
-
-| level | release: full | trusted | gain | release -v3: full | trusted | gain |
-|---|---|---|---|---|---|---|
-| normal | 26.8 | 34.2 | x1.28 | 31.8 | 39.1 | x1.23 |
-| fast | 44.2 | 67.4 | x1.52 | 51.3 | 71.8 | x1.40 |
-
-CRC-32C uses the SSE4.2 instruction (detected at run time) at about 3-6
-GB/s: the two CRC passes are a few percent of a trusted decode.
-
-## Fastest settings
-
-Two checks can be switched off when speed matters more than checking:
-
-* **Compression without verification.** By default the encoder decodes
-  every segment it has written and compares it with the input, storing a
-  segment with zstd (or uncompressed) if they differ. This
-  is a quarter to a third of the compression time. Library
-  `Config { verify: false, .. }`; `mvdz bench --no-verify`. `mvdz
-  compress` and the C writer always verify. Without it an encoder bug
-  would not be caught when the file is written: a full decode still
-  refuses such a file (its SHA-256 does not match), but the original demo
-  must still exist to recover it.
-* **Trusted decoding.** `--trusted` (library `ReadOptions::trusted`, C
-  `MVDZ_TRUSTED`) skips the SHA-256 of the decoded demo and keeps every
-  CRC-32C check (see above). Use it only for files whose identity has
-  already been checked once, for example in a cache.
-
-The fastest build is the release -v3 download (or a glibc build with
-`target-cpu=native`, see Builds). Release -v3, set8, `mvdz bench --levels
-normal,fast -r 1 -j 4 [-s 256K] [--no-verify --trusted]`, median of 5
-interleaved idle-gated rounds, MB/s of raw demo (default → both checks
-off):
-
-| | whole file | `-s 256K` |
-|---|---:|---:|
-| compress, normal, 1t | 8.3 → 10.9 | 8.0 → 11.3 |
-| compress, normal, 4t | 11.9 → 17.4 | 11.3 → 16.4 |
-| compress, normal, batch | 19.9 → 27.0 | 19.4 → 25.1 |
-| decode, normal, 1t | 30.5 → 37.5 | 28.5 → 32.6 |
-| decode, normal, 4t | 38.4 → 50.6 | 35.5 → 50.7 |
-| decode, normal, batch | 82 → 91 | 77 → 91 |
-| compress, fast, 1t | 13.2 → 19.2 | 11.8 → 17.4 |
-| compress, fast, 4t | 17.9 → 28.0 | 14.2 → 23.4 |
-| compress, fast, batch | 31 → 43 | 23 → 37 |
-| decode, fast, 1t | 48.0 → 66.0 | 36.1 → 45.6 |
-| decode, fast, 4t | 50.2 → 79.1 | 36.4 → 52.3 |
-| decode, fast, batch | 108 → 151 | 54 → 64 |
-
-(Batch = the 8 files in parallel on 4 threads, one thread each. The
-release build without -v3 is 0-15 % slower; its figures are in the raw
-results.) Switching both checks off makes compression about 1.3 to 1.6
-times and decoding about 1.1 to 1.6 times faster. The fastest way to
-compress is the fast level with verification off, several files at once
-(43 MB/s); the fastest way to decode is a trusted batch of whole-file
-fast-level files (151 MB/s) or, for one file, 4 threads (79 MB/s).
-
-## Correctness campaigns
-
-Every round trip below compares the decoded demo with the original by
-SHA-256. The campaigns up to the pure-Rust row ran on rc.2; the format of
-rc.3 differs in the contexts of five structural streams (FORMAT.md
-§6.5-6.7), checked by the last two rows, the test vectors, the Go
-conformance decoder and fuzzing.
-
-| campaign | demos | configurations | round trips | failures |
+| demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
 |---|---|---|---|---|
-| development sweep (`examples/sweep.rs`): normal and fast x whole and segmented x one-shot and streamed, decoded by the whole-file and the sequential reader | 340 (sample40, holdout, fresh) | 8 | 5,440 | 0 |
-| correctness review, library: whole and 64 KiB segments, streamed in irregular chunks, decoded with 1 and 3 threads, sequential and random-access readers, seeks by segment and by time | 1,320+ archive demos | many | 1,320+ files | 0 |
-| correctness review, CLI: file to file and through pipes | 1,961 archive demos | 2 of 4 per demo | 1,961 | 0 |
-| correctness review, structure-aware random demos | 30,000 generated | random level and segment size, verified and unverified | 90,000 | 0 |
-| correctness review, every prefix and 5,716 mutations of a real demo | 25,717 inputs | 3 | 77,151 | 0 |
-| benchmark review | 585 (stratified) | normal, fast, both at `-s 1M` | 2,340 | 0 |
-| post-review | 110 random | normal, fast, both at `-s 256K`, each decoded fully and trusted | 880 | 0 |
-| pure-Rust zstd decoder (as on wasm) | 40 | 2 | 80 | 0 |
-| rc.3 (contexts, zstd levels): holdout | 200 | normal, fast | 400 | 0 |
-| rc.3: stratified, compression self-check | 585 | normal, fast, both at `-s 1M` | 2,340 | 0 |
-| shared models: stratified, compression self-check, decoded by the library and the Go conformance decoder | 581 (4 are not MVD demos: refused) | normal `-s 256K` | 581 | 0 |
-| shared models: set8 and three 4on4 demos, decoded by the library and the Go conformance decoder | 11 | normal at `-s 64K`, `-s 256K` and `-s 1M` | 33 | 0 |
-| shared models: stratified, compression self-check; decoded with 1 and 4 threads, by the Go conformance decoder and by the sequential reader with 1 and 4 threads; segmented files also seeked to the middle and the last segment with 1 and 4 threads | 585 (4 not MVD demos, compressed with `--allow-non-demo`) | normal whole, normal `-s 64K`, `-s 256K` and `-s 1M`, fast `-s 256K` | 2,925 files (29,880 segments) | 0 |
+| 14.2 MB (sample40) | 93 -> **35** MiB | 102 -> **42** MiB | 23 -> **5.6** MiB | 24 -> **7.6** MiB |
+| 6.2 MB (set8) | 49 -> **22** MiB | 57 -> **28** MiB | 13 -> **5.2** MiB | 15 -> **7.2** MiB |
+| 2.0 MB (set8) | 23 -> **13** MiB | 29 -> **17** MiB | 7.8 -> **4.6** MiB | 8.8 -> **6.6** MiB |
 
-No segment of a real demo fell back to raw storage in any campaign.
+Decompression streams: its memory is a few segments (at most 1 MiB raw each) however
+large the demo; rc.4's grows with the demo. Compression holds the demo and its walked
+segments: about 2.5 times the demo, 2.1 to 2.7 times less than rc.4.
 
-## Fuzzing and Miri
+## Correctness
 
-cargo-fuzz with AddressSanitizer, `-rss_limit_mb=1536`:
-
-* development: decode, stream_reader, read_metadata, attachments,
-  stream_writer, 15 minutes each, plus a second round with inputs of at
-  most 8 KB;
-* robustness review: the same targets and a new C-interface target, 35-40
-  minutes each;
-* post-review: all 8 targets (also capi, compress_rt and the
-  structure-aware gen_rt), 4 minutes each, and the attachment and C
-  targets again after the 1.0 restructure.
-* shared models (TABLES): decode, stream_reader and compress_rt 5 hours
-  each, read_metadata and gen_rt 2.5 hours each; stream_writer, attachments
-  and capi were not run.
-
-No crash, leak, out-of-memory or timeout in any run. Miri (`cargo +nightly
-miri test --lib`) passes the round-trip, rANS, numeric, CRC and threading
-tests (the pipelined decoder's raw-pointer writer, `par_map`).
+* Round trips (`examples/sweep.rs`): every demo of stratified (379) and set8 (8), 987
+  MB raw, compressed and decoded by both the whole-file decoder and the streaming
+  `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
+* The test suite (`cargo nextest run --release`, 49 tests) with the set8 demos and the
+  FTE float demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
+  `mvdz_rust/mvdz/tests/vectors/` are refused or decoded as `MANIFEST.tsv` records.
+* Fuzzing (`mvdz_rust/mvdz/fuzz/`: `decode`, `stream_reader`, `compress_rt`,
+  `gen_rt`): not yet run on format version 2.
 
 ## Reproducing
 
-The demos used here are public QuakeWorld demos; any collection of `.mvd`
-files works the same way. [`benchmarks/samples/`](benchmarks/samples)
-holds the lists of hashes used here, and set8, sample40 and stratified
-can be downloaded (Samples).
-
 ```
-# the demos: set8 for speeds, sample40 for development, stratified for ratios
+# the demos: set8 for speeds, stratified for ratios
 scripts/fetch_samples.sh set8 demos/set8
+scripts/fetch_samples.sh stratified demos/stratified
 
-# library speeds over a set of demos (every *.mvd in the directory),
-# compress and decompress at 4 threads and 1, with criterion
+# library speeds over every *.mvd in a directory, 4 threads and 1, with criterion
 MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
 
-# command-line decode speed against gzip, xz and zstd (one process per
-# file); for the speed tables each command ran once per round, 5 rounds
+# command-line decode speed against gzip, xz and zstd (one process per file)
 ls demos/set8/*.mvd > demos/set8.list
 scripts/bench_cli.sh demos/cli-bench demos/set8.list
 
-# round trips: every demo through the whole-file and the sequential reader
-cargo run --manifest-path mvdz_rust/Cargo.toml --release --example sweep -- demos/set8/*.mvd
-
-# the tests, with real demos where they help (see README, Tests)
-scripts/fetch_samples.sh sample40 testdata/sample
-MVDZ_TEST_DATA=$PWD/testdata cargo nextest run --manifest-path mvdz_rust/Cargo.toml --release
+# round trips: every demo through the whole-file and the streaming decoder
+cargo run --manifest-path mvdz_rust/Cargo.toml --release --example sweep -- demos/stratified/*.mvd
 ```
 
-For the confidence intervals, draw the sample at random from the whole
-collection (stratify by era and size if the collection is skewed), weight
-each demo by how many it stands for, and bootstrap within the strata.
+For the confidence intervals, draw the sample at random from the whole collection
+(stratify by era and size if the collection is skewed), weight each demo by how many it
+stands for, and bootstrap within the strata.
