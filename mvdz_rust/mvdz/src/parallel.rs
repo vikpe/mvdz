@@ -1,8 +1,6 @@
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// At most `max_threads` and the logical cores (1 where unknown or threads cannot be
-/// spawned); 0 is one per logical core.
 pub(crate) fn thread_count(max_threads: u8) -> usize {
     let available = if HAS_THREADS {
         std::thread::available_parallelism().map_or(1, NonZeroUsize::get)

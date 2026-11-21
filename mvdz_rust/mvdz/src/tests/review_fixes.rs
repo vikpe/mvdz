@@ -1,6 +1,4 @@
-//! Regressions for the final reviews (robustness R-*, correctness C-*,
-//! spec D-*): each test is a reviewer's reproducer, rebuilt here, that
-//! failed before the fix.
+//! Reviewers' reproducers (robustness R-*, correctness C-*, spec D-*), each failing before its fix.
 
 use super::common::*;
 use crate::Error;
@@ -17,9 +15,7 @@ fn small_demo_and_file() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     Ok((demo, file))
 }
 
-/// R-M2: a model of 65535 tables whose header is padded to satisfy rule
-/// M2 is refused before any table is built (the header must be consumed
-/// exactly).
+/// R-M2: a padded header of 65535 tables is refused before any table is built.
 #[test]
 fn r_m2_padded_model() {
     use crate::coder::rc::{IntModel, RangeEncoder};
@@ -48,18 +44,15 @@ fn r_m2_padded_model() {
             .max((decisions.saturating_sub(1024) / 128 + 1) as usize),
         0,
     );
-    // the models block: one model, the time stream's
     let mut models = Vec::new();
     for field in [1, 0, header.len()] {
         put_u32(&mut models, field);
     }
     models.extend_from_slice(&header);
-    // an empty rANS body
     let mut rans_body = Vec::new();
     put_u32(&mut rans_body, 0);
     let raw_len = table_count + 100;
-    // a transform body whose only stream is a time stream: fte, fte2,
-    // mvd1, tail; one entry (id 0, count, length); no blob body
+    // fte, fte2, mvd1, tail; one entry (id 0, count, length); no blob body
     let mut body = Vec::new();
     for field in [
         0,
@@ -99,13 +92,10 @@ fn r_m2_padded_model() {
     );
 }
 
-/// R-M4: a long run of tiny segments is charged to the budget: a
-/// sequential reader stops with a limit error instead of growing.
+/// R-M4: every segment's record is charged, so many tiny segments hit the memory limit.
 #[test]
-fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
-    // one segment per frame. The encoder cuts at 256 KiB, so the file is
-    // built by hand: the segment of a one-frame demo, 60,000 times, under
-    // the header of the whole demo
+fn r_m4_segment_records_are_charged() -> anyhow::Result<()> {
+    // the encoder cuts at 256 KiB, so one segment per frame is built by hand
     let frame = [0, 1, 1, 0, 0, 0, 1]; // dem_read holding one svc_nop
     let segment_count = 60_000;
     let demo = frame.repeat(segment_count);
@@ -118,9 +108,7 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
     }
     .build();
     assert_eq!(decompress(&file, 1)?, demo);
-    // the demo is 0.4 MB and a sequential reader holds one segment at a
-    // time: only the record kept per segment (64 bytes each, 3.8 MB) can
-    // exceed this
+    // only the 60,000 segment records (3.8 MB) exceed it, not the 0.4 MB demo
     let max_memory: u64 = 3 << 20;
     assert_eq!(
         crate::decode::decompress(&file, 1, max_memory).err(),
@@ -135,8 +123,6 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Decoding does not recompute the SHA-256: a file whose header carries
-/// another one decodes in every reader; a damaged segment does not.
 #[test]
 fn sha256_is_not_checked_on_decode() -> anyhow::Result<()> {
     let (demo, file) = small_demo_and_file()?;
@@ -148,7 +134,6 @@ fn sha256_is_not_checked_on_decode() -> anyhow::Result<()> {
     let mut read = Vec::new();
     std::io::Read::read_to_end(&mut crate::Decoder::new(Cursor::new(&other))?, &mut read)?;
     assert_eq!(read, decoded);
-    // one byte of a segment changed: decoding refuses it
     let demo = synthetic(&[], false);
     let file = compress(&[demo, vec![0; 5000]].concat())?;
     let intact = decompress(&file, 1)?;

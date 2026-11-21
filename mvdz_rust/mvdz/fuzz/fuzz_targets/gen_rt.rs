@@ -1,8 +1,5 @@
 #![no_main]
-//! Review target: a structure-aware demo must compress and round-trip at
-//! any thread count. No segment may fail the encoder's self-check (a
-//! transform bug the encoder hides by coding the segment as all tail) when
-//! `REQUIRE_TRANSFORM_LOSSLESS` is set; otherwise it is reported.
+//! Structure-aware demos from `mgen` must round-trip at any thread count.
 use libfuzzer_sys::fuzz_target;
 mod mgen;
 

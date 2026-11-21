@@ -1,12 +1,5 @@
-//! Golden vectors (tests/vectors, MANIFEST.tsv): every valid file must
-//! decode to the recorded SHA-256 through every reader; every hostile file
-//! must be refused by every reader with the recorded error. These are the
-//! cross-implementation vectors (FORMAT.md).
-//!
-//! `vectors_reproduce` rebuilds every vector from its source (the sample
-//! demos of the local cache, or the synthetic demos below) and requires the
-//! encoder's output to equal the committed file byte for byte. With
-//! `MVDZ_WRITE_VECTORS=1` it writes the files and the manifest instead.
+//! Cross-implementation golden vectors (`tests/vectors`, `MANIFEST.tsv`).
+//! `MVDZ_WRITE_VECTORS=1` rewrites them instead of checking them.
 
 use super::common::*;
 use crate::fields::put_u32;
@@ -54,13 +47,9 @@ fn vectors_decode() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- the vector set
-
 /// (file, bytes, decoded demo or None for a hostile file, how it was made)
 type Vector = (String, Vec<u8>, Option<Vec<u8>>, String);
 
-/// A demo with escapes: unknown commands, a command that does not fit, and
-/// hidden blocks with lying lengths.
 fn escapes() -> Vec<u8> {
     let mut demo = Demo(synthetic(&[], false));
     for index in 0..30u8 {
@@ -97,8 +86,7 @@ fn multi_demoinfo() -> Vec<u8> {
     demo
 }
 
-/// A model header of `table_count` tables with every symbol present: amplifies
-/// cheaply under an adaptive coder (robustness review 1 and 5).
+/// Robustness reviews 1 and 5: cheap to write, costly to build under an adaptive coder.
 fn amplifying_model(table_count: u32) -> Vec<u8> {
     use crate::coder::rc::{IntModel, RangeEncoder};
     const NQC: usize = 306;
@@ -128,12 +116,7 @@ fn amplifying_model(table_count: u32) -> Vec<u8> {
     body
 }
 
-/// A transform body made by hand: the structural streams `lazy` (id, back
-/// end, count, body) and the blob streams `blobs` (id, bytes), in that
-/// order.
-/// Returns the models block's body and the transform body. Each structural
-/// stream is coded with a model of its own symbols (so few that the model
-/// is its fallback table alone: the contexts do not matter).
+/// Returns (models block body, transform body).
 fn transform_body(
     lazy: &[(usize, &[u8])],
     blobs: &[(usize, &[u8])],
@@ -187,7 +170,6 @@ fn transform_body(
     Ok((crate::segment::models_body(&models, &ids), body))
 }
 
-/// The file of `demo` as one transform segment with these models and body.
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
     let ms = crate::segment::frame_scan(demo).duration_ms;
     let crc = crc32fast::hash(demo);
@@ -206,7 +188,6 @@ fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Resu
     .build())
 }
 
-/// Hostile files: refused by every reader.
 fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     let mut add = |name: &str, file: Vec<u8>, how: &str| {
         vectors.push((format!("hostile-{name}.mvdz"), file, None, how.to_string()));
@@ -277,7 +258,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     );
     let segment_header = parse_segment_header(&file_parts.segments[1])?;
     let mut edited = file_parts.clone();
-    edited.segments[1][segment_header.body_offset - 2] ^= 0x10;
+    edited.segments[1][segment_header.coded_offset - 2] ^= 0x10;
     add(
         "segment-crc",
         edited.build(),
@@ -298,8 +279,6 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         edited.build(),
         "the first segment padded with zeros to one byte over the largest coded length (2 MiB)",
     );
-    // a segment whose header claims 1 ms more than its frames hold (the
-    // header's duration raised with it)
     let mut edited = parts(&compress(&synthetic(&[], false))?)?;
     assert_eq!(edited.segments.len(), 1);
     let duration_ms = u32::from_le_bytes(edited.segments[0][4..8].try_into()?);
@@ -327,7 +306,6 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         edited_file,
         "the base file without its models block",
     );
-    // one usercmd block in a segment built by hand
     let mut one = Demo(Vec::new());
     one.hidden(
         0,
@@ -365,8 +343,6 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     models_block(&mut add)
 }
 
-/// Hostile models blocks (FORMAT.md 2.6, 8.4), from the usercmd demo
-/// repeated to several segments.
 fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let usercmd = usercmd_demo();
     let file = compress(&several_segments(&usercmd))?;
@@ -497,8 +473,7 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Every hostile vector is refused by every reader (they are built from
-/// synthetic demos, so this runs without the demo cache).
+/// Runs without the demo cache: every hostile vector is built from synthetic demos.
 #[test]
 fn hostile_vectors_are_refused() -> anyhow::Result<()> {
     let mut vectors = Vec::new();
@@ -510,7 +485,7 @@ fn hostile_vectors_are_refused() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Every vector; None without the demos they are made from.
+/// None without the sample demos.
 fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let sources = || {
         let duel = duel()?;
@@ -527,7 +502,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         vectors.push((name.to_string(), file, Some(demo.to_vec()), how.to_string()));
     };
     // without the input check: some vectors hold non-demo input
-    let encode = |demo: &[u8]| anyhow::Ok(unchecked(demo)?.0);
+    let encode = |demo: &[u8]| anyhow::Ok(compress_unchecked(demo)?.0);
     let duel_source = "duel = sample 3ff1f82b...8d92";
     add(
         "duel.normal.mvdz",

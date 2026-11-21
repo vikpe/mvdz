@@ -1,18 +1,4 @@
-//! The MVDZ container (FORMAT.md, Part I) and the layout rules every reader applies
-//! ([`Layout`]).
-//!
-//! ```text
-//! file    := header | models | segment*
-//! header  := "MVDZ" | version u32 | size u64 | duration_ms u64
-//!            | crc u64 | sha256[32]                                (64 bytes)
-//! models  := len u32 | body[len]
-//! segment := len u32 | raw_len u32 | duration_ms u32 | crc u32
-//!            | coded[len]                              (16 bytes, then coded)
-//! ```
-//!
-//! Integers are little-endian. Header fields describe the original demo; `crc` is
-//! CRC-32 in the low 32 bits, the high 32 are 0. The file ends when `raw_len` sums
-//! to `size`.
+//! The MVDZ container (FORMAT.md, Part I) and the layout rules every reader applies.
 
 use crate::budget::{Budget, Charge};
 use crate::coder::rans::ModelsBlock;
@@ -22,27 +8,21 @@ use crate::fields::read_u32;
 pub(crate) const MAGIC: &[u8; 4] = b"MVDZ";
 pub(crate) const VERSION: u32 = 2;
 pub(crate) const HEADER_LEN: usize = 64;
-/// Bytes of a length field.
 pub(crate) const LEN_FIELD_LEN: usize = 4;
 
-/// What a reader holds at most per segment. The encoder cuts here only where no frame
-/// boundary comes first.
 pub(crate) const MAX_SEGMENT_RAW: u64 = 1 << 20;
-/// Twice [`MAX_SEGMENT_RAW`]: no segment the encoder writes comes near it.
+/// Twice [`MAX_SEGMENT_RAW`]: far above any segment the encoder writes.
 pub(crate) const MAX_SEGMENT_CODED: u64 = 2 << 20;
 pub(crate) const MAX_MODELS_LEN: u64 = 1 << 24;
 /// An encoder rule, not a reader rule.
 pub(crate) const MAX_SEGMENTS: usize = 1 << 16;
 
-/// Before any coded data is read.
 pub(crate) fn check_coded_len(coded: u64) -> Result<()> {
     if coded > MAX_SEGMENT_CODED {
         return bad("segment size");
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------- header
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Header {
@@ -70,7 +50,6 @@ impl Header {
     }
 }
 
-/// Magic and version, then the fields of `header`.
 pub(crate) fn header_bytes(header: &Header) -> [u8; HEADER_LEN] {
     let mut bytes = [0u8; HEADER_LEN];
     bytes[..4].copy_from_slice(MAGIC);
@@ -82,8 +61,6 @@ pub(crate) fn header_bytes(header: &Header) -> [u8; HEADER_LEN] {
     bytes
 }
 
-/// Short input still gets "not an MVDZ file" or "unsupported MVDZ version" when the
-/// bytes present show it; otherwise "truncated header".
 pub(crate) fn parse_header(bytes: &[u8]) -> Result<Header> {
     if bytes.first_chunk() != Some(MAGIC) {
         return Err(Error::NotMvdz);
@@ -113,13 +90,11 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<Header> {
     })
 }
 
-/// `body` empty: no models.
 pub(crate) fn models_block(out: &mut Vec<u8>, body: &[u8]) {
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(body);
 }
 
-/// `body`: the header fields from [`segment_header_bytes`], then the coded data.
 pub(crate) fn segment_block(out: &mut Vec<u8>, body: &[u8]) {
     out.extend_from_slice(&((body.len() - SEGMENT_FIELDS_LEN) as u32).to_le_bytes());
     out.extend_from_slice(body);
@@ -149,19 +124,16 @@ impl SegmentSpan {
     }
 }
 
-// ---------------------------------------------------------------- segment header
-
 /// `raw_offset` and `offset_ms` are not stored: [`Layout::segment`] fills them in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SegmentHeader {
     pub(crate) raw_offset: u64,
     pub(crate) raw_len: u32,
     pub(crate) offset_ms: u64,
-    /// The sum of its frame time bytes.
     pub(crate) duration_ms: u32,
     pub(crate) crc32: u32,
     /// Of the coded data in the segment body.
-    pub(crate) body_offset: usize,
+    pub(crate) coded_offset: usize,
 }
 
 pub(crate) fn segment_header_bytes(raw_len: u32, duration_ms: u32, crc: u32) -> Vec<u8> {
@@ -172,7 +144,6 @@ pub(crate) fn segment_header_bytes(raw_len: u32, duration_ms: u32, crc: u32) -> 
     bytes
 }
 
-/// Header fields after the length field; the coded data starts here.
 pub(crate) const SEGMENT_FIELDS_LEN: usize = 4 + 4 + 4;
 
 pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
@@ -193,14 +164,11 @@ pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
         offset_ms: 0,
         duration_ms,
         crc32,
-        body_offset: SEGMENT_FIELDS_LEN,
+        coded_offset: SEGMENT_FIELDS_LEN,
     })
 }
 
-// ---------------------------------------------------------------- layout rules
-
-/// Fed in file order: header, models, segments. Every reader applies the layout rules
-/// through it, so all accept and refuse the same files (FORMAT.md, "Validation").
+/// Every reader applies the layout rules through it, so all accept and refuse the same files.
 #[derive(Debug, Default)]
 pub(crate) struct Layout {
     pub(crate) header: Header,
@@ -209,12 +177,10 @@ pub(crate) struct Layout {
     pub(crate) segments: Vec<(SegmentSpan, SegmentHeader)>,
     raw_len: u64,
     duration_ms: u64,
-    /// For the models and one record per segment.
     charge: Option<Charge>,
 }
 
 impl Layout {
-    /// `header`: the first [`HEADER_LEN`] bytes, or all of a shorter file.
     pub(crate) fn new(header: &[u8], budget: &Budget) -> Result<Self> {
         Ok(Self {
             header: parse_header(header)?,
@@ -234,7 +200,6 @@ impl Layout {
         self.has_models
     }
 
-    /// `None`: the models block is empty.
     pub(crate) fn models(&mut self, models_block: Option<ModelsBlock>) -> Result<()> {
         if let Some(models_block) = &models_block {
             self.charge(models_block.len())?;
@@ -245,7 +210,7 @@ impl Layout {
     }
 
     /// Returns `header` with its raw offset and start time filled in.
-    pub(crate) fn segment(
+    pub(crate) fn add_segment(
         &mut self,
         span: &SegmentSpan,
         mut header: SegmentHeader,
@@ -269,7 +234,6 @@ impl Layout {
         Ok(header)
     }
 
-    /// The file ends here.
     pub(crate) fn is_complete(&self) -> bool {
         self.raw_len == self.header.size_bytes
     }

@@ -1,7 +1,5 @@
-//! Structure-aware MVD generator for the review fuzz targets: turns a
-//! byte string into a demo whose frames and svc commands are mostly
-//! well-formed for the protocol state in force (so the walker reaches its
-//! deep paths), with occasional garbage, lies and escapes.
+//! Structure-aware MVD generator: mostly well-formed for the protocol state in force, so
+//! the walker reaches its deep paths, with occasional garbage.
 #![allow(dead_code)]
 
 const PROTOCOL_VERSION_FTE: u32 = u32::from_le_bytes(*b"FTEX");
@@ -9,8 +7,7 @@ const PROTOCOL_VERSION_MVD_1: u32 = u32::from_le_bytes(*b"MVD1");
 const FTE_PEXT_FLOAT_COORDS: u32 = 1 << 15;
 const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
 
-/// The protocol state that changes command widths, tracked from the serverdata the
-/// generator writes: independent of the library's own tracking.
+/// Tracked from the serverdata the generator writes, independently of the library.
 #[derive(Debug, Default)]
 pub struct Proto {
     pub fte: u32,
@@ -134,8 +131,6 @@ fn delta(chooser: &mut Chooser, proto: &Proto, out: &mut Vec<u8>, entity: u16) {
     }
 }
 
-/// One svc command (cmd byte + body) for the protocol state `proto`; updates
-/// `proto` on serverdata.
 fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
     let kind = chooser.below(40);
     let coord_len = proto.coord();
@@ -460,7 +455,6 @@ fn hidden(chooser: &mut Chooser, out: &mut Vec<u8>) {
     }
 }
 
-/// A demo from the choice stream.
 pub fn demo(bytes: &[u8]) -> Vec<u8> {
     let mut chooser = Chooser::new(bytes);
     let mut proto = Proto::default();

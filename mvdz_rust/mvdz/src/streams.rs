@@ -42,7 +42,6 @@ pub(crate) const UC: usize = 34;
 pub(crate) const UC_MIN_SYMBOLS: usize = 12;
 pub(crate) const LAZY_STREAM_COUNT: usize = 35;
 
-// numeric streams
 pub(crate) const PI_OX: usize = 48;
 pub(crate) const PI_AP: usize = 51;
 pub(crate) const PE_OX: usize = 54;
@@ -54,7 +53,6 @@ pub(crate) const PE_F0: usize = 63;
 /// usercmd angles on the 360/65536 grid
 pub(crate) const UC_A: usize = 66;
 
-// blob streams
 pub(crate) const RAW: usize = 80;
 pub(crate) const TAIL: usize = 81;
 pub(crate) const SET: usize = 82;

@@ -1,14 +1,8 @@
-//! The decoders must never panic (or loop forever) on corrupt input:
-//! random byte flips, truncations, splices and pure garbage behind a valid
-//! magic. Every case must return `Err` or bytes whose checksums matched.
-
 use super::common::*;
 use pretty_assertions::assert_eq;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-/// The duel cut short to keep it quick (the cut goes to the raw tail): one
-/// segment and several.
-fn demos() -> Option<[Vec<u8>; 2]> {
+fn short_duels() -> Option<[Vec<u8>; 2]> {
     let duel = duel()?;
     Some([200_000, 800_000].map(|len| duel[..len.min(duel.len())].to_vec()))
 }
@@ -43,7 +37,7 @@ fn garbage_never_panics() {
 
 #[test]
 fn mutated_streams_never_panic() -> anyhow::Result<()> {
-    let Some(demos) = demos() else {
+    let Some(demos) = short_duels() else {
         eprintln!("no demo available, skipping");
         return Ok(());
     };

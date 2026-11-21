@@ -1,11 +1,4 @@
-//! Encode and decode speed over a fixed set of demos, at 4 threads and 1.
-//!
-//! The demos are every `*.mvd` in the directory named by `MVDZ_BENCH_DEMOS`
-//! (none are in the repository; `scripts/fetch_samples.sh set8 DIR` downloads
-//! set8, the speed set of BENCHMARKS.md); without it nothing is measured. One
-//! iteration codes every demo once, one file at a time, as the library
-//! does by default: the encoder with its self-check, the decoder with
-//! every check. Throughput is MB/s of raw demo (MB = 10^6 bytes).
+//! Encode and decode speed of every `*.mvd` in `MVDZ_BENCH_DEMOS`, at 4 threads and 1:
 //!
 //! ```text
 //! # from the repository root
@@ -15,8 +8,6 @@
 //! MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml \
 //!     --bench codec -- --baseline before
 //! ```
-//!
-//! Compressed size and peak memory are not measured here.
 
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
@@ -25,10 +16,9 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Thread counts measured; 4 is the headline figure.
+/// 4 is the headline figure.
 const THREADS: [u8; 2] = [4, 1];
 
-/// The demos, sorted by file name, or none when `MVDZ_BENCH_DEMOS` is unset.
 fn demos() -> Vec<Vec<u8>> {
     let Some(dir) = std::env::var_os("MVDZ_BENCH_DEMOS") else {
         eprintln!("MVDZ_BENCH_DEMOS is not set: no demos to measure");
@@ -82,7 +72,6 @@ fn codec(criterion: &mut Criterion) {
     });
 }
 
-/// One group, `name/4t` and `name/1t`: `run(threads)` codes every demo once.
 fn measure(criterion: &mut Criterion, name: &str, raw_bytes: usize, run: impl Fn(u8)) {
     let mut group = criterion.benchmark_group(name);
     group

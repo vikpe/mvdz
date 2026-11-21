@@ -1,7 +1,6 @@
-//! Decoding: whole-file `decode` and the streaming `Decoder`, then the internals: the
-//! layout scan, one segment's decode, and the checks over the whole demo.
+//! Decoding: whole-file and streaming, the layout scan, and the checks over the demo.
 
-use crate::budget::{Budget, Charge, DEFAULT_MAX_MEMORY, zeroed};
+use crate::budget::{Budget, Charge, DEFAULT_MAX_MEMORY, try_zeroed};
 use crate::coder::rans::ModelsBlock;
 use crate::error::{Error, Result, bad};
 use crate::format::{
@@ -13,14 +12,12 @@ use crate::segment::{self, FrameScan, frame_scan};
 use std::collections::VecDeque;
 use std::io::{self, Read};
 
-/// `bytes`: what `encode` returned. `max_threads`: capped at the logical cores; 0 is one per
-/// logical core.
+/// `max_threads` 0 is all logical cores.
 pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     decompress(bytes, thread_count(max_threads), DEFAULT_MAX_MEMORY)
 }
 
-/// Yields the decoded bytes through `io::Read`, checked as they arrive: each segment's
-/// CRC-32 before its bytes, the whole CRC-32 before the end. The first error is sticky.
+/// Each segment's CRC-32 is checked before its bytes are read; the first error is sticky.
 #[derive(Debug)]
 pub struct Decoder<R: Read> {
     input: R,
@@ -29,7 +26,6 @@ pub struct Decoder<R: Read> {
     current: Vec<u8>,
     current_charge: Option<Charge>,
     at: usize,
-    /// Decoded and checked, after `current`.
     ready: VecDeque<(Vec<u8>, Charge)>,
     /// Met after the segments in `ready`; reported once they are read.
     deferred_error: Option<Error>,
@@ -41,13 +37,11 @@ pub struct Decoder<R: Read> {
 }
 
 impl<R: Read> Decoder<R> {
-    /// Reads the header; decodes on all logical cores until `max_threads` says otherwise.
     pub fn new(input: R) -> Result<Self> {
         Self::with_max_memory(input, thread_count(0), DEFAULT_MAX_MEMORY)
     }
 
-    /// Up to this many segments are decoded at once, nothing more is buffered; capped at the
-    /// logical cores, 0 is all of them.
+    /// Segments decoded at once; capped at the logical cores, 0, the default, is all of them.
     #[must_use]
     pub fn max_threads(mut self, max_threads: u8) -> Self {
         self.threads = thread_count(max_threads);
@@ -89,7 +83,6 @@ impl<R: Read> Decoder<R> {
         })
     }
 
-    /// Returns 0 at the end. The first error is returned again by every later call.
     pub(crate) fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.check_failed()?;
         while self.at == self.current.len() && !self.is_done {
@@ -115,7 +108,6 @@ impl<R: Read> Decoder<R> {
         }
     }
 
-    /// `None`: the stream ends before its first byte.
     fn read_len(&mut self) -> Result<Option<u64>> {
         let mut field = [0u8; LEN_FIELD_LEN];
         let mut filled = 0;
@@ -131,7 +123,6 @@ impl<R: Read> Decoder<R> {
         Ok(len_field(&field))
     }
 
-    /// Charged to the budget while the returned charge lives.
     fn read_body(&mut self, len: u64) -> Result<(Vec<u8>, Charge)> {
         let charge = self.budget.alloc(len)?;
         // the data arrives before the buffer grows: a lying length on a
@@ -157,12 +148,11 @@ impl<R: Read> Decoder<R> {
         };
         let (body, charge) = self.read_body(span.body_len)?;
         let header = parse_segment_header(&body[..SEGMENT_FIELDS_LEN])?;
-        let header = self.layout.segment(&span, header)?;
+        let header = self.layout.add_segment(&span, header)?;
         self.next_offset = span.end();
         Ok((header, body, charge))
     }
 
-    /// Up to `threads` segments, decoded in parallel, queued in order.
     /// ponytail: reading and decoding take turns and a batch waits for its
     /// slowest segment; a rolling window would overlap them.
     fn decode_batch(&mut self) -> Result<()> {
@@ -181,7 +171,7 @@ impl<R: Read> Decoder<R> {
         let decoded = par_map(self.threads, segments.len(), |index| {
             let (header, body, _) = &segments[index];
             let charge = budget.alloc(u64::from(header.raw_len))?;
-            let mut out = zeroed(header.raw_len as usize)?;
+            let mut out = try_zeroed(header.raw_len as usize)?;
             let scan = decode_segment(layout, body, header, &mut out, budget)?;
             Ok((out, charge, scan))
         });
@@ -204,7 +194,6 @@ impl<R: Read> Decoder<R> {
         Ok(())
     }
 
-    /// Until a segment's bytes are available or the file ends.
     fn advance(&mut self) -> Result<()> {
         while !self.is_done && self.at == self.current.len() {
             if let Some((out, charge)) = self.ready.pop_front() {
@@ -237,7 +226,6 @@ impl<R: Read> Decoder<R> {
                 continue;
             }
             if self.layout.is_complete() {
-                // the file ends here
                 let mut one = [0u8; 1];
                 loop {
                     match self.input.read(&mut one) {
@@ -266,19 +254,16 @@ impl<R: Read> Read for Decoder<R> {
     }
 }
 
-/// `None`: `file` ends first.
 fn bytes_at(file: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
     let start = usize::try_from(offset).ok()?;
     file.get(start..start.checked_add(usize::try_from(len).ok()?)?)
 }
 
-/// `None`: `file` ends first.
 fn len_at(file: &[u8], offset: u64) -> Option<u64> {
     len_field(bytes_at(file, offset, LEN_FIELD_LEN as u64)?)
 }
 
-/// Header, models and every segment header (FORMAT.md, "Validation"); segment payloads
-/// are not decoded.
+/// FORMAT.md, "Validation"; segment payloads are not decoded.
 pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Result<Layout> {
     let file_len = file.len() as u64;
     let mut layout = Layout::new(&file[..file.len().min(HEADER_LEN)], budget)?;
@@ -314,7 +299,7 @@ pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Resul
         }
         let fields = bytes_at(file, span.body_offset(), SEGMENT_FIELDS_LEN as u64)
             .ok_or(Error::Corrupt("truncated"))?;
-        layout.segment(&span, parse_segment_header(fields)?)?;
+        layout.add_segment(&span, parse_segment_header(fields)?)?;
         offset = span.end();
     }
     if offset != file_len {
@@ -324,8 +309,6 @@ pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Resul
     Ok(layout)
 }
 
-/// Frames, frame time and whole-frame length of one decoded segment.
-/// `dst`: exactly the segment's raw length.
 pub(crate) fn decode_segment(
     layout: &Layout,
     body: &[u8],
@@ -338,7 +321,7 @@ pub(crate) fn decode_segment(
         return bad("segment length");
     }
     let coded = body
-        .get(header.body_offset..)
+        .get(header.coded_offset..)
         .ok_or(Error::Corrupt("segment header"))?;
     let transform_header = segment::parse_transform_header(coded, dst.len())?;
     segment::decode(coded, &transform_header, dst, models_block, budget)?;
@@ -352,8 +335,7 @@ pub(crate) fn decode_segment(
     Ok(scan)
 }
 
-/// Over every segment, in order. The header's SHA-256 names the demo; decoding does not
-/// recompute it.
+/// Decoding does not recompute the header's SHA-256.
 #[derive(Debug, Default)]
 pub(crate) struct DemoCheck {
     crc32: crc32fast::Hasher,
@@ -375,7 +357,6 @@ impl DemoCheck {
         self.is_inside_frame = has_tail && !is_cut_at_max;
         Ok(())
     }
-    /// After the last segment.
     pub(crate) fn finish(self, layout: &Layout) -> Result<()> {
         let header = &layout.header;
         if self.crc32.finalize() != header.crc32 || self.size_bytes != header.size_bytes {
@@ -393,7 +374,7 @@ pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result
     let layout = scan_layout(file, threads, &budget)?;
     let size = layout.header.size_bytes;
     let _charge = budget.alloc(size)?;
-    let mut out = zeroed(usize::try_from(size).map_err(|_| Error::MemoryLimit("demo size"))?)?;
+    let mut out = try_zeroed(usize::try_from(size).map_err(|_| Error::MemoryLimit("demo size"))?)?;
     let segment_count = layout.segments.len();
     let mut slices: Vec<std::sync::Mutex<&mut [u8]>> = Vec::with_capacity(segment_count);
     let mut rest: &mut [u8] = &mut out;

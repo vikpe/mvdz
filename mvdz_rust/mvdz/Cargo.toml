@@ -13,7 +13,6 @@ categories = ["compression", "game-development"]
 exclude = ["/fuzz"]
 
 [features]
-# hidden entry points for the fuzz targets (fuzz/)
 fuzz = []
 
 [dependencies]
@@ -26,7 +25,7 @@ anyhow = { workspace = true }
 criterion = { workspace = true }
 pretty_assertions = { workspace = true }
 
-# encode and decode speed (benches/codec.rs); needs MVDZ_BENCH_DEMOS
+# needs MVDZ_BENCH_DEMOS
 [[bench]]
 name = "codec"
 harness = false

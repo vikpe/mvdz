@@ -1,7 +1,3 @@
-//! The header and what a file says about itself; demos with KTX demoinfo
-//! and truncated demos. Synthetic demos are built here, so most of these
-//! run without the demo cache.
-
 use super::common::*;
 use crate::format::{HEADER_LEN, Header, header_bytes, parse_header};
 use anyhow::Context as _;
@@ -10,8 +6,6 @@ use sha2::{Digest, Sha256};
 use std::assert_matches;
 use std::io::Cursor;
 
-/// Every header field describes the original demo; the segments' raw
-/// lengths and start times are running sums.
 #[test]
 fn header_describes_the_demo() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{\"x\":1}")], false);
@@ -56,7 +50,6 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A wrong header field makes every reader refuse the file.
 #[test]
 fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     let demo = several_segments(&synthetic(&[], false));
@@ -84,18 +77,15 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
         readers_agree(&edited.build(), "sha256").context("every reader refuses")?,
         demo
     );
-    // a byte after the last segment
     let mut trailing = file.clone();
     trailing.push(0);
     assert!(readers_agree(&trailing, "trailing byte").is_none());
-    // a dropped segment, two segments swapped
     let mut edited = file_parts.clone();
     edited.segments.pop();
     assert!(readers_agree(&edited.build(), "dropped segment").is_none());
     let mut edited = file_parts;
     edited.segments.swap(1, 2);
     assert!(readers_agree(&edited.build(), "swapped segments").is_none());
-    // an unknown version, another magic
     let mut other_version = file.clone();
     other_version[4] = 3;
     assert_matches!(
@@ -106,7 +96,6 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     let mut other_magic = file.clone();
     other_magic[0] = b'N';
     assert_matches!(decompress(&other_magic, 1), Err(crate::Error::NotMvdz));
-    // every cut of the file
     for cut in [
         0,
         3,
@@ -124,7 +113,6 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
 
 #[test]
 fn demoinfo_multi_block_round_trip() -> anyhow::Result<()> {
-    // blocks 1, 2, 0; then a second, newer copy
     let parts = [
         (1, "{\"a\":1,"),
         (2, "\"b\":2"),
@@ -146,7 +134,6 @@ fn demoinfo_multi_block_round_trip() -> anyhow::Result<()> {
 
 #[test]
 fn truncated_demo_round_trips() -> anyhow::Result<()> {
-    // the truncated frame in the last segment
     let small = synthetic(&[], true);
     let long = [
         several_segments(&synthetic(&[], false)),
@@ -161,7 +148,6 @@ fn truncated_demo_round_trips() -> anyhow::Result<()> {
         );
     }
     if let Some(duel) = duel() {
-        // one byte holds no frame: refused as a non-demo
         let result = compress(&duel[..1]);
         assert_matches!(result, Err(crate::Error::NotMvd(_)), "{result:?}");
         for cut in [1000, 123_457, duel.len() / 2 + 3, duel.len() - 1] {

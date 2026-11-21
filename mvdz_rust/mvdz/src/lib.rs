@@ -1,7 +1,4 @@
-//! mvdz: lossless, format-aware compression of `QuakeWorld` MVD demos.
-//!
-//! Format (FORMAT.md): a fixed header, the shared models, then segments of about 256 KiB
-//! of demo coded by a structural transform (static rANS; raw DEFLATE for the rest).
+//! mvdz: lossless compression of `QuakeWorld` MVD demos (FORMAT.md).
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {

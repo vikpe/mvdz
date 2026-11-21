@@ -197,7 +197,6 @@ pub(crate) const GROUPS: [Group; 12] = [
 ];
 
 impl Group {
-    /// Stream ids by local index.
     pub(crate) fn streams(self) -> &'static [usize] {
         match self {
             Self::PlayerOrigin(0) => &[PI_OX, PI_F0],
@@ -276,14 +275,12 @@ struct Track {
     previous: u16,
     before_previous: u16,
     residual: i32,
-    // IEEE bit patterns
-    float_last: u32,
-    float_previous: u32,
-    float_residual: i32,
+    float_last_bits: u32,
+    float_previous_bits: u32,
+    float_residual_bits: i32,
     last_time: u32,
 }
 
-/// Returns (now, previous) and advances `frame_times`.
 #[inline(always)]
 fn time_deltas(frame_times: &mut (u32, u32), time: u32) -> (i32, i32) {
     let (last, previous) = *frame_times;
@@ -313,12 +310,14 @@ fn pi_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     if record.has_float_coords {
         if is_sent {
             let offset = record.offset + 4 * (record.flags & ((1 << axis) - 1)).count_ones();
-            let prediction = track
-                .float_last
-                .wrapping_add(track.float_last.wrapping_sub(track.float_previous));
+            let prediction = track.float_last_bits.wrapping_add(
+                track
+                    .float_last_bits
+                    .wrapping_sub(track.float_previous_bits),
+            );
             let context = NumericContext {
                 features: [
-                    residual_bucket(track.float_residual),
+                    residual_bucket(track.float_residual_bits),
                     axis as u8,
                     0,
                     0,
@@ -328,12 +327,12 @@ fn pi_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
             };
             let (value, residual) =
                 code_u32::<IS_ENCODE, IO>(offset, prediction, io, stream_index + 1, context);
-            track.float_previous = track.float_last;
-            track.float_last = value;
-            track.float_residual = residual;
+            track.float_previous_bits = track.float_last_bits;
+            track.float_last_bits = value;
+            track.float_residual_bits = residual;
         } else {
-            track.float_previous = track.float_last;
-            track.float_residual = 0;
+            track.float_previous_bits = track.float_last_bits;
+            track.float_residual_bits = 0;
         }
     } else {
         let value = if is_sent {
@@ -432,12 +431,14 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     if is_sent {
         let offset = record.origin_offsets()[axis];
         if record.bits & PE_FLOAT != 0 {
-            let prediction = track
-                .float_last
-                .wrapping_add(track.float_last.wrapping_sub(track.float_previous));
+            let prediction = track.float_last_bits.wrapping_add(
+                track
+                    .float_last_bits
+                    .wrapping_sub(track.float_previous_bits),
+            );
             let context = NumericContext {
                 features: [
-                    residual_bucket(track.float_residual),
+                    residual_bucket(track.float_residual_bits),
                     axis as u8,
                     0,
                     0,
@@ -447,9 +448,9 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
             };
             let (value, residual) =
                 code_u32::<IS_ENCODE, IO>(offset, prediction, io, stream_index + 1, context);
-            track.float_previous = track.float_last;
-            track.float_last = value;
-            track.float_residual = residual;
+            track.float_previous_bits = track.float_last_bits;
+            track.float_last_bits = value;
+            track.float_residual_bits = residual;
         } else {
             let velocity = i32::from(track.last.wrapping_sub(track.previous).cast_signed());
             let prediction = track.last.wrapping_add(velocity.cast_unsigned() as u16);
@@ -473,8 +474,8 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     } else {
         track.previous = track.last;
         track.residual = 0;
-        track.float_previous = track.float_last;
-        track.float_residual = 0;
+        track.float_previous_bits = track.float_last_bits;
+        track.float_residual_bits = 0;
     }
 }
 
@@ -484,10 +485,10 @@ fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &
     for record in records.usercmds.iter() {
         let player_tracks = &mut tracks[record.number as usize];
         for (axis, track) in player_tracks.iter_mut().enumerate() {
-            if record.grid & (1 << axis) == 0 {
+            if record.grid_axes & (1 << axis) == 0 {
                 continue;
             }
-            let offset = record.offset + 4 * axis as u32;
+            let offset = record.pitch_offset + 4 * axis as u32;
             let velocity = i32::from(track.last.wrapping_sub(track.previous).cast_signed());
             let previous_velocity = i32::from(
                 track

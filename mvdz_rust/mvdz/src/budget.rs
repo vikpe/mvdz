@@ -1,11 +1,7 @@
-//! A memory limit on top of the format's, which already make a decoder's memory and work
-//! linear in its input. Checked before each allocation; running out is an error.
-
 use crate::error::{Error, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 1 GiB on 64-bit targets, 256 MiB on 32-bit ones.
 pub(crate) const DEFAULT_MAX_MEMORY: u64 = if usize::BITS >= 64 {
     1 << 30
 } else {
@@ -18,7 +14,6 @@ struct Inner {
     used: AtomicU64,
 }
 
-/// All clones draw on the same counter.
 #[derive(Debug, Clone)]
 pub(crate) struct Budget(Arc<Inner>);
 
@@ -63,7 +58,6 @@ impl Budget {
     }
 }
 
-/// Released on drop.
 #[derive(Debug)]
 pub(crate) struct Charge {
     budget: Budget,
@@ -90,8 +84,7 @@ impl Drop for Charge {
     }
 }
 
-/// Allocation failure is an error.
-pub(crate) fn zeroed(len: usize) -> Result<Vec<u8>> {
+pub(crate) fn try_zeroed(len: usize) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(len)
@@ -100,8 +93,7 @@ pub(crate) fn zeroed(len: usize) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// Allocation failure is an error.
-pub(crate) fn with_capacity<T>(capacity: usize) -> Result<Vec<T>> {
+pub(crate) fn try_with_capacity<T>(capacity: usize) -> Result<Vec<T>> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(capacity)

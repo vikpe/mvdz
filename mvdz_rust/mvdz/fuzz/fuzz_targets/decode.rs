@@ -1,5 +1,4 @@
 #![no_main]
-//! Whole-file decoding of arbitrary input at 1 and 2 threads.
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {

@@ -12,14 +12,11 @@ repository = "https://github.com/galfthan/mvdz"
 [workspace.dependencies]
 mvdz = { path = "mvdz" }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
-# the CRC-32 of zlib
 crc32fast = { version = "1", default-features = false, features = ["std"] }
-# raw DEFLATE, the format's general-purpose compressor: pure Rust, so no C
-# code and the same on wasm
+# pure Rust: no C code, the same on wasm
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 anyhow = { version = "1", default-features = false, features = ["std"] }
-# benches/codec.rs; no plots and no rayon: the statistics and the baseline
-# comparison are what is used
+# no plots and no rayon: only the statistics and baseline comparison are used
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 pretty_assertions = { version = "1", default-features = false, features = ["std"] }
@@ -39,9 +36,7 @@ codegen-units = 16
 debug = 0
 
 [workspace.lints.rust]
-# no unsafe code anywhere: library, tool, tests, examples, benchmarks
 unsafe_code = "forbid"
-# `pub` only where something outside the crate names it
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
@@ -62,7 +57,7 @@ redundant_pub_crate = "allow"
 
 # Narrowing casts are bounded, not lossy: positions and lengths by the
 # 1 MiB segment and 16 MiB models caps, small values by a clamp or range
-# just before. Only the entropy coders and varints drop high bits, on purpose.
+# just before. Only the entropy coders drop high bits, on purpose.
 cast_possible_truncation = "allow"
 
 # The hot loops (walker, rANS, numeric groups) keep their written form,

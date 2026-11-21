@@ -1,5 +1,5 @@
-//! Protocol state and the body size of each `svc_*` command (mvdsv `sv_ents.c`, ezquake
-//! `cl_parse.c`). A mis-sized command stays lossless: both directions size it alike.
+//! `svc_*` body sizes as mvdsv `sv_ents.c` and ezquake `cl_parse.c` write them. A mis-sized
+//! command stays lossless: both directions size it alike.
 
 pub(crate) const PROTOCOL_VERSION: u32 = 28;
 
@@ -139,8 +139,8 @@ impl Proto {
         self.derive();
     }
 
-    /// Without the command byte; `None` if unknown or truncated.
-    pub(crate) fn command_size(&self, command: u8, body: &[u8]) -> Option<usize> {
+    /// Excludes the command byte.
+    pub(crate) fn command_body_size(&self, command: u8, body: &[u8]) -> Option<usize> {
         let mut cursor = Cursor {
             buf: body,
             offset: 0,
@@ -432,7 +432,7 @@ pub(crate) fn le32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(*bytes.first_chunk().expect("caller checked 4 bytes"))
 }
 
-/// Header included; `None` if unknown type or truncated.
+/// Includes the frame header.
 pub(crate) fn frame_len(src: &[u8], start: usize) -> Option<usize> {
     let remaining = src.len().checked_sub(start)?;
     if remaining < 2 {

@@ -1,5 +1,4 @@
-//! Tests that build files by hand or check the readers against each other; they
-//! use the crate's internals.
+//! Here, not in `tests/`: they build files by hand and need the crate's internals.
 
 mod common;
 mod corrupt;

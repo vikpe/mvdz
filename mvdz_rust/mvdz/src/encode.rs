@@ -1,5 +1,4 @@
-//! Encoding: `encode` and `Encoder`, then the internals: walk, code, assemble, and check
-//! that the file decodes to the input (falling back per segment to all tail).
+//! Encoding: walk, code, assemble, and check that the file decodes to its input.
 
 use crate::budget::Budget;
 use crate::coder::rans::FileModel;
@@ -15,16 +14,13 @@ use crate::segment::{self, Numerics, Walked, cut_points, frame_scan};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
-/// `bytes`: a raw `.mvd`; other bytes are `Error::NotMvd`.
-/// `max_threads`: capped at the logical cores; 0 is one per logical core.
+/// Refuses bytes that are not an MVD demo; `max_threads` 0 is all logical cores.
 pub fn encode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     check_demo(bytes)?;
     compress(bytes, thread_count(max_threads)).map(|(encoded, _)| encoded)
 }
 
-/// Collects the bytes written to it; `finish` encodes them and writes the result. The
-/// encoder needs all the bytes, so nothing is written before `finish`, and dropping it
-/// without `finish` writes nothing.
+/// Nothing is written before `finish`; dropping it without `finish` writes nothing.
 #[derive(Debug)]
 pub struct Encoder<W: Write> {
     writer: W,
@@ -33,7 +29,6 @@ pub struct Encoder<W: Write> {
 }
 
 impl<W: Write> Encoder<W> {
-    /// Encodes on all logical cores until `max_threads` says otherwise.
     pub fn new(writer: W) -> Self {
         Self {
             writer,
@@ -42,14 +37,13 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    /// Capped at the logical cores; 0 is all of them.
+    /// Capped at the logical cores; 0, the default, is all of them.
     #[must_use]
     pub fn max_threads(mut self, max_threads: u8) -> Self {
         self.max_threads = max_threads;
         self
     }
 
-    /// Encodes the bytes, writes the result and flushes; returns the writer.
     pub fn finish(mut self) -> Result<W> {
         self.writer
             .write_all(&encode(&self.bytes, self.max_threads)?)?;
@@ -64,15 +58,12 @@ impl<W: Write> Write for Encoder<W> {
         Ok(buf.len())
     }
 
-    /// Writes nothing: `finish` writes the result.
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
 
-/// The first frame must be whole, carry messages (not only a `dem_set`) and parse without
-/// an escape (FORMAT.md 6.2); a damaged demo with an intact start passes. A `.mvd.gz`
-/// fails: decompress it first.
+/// FORMAT.md 6.2: a damaged demo with an intact start passes.
 pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
     const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
     if demo.is_empty() {
@@ -89,16 +80,11 @@ pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EncodeStats {
-    /// Input bytes the transform stored raw (escapes and unframeable tail).
     pub(crate) unstructured_len: usize,
-    /// Segments that failed the self-check and were coded as all tail: nonzero only for
-    /// a transform bug.
+    /// Nonzero only for a transform bug.
     pub(crate) self_check_fallbacks: usize,
 }
 
-/// A whole first frame with messages (not a bare `dem_set`) that walks without an
-/// escape, or, if it is damaged, 16 more whole frames. Text, gzip, PNG, TIFF and
-/// random bytes fail on the first frame: its length field must fit the input.
 pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
     let is_bad_frame = |bytes: &[u8], offset: usize| {
         bytes.len() >= offset + 2 && !(DEM_READ..=DEM_ALL).contains(&(bytes[offset + 1] & 7))
@@ -135,7 +121,6 @@ pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
     true
 }
 
-/// The file's models, and per segment what the second pass needs to code it on its own.
 #[derive(Debug)]
 struct Trained {
     file_models: Vec<Option<FileModel>>,
@@ -144,8 +129,7 @@ struct Trained {
     durations_ms: Vec<u64>,
 }
 
-/// The first pass (FORMAT.md section 12): walks in order, as the protocol state carries
-/// over; `threads` segments at a time run their predictors in parallel. Keeps only counts.
+/// Pass 1 (FORMAT.md section 12) keeps only counts; pass 2 walks again.
 fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
     let segment_count = cuts.len() - 1;
     let segment_bytes = |index: usize| &src[cuts[index]..cuts[index + 1]];
@@ -189,7 +173,6 @@ fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
     trained
 }
 
-/// `None` if a stream has no model in `file_models` or the body is over [`MAX_SEGMENT_CODED`].
 pub(crate) fn transform_body(
     raw: &[u8],
     walked: &Walked,
@@ -203,12 +186,11 @@ pub(crate) fn transform_body(
     ((body.len() - SEGMENT_FIELDS_LEN) as u64 <= MAX_SEGMENT_CODED).then_some(body)
 }
 
-/// `threads`: at least 1. Threads never change the file written.
+/// Threads never change the file written.
 pub(crate) fn compress(src: &[u8], threads: usize) -> Result<(Vec<u8>, EncodeStats)> {
     compress_inner(src, threads, false)
 }
 
-/// For tests and test vectors.
 #[cfg(test)]
 pub(crate) fn compress_all_tail(src: &[u8], threads: usize) -> Result<(Vec<u8>, EncodeStats)> {
     compress_inner(src, threads, true)
@@ -225,7 +207,6 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
     if segment_count > MAX_SEGMENTS {
         return Err(Error::DemoTooLarge);
     }
-    // with more threads, the hashes run beside the first pass
     let hashes = || (crc32fast::hash(src), <[u8; 32]>::from(Sha256::digest(src)));
     let train = || {
         if is_all_tail {
@@ -261,7 +242,7 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
     let mut fallbacks = 0;
     loop {
         let (out, mut info) = assemble(&header, file_models, &bodies);
-        // None: the container itself does not decode, nothing to fall back to
+        // the container itself does not decode: nothing to fall back to
         let is_failing =
             failing_segments(&out, src, &cuts, threads).ok_or_else(self_check_error)?;
         if !is_failing.contains(&true) {
@@ -278,7 +259,6 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
     }
 }
 
-/// The second pass, segments in parallel; a segment the transform cannot code is all tail.
 fn code_segments(
     src: &[u8],
     cuts: &[usize],
@@ -321,8 +301,6 @@ struct Body {
 }
 
 impl Body {
-    /// Errors if a stream has no model in `file_models` or the body is too long; an all-tail
-    /// body has neither problem.
     fn new(
         raw: &[u8],
         walked: &Walked,
@@ -375,8 +353,7 @@ fn assemble(
     (out, info)
 }
 
-/// Per segment whether it fails to decode to `src`; `None` if the container does not
-/// parse. Runs the whole-file checks too; never holds the decoded demo whole.
+/// Never holds the decoded demo whole.
 pub(crate) fn failing_segments(
     file: &[u8],
     src: &[u8],

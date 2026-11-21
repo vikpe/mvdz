@@ -1,6 +1,5 @@
 #![no_main]
-//! The `Decoder` (fed in small reads) agrees with whole-file decoding, and at 3 threads
-//! it yields the same bytes before the same error as at 1.
+//! `Decoder`, fed in small reads, agrees with whole-file decoding at 1 and 3 threads.
 use libfuzzer_sys::fuzz_target;
 use std::io::Read;
 
@@ -14,7 +13,6 @@ impl Read for Dribble<'_> {
     }
 }
 
-/// The bytes read before the first error, and that error.
 fn decode_until_error(bytes: &[u8], max_threads: u8) -> (Vec<u8>, Option<mvdz::Error>) {
     let mut out = Vec::new();
     let error = match mvdz::Decoder::new(Dribble(bytes, 0)) {

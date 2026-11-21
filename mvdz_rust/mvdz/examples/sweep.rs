@@ -1,6 +1,4 @@
-//! Round-trip sweep: every file as the encoder writes it, decoded by the
-//! whole-file and the sequential reader and compared by SHA-256.
-//! Usage: sweep files...
+//! Usage: sweep files... (each must round-trip through both decoders)
 use anyhow::Context as _;
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -43,7 +41,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The length of the demo at `path` and the readers that do not give it back.
 fn check(path: &str) -> anyhow::Result<(usize, Vec<&'static str>)> {
     let src = std::fs::read(path).with_context(|| path.to_owned())?;
     let want = Sha256::digest(&src);

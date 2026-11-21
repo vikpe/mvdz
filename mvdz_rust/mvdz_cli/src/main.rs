@@ -50,7 +50,6 @@ logical cores; 0 (the default) is all of them."
 
 #[derive(Debug)]
 struct Args {
-    /// 0: one per logical core.
     max_threads: u8,
     files: Vec<String>,
     output: Option<String>,
@@ -88,7 +87,6 @@ fn parse(argv: &[String]) -> Result<Args, ExitCode> {
     Ok(args)
 }
 
-/// `-` is standard input.
 fn try_read_input(path: &str) -> Result<Vec<u8>, String> {
     if path == "-" {
         let mut buf = Vec::new();
@@ -102,7 +100,6 @@ fn try_read_input(path: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// `-` is standard input.
 fn open_input(path: &str) -> Result<Box<dyn Read>, String> {
     if path == "-" {
         Ok(Box::new(std::io::stdin().lock()))
@@ -128,7 +125,6 @@ fn try_write_with(
 ) -> Result<(), String> {
     if path == "-" {
         return match fill(&mut std::io::stdout().lock()) {
-            // a closed pipe ends the output quietly
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
             result => result.map_err(|error| error.to_string()),
         };
@@ -149,28 +145,26 @@ fn try_write_with(
     })
 }
 
-/// Ignoring ASCII case.
-fn has_suffix(name: &str, suffix: &str) -> bool {
+fn has_suffix_ignoring_case(name: &str, suffix: &str) -> bool {
     name.len() >= suffix.len()
         && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
 }
 
-/// game.mvd -> game.mvdz; game.mvdz -> game.mvd.
 fn output_name(input: &str, should_compress: bool) -> Result<String, String> {
     if input == "-" {
         return Ok("-".into());
     }
     if should_compress {
-        if has_suffix(input, ".mvdz") {
+        if has_suffix_ignoring_case(input, ".mvdz") {
             return Err("already .mvdz".into());
         }
-        let stem = if has_suffix(input, ".mvd") {
+        let stem = if has_suffix_ignoring_case(input, ".mvd") {
             &input[..input.len() - 4]
         } else {
             input
         };
         Ok(format!("{stem}.mvdz"))
-    } else if has_suffix(input, ".mvdz") {
+    } else if has_suffix_ignoring_case(input, ".mvdz") {
         Ok(format!("{}.mvd", &input[..input.len() - 5]))
     } else {
         Err("not named *.mvdz (-o names the output)".into())
@@ -191,8 +185,8 @@ fn jobs(args: &Args, should_compress: bool) -> Result<Vec<Job>, ExitCode> {
     if files.is_empty() {
         return Err(usage());
     }
-    // the two-name form `in out`: the second names an output
-    let is_output = |name: &str| name == "-" || has_suffix(name, ".mvdz") == should_compress;
+    let is_output =
+        |name: &str| name == "-" || has_suffix_ignoring_case(name, ".mvdz") == should_compress;
     if let [input, output] = files.as_slice()
         && is_output(output)
     {
@@ -216,7 +210,6 @@ fn jobs(args: &Args, should_compress: bool) -> Result<Vec<Job>, ExitCode> {
         .collect())
 }
 
-/// Several files: -j files at once, one thread each. Errors are reported per file.
 fn run_jobs(args: &Args, should_compress: bool) -> Result<(), ExitCode> {
     let jobs = jobs(args, should_compress)?;
     let (workers, max_threads) = if jobs.len() > 1 {
@@ -270,7 +263,7 @@ fn run_job(
     Ok(())
 }
 
-/// As the library counts `max_threads`: at most the logical cores, 0 is all of them.
+/// Counts as the library does.
 fn thread_count(max_threads: u8) -> usize {
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     match max_threads {
@@ -306,7 +299,6 @@ fn info(args: &Args) -> Result<(), ExitCode> {
         let decoder = mvdz::Decoder::new(std::io::BufReader::new(file))
             .map_err(|error| fail(format!("{path}: {error}")))?;
         match writeln!(stdout, "{}", header_json(decoder.header())) {
-            // a closed pipe ends the output quietly
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
             result => result.map_err(|error| fail(error.to_string()))?,
         }
@@ -314,7 +306,6 @@ fn info(args: &Args) -> Result<(), ExitCode> {
     Ok(())
 }
 
-/// One object: `size_bytes`, `duration_ms`, `crc32` and `sha256` (hexadecimal).
 fn header_json(header: &mvdz::Header) -> String {
     use std::fmt::Write as _;
     // numbers and hexadecimal strings only: nothing needs escaping
@@ -357,7 +348,6 @@ mod tests {
         use std::fmt::Write as _;
         const DEM_ALL: u8 = 6;
         const SVC_NOP: u8 = 1;
-        // frames of 1 ms, each 1,000 svc_nop
         let payload = [SVC_NOP; 1000];
         let frame = [&[1, DEM_ALL][..], &1000u32.to_le_bytes(), &payload].concat();
         let demo = frame.repeat(1100);

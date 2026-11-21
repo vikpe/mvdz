@@ -1,6 +1,3 @@
-//! Round trips through every reader, in one segment and in several; odd
-//! and non-MVD input; determinism.
-
 use super::common::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
@@ -9,7 +6,7 @@ use std::io::Cursor;
 
 fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
-        let (one, info) = unchecked(&src)?;
+        let (one, info) = compress_unchecked(&src)?;
         assert_eq!(
             info.self_check_fallbacks, 0,
             "{what} {how}: the transform is lossy"
@@ -36,7 +33,6 @@ fn sample_demos() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The bytes a sequential reader yields before its first error, and that error.
 fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<crate::Error>) {
     let mut out = Vec::new();
     let max_memory = crate::budget::DEFAULT_MAX_MEMORY;
@@ -55,8 +51,6 @@ fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<crate::Erro
     }
 }
 
-/// A reader decoding several segments at once yields what one decoding a segment
-/// at a time does: the segments before a cut or a damaged segment, then the error.
 #[test]
 fn sequential_reader_threads_agree() -> anyhow::Result<()> {
     const CUTS: usize = 7;
@@ -102,12 +96,10 @@ fn sequential_reader_threads_agree() -> anyhow::Result<()> {
             assert!(is_same, "case {case}, {threads} threads");
         }
     }
-    // the cases include errors after some segments were delivered
     assert!(partial_reads >= 2, "{partial_reads}");
     Ok(())
 }
 
-/// A model no segment uses is allowed: every reader ignores it.
 #[test]
 fn unused_model_is_ignored() -> anyhow::Result<()> {
     let demo = several_segments(&synthetic(&[], false));
@@ -151,14 +143,12 @@ fn empty_and_tiny_inputs() -> anyhow::Result<()> {
     for src in inputs {
         let refusal = compress(src).err();
         assert_matches!(refusal, Some(crate::Error::NotMvd(_)), "{refusal:?}");
-        // the unchecked encoder still round-trips any bytes
         check_all_ways(src, &format!("{src:?}"))?;
     }
     Ok(())
 }
 
-/// Input that does not frame from the first byte, or stops framing early
-/// (correctness review F2, robustness 7).
+/// Correctness review F2, robustness 7.
 #[test]
 fn non_mvd_input_streams() -> anyhow::Result<()> {
     let mut rng = Rng(7);
@@ -167,14 +157,12 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
     let mut inputs = vec![vec![1u8], random, text];
     if let Some(duel) = duel() {
         inputs.push(duel[..300].to_vec());
-        // the first frame cut by one byte
         let first_frame_len = 6 + u32::from_le_bytes(duel[2..6].try_into()?) as usize;
-        let mut cut = duel[..first_frame_len - 1].to_vec();
-        cut.extend_from_slice(&duel[first_frame_len..200_000]);
-        inputs.push(cut);
+        let mut first_frame_cut_short = duel[..first_frame_len - 1].to_vec();
+        first_frame_cut_short.extend_from_slice(&duel[first_frame_len..200_000]);
+        inputs.push(first_frame_cut_short);
     }
     for (index, src) in inputs.iter().enumerate() {
-        // the encoder refuses what is not a demo
         if crate::encode::check_demo(src).is_err() {
             let refusal = compress(src);
             assert_matches!(refusal, Err(crate::Error::NotMvd(_)), "input {index}");
@@ -192,9 +180,6 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Bytes that frame, written as all tail (the encoder's fallback for a
-/// segment the transform cannot code): every reader decodes them, in one
-/// segment and in several.
 #[test]
 fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
     let demos = [
@@ -220,9 +205,7 @@ fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A flood of `svc_nop` codes in very few bytes. No rule ties a segment's
-/// coded length to its raw length from below: the transform codes it and
-/// every reader accepts it.
+/// No rule bounds a segment's coded length from below by its raw length.
 #[test]
 fn nop_flood_round_trips() -> anyhow::Result<()> {
     let mut demo = Demo(Vec::new());
@@ -236,8 +219,6 @@ fn nop_flood_round_trips() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Data that does not frame, and a frame larger than a segment may be, are
-/// cut at the largest segment length; every reader decodes them.
 #[test]
 fn segments_are_capped() -> anyhow::Result<()> {
     let max_segment = crate::format::MAX_SEGMENT_RAW as usize;
@@ -250,7 +231,7 @@ fn segments_are_capped() -> anyhow::Result<()> {
         ("unframed", unframed, 3),
         ("oversized frame", oversized.0, 2),
     ] {
-        let (file, _) = unchecked(&src)?;
+        let (file, _) = compress_unchecked(&src)?;
         let layout = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
         let count = layout.segments.len();
         assert!(count >= segments, "{what}: {count} segments");
@@ -269,8 +250,6 @@ fn segments_are_capped() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Edited demos (frames dropped, duplicated, bytes changed, cuts) take the
-/// escape and tail paths; all of them round-trip.
 #[test]
 fn edited_demos_round_trip() -> anyhow::Result<()> {
     let base = duel().unwrap_or_else(|| synthetic(&[(1, "{\"a\":"), (0, "1}")], false));
@@ -300,7 +279,6 @@ fn edited_demos_round_trip() -> anyhow::Result<()> {
                 _ => demo.truncate(start),
             }
         }
-        // an edit that destroys the first frame makes it a non-demo
         if crate::encode::check_demo(&demo).is_err() {
             refused += 1;
             continue;
@@ -309,14 +287,12 @@ fn edited_demos_round_trip() -> anyhow::Result<()> {
         assert!(decompress(&file, 1)? == demo, "case {case}");
         assert!(decompress(&file, 2)? == demo, "case {case}, 2 threads");
     }
-    // edits within the demo keep it a demo: only cuts into the first frame
-    // are refused
+    // only cuts into the first frame make a non-demo
     assert!(refused <= 6, "{refused} of 30 refused");
     Ok(())
 }
 
-/// The constructed demos of the correctness review (float coordinates,
-/// demoinfo variants, odd masks, ...), when present.
+/// The correctness review's constructed demos, from `MVDZ_TEST_DATA/gen`.
 #[test]
 fn constructed_demos() -> anyhow::Result<()> {
     let Some(gen_dir) = test_data("gen") else {
@@ -340,12 +316,9 @@ fn constructed_demos() -> anyhow::Result<()> {
             .context("a file name")?
             .to_string_lossy()
             .to_string();
-        // a few have no MVD start (only dem_set frames, a cut first
-        // frame): refused, and still round-trip through the unchecked
-        // encoder
         if crate::encode::check_demo(&src).is_err() {
             assert_matches!(compress(&src), Err(crate::Error::NotMvd(_)));
-            let (file, _) = unchecked(&src)?;
+            let (file, _) = compress_unchecked(&src)?;
             assert!(decompress(&file, 2)? == src, "{name}");
             continue;
         }
@@ -372,8 +345,6 @@ fn deterministic_output() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `Encoder`, fed in small writes, writes what `encode` returns; empty input is refused
-/// as by `encode`.
 #[test]
 fn encoder_matches_encode() -> anyhow::Result<()> {
     let src = several_segments(&synthetic(&[(0, "{}")], false));
@@ -391,9 +362,6 @@ fn encoder_matches_encode() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The models block (FORMAT.md 2.6): every file with a segment has its
-/// rANS models there, whether it has one segment or several. Every reader
-/// handles it.
 #[test]
 fn models_block() -> anyhow::Result<()> {
     let src = usercmd_demo();

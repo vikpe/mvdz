@@ -1,11 +1,5 @@
-//! The structural walker, one routine for both directions: encode moves each structural
-//! byte of the demo to its stream, decode moves it back.
-//!
-//! Numeric fields (origins, angles, sound and temp entity coords) are only reserved and
-//! listed in [`Records`]; `numeric.rs` fills them in after the walk. The structure never
-//! depends on a numeric value, so the two are independent.
-//!
-//! A failed bounds check sets the sticky `has_error` instead of panicking.
+//! The structural walker, one routine both ways. Numeric fields are only reserved and
+//! listed in [`Records`]; `numeric.rs` fills them in after the walk.
 
 use crate::proto::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
@@ -29,8 +23,7 @@ use crate::streams::{
 
 pub(crate) const NO_OFFSET: u32 = u32::MAX;
 
-/// `byte`: encode records and returns `value`, decode returns the decoded symbol. Every
-/// `context` fits in 16 bits, the rANS table key (FORMAT.md 8.3).
+/// Every `context` fits in 16 bits, the rANS table key (FORMAT.md 8.3).
 pub(crate) trait SymbolIo {
     fn byte(&mut self, stream: usize, context: u32, value: u8) -> u8;
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);
@@ -64,7 +57,6 @@ pub(crate) struct PacketEntityRecord {
 }
 
 impl PacketEntityRecord {
-    /// Byte offsets of the three origin coords (`NO_OFFSET` if not sent).
     #[inline]
     pub(crate) fn origin_offsets(&self) -> [u32; 3] {
         let coord_width = if self.bits & PE_FLOAT != 0 { 4 } else { 2 };
@@ -99,13 +91,11 @@ pub(crate) struct TempEntityRecord {
     pub(crate) kind: u8,
 }
 
-/// `offset`: the pitch (yaw and roll follow); `grid`: bit `axis` set for each axis on the
-/// grid.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UsercmdRecord {
-    pub(crate) offset: u32,
+    pub(crate) pitch_offset: u32,
     pub(crate) number: u8,
-    pub(crate) grid: u8,
+    pub(crate) grid_axes: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +107,7 @@ pub(crate) struct RecordList<T> {
 impl<T> RecordList<T> {
     pub(crate) fn fixed(capacity: usize) -> crate::error::Result<Self> {
         Ok(Self {
-            records: crate::budget::with_capacity(capacity)?,
+            records: crate::budget::try_with_capacity(capacity)?,
             capacity,
         })
     }
@@ -127,7 +117,6 @@ impl<T> RecordList<T> {
             capacity: usize::MAX,
         }
     }
-    /// `false` if the list is full.
     #[inline(always)]
     pub(crate) fn push(&mut self, record: T) -> bool {
         if self.records.len() == self.capacity {
@@ -151,7 +140,6 @@ pub(crate) struct Records {
 }
 
 impl Records {
-    /// Encode: capacities from typical record densities.
     pub(crate) fn growable(len: usize) -> Self {
         Self {
             player_infos: RecordList::growable(len / 18),
@@ -161,20 +149,19 @@ impl Records {
             usercmds: RecordList::growable(0),
         }
     }
-    /// Decode: the counts from the stream table.
     pub(crate) fn fixed(
-        pi: usize,
-        pe: usize,
-        snd: usize,
-        te: usize,
-        uc: usize,
+        player_infos: usize,
+        packet_entities: usize,
+        sounds: usize,
+        temp_entities: usize,
+        usercmds: usize,
     ) -> crate::error::Result<Self> {
         Ok(Self {
-            player_infos: RecordList::fixed(pi)?,
-            packet_entities: RecordList::fixed(pe)?,
-            sounds: RecordList::fixed(snd)?,
-            temp_entities: RecordList::fixed(te)?,
-            usercmds: RecordList::fixed(uc)?,
+            player_infos: RecordList::fixed(player_infos)?,
+            packet_entities: RecordList::fixed(packet_entities)?,
+            sounds: RecordList::fixed(sounds)?,
+            temp_entities: RecordList::fixed(temp_entities)?,
+            usercmds: RecordList::fixed(usercmds)?,
         })
     }
 }
@@ -210,7 +197,6 @@ struct EntityState {
 #[derive(Debug)]
 pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     pub(crate) src: &'a [u8],
-    /// Empty on encode.
     dst: &'a mut [u8],
     pub(crate) offset: usize,
     pub(crate) has_error: bool,
@@ -430,7 +416,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// Bytes of a numeric field, filled in after the walk.
     #[inline(always)]
     fn reserve(&mut self, len: usize) -> u32 {
         let offset = self.offset;
@@ -596,7 +581,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 let command = self.src[self.offset];
                 let size = self
                     .proto
-                    .command_size(command, &self.src[self.offset + 1..end]);
+                    .command_body_size(command, &self.src[self.offset + 1..end]);
                 let size = match size {
                     Some(size) if command != 0 => size,
                     _ => {
@@ -635,10 +620,10 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         let start = self.offset;
         let size = if IS_ENCODE {
             self.proto
-                .command_size(size_command, &self.src[self.offset.min(self.src.len())..])
+                .command_body_size(size_command, &self.src[self.offset.min(self.src.len())..])
         } else {
             self.proto
-                .command_size(size_command, self.io.blob_rest(stream))
+                .command_body_size(size_command, self.io.blob_rest(stream))
         };
         match size {
             Some(size) => self.copy_blob(stream, size),
@@ -1224,9 +1209,9 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
         if grid != 0
             && !self.records.usercmds.push(UsercmdRecord {
-                offset,
+                pitch_offset: offset,
                 number: player,
-                grid,
+                grid_axes: grid,
             })
         {
             self.has_error = true;

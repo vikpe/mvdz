@@ -1,15 +1,8 @@
-//! Static rANS with per-context frequency tables.
-//!
-//! * Symbols: bytes for structural streams (16-bit context), or the sign/bit-length bucket
-//!   of a numeric residual; its mantissa bits go raw into a bit stream (pcodec-style).
-//! * Tables: a context gets its own table only where that beats the fallback table by more
-//!   than the table's cost. Counts are sent log-quantized and normalized to 2^SCALE with
-//!   integer arithmetic only, so both sides agree.
-//! * Coder: 32-bit rANS, 16-bit renormalization, interleaved states (after Giesen,
-//!   "Interleaved entropy coders", 2014; written fresh). Single-symbol tables cost nothing.
+//! Static rANS with per-context tables, integer arithmetic only so both sides agree. After
+//! Giesen, "Interleaved entropy coders" (2014); written fresh.
 
 use super::rc::{IntModel, RangeDecoder, RangeEncoder};
-use crate::budget::{Budget, Charge, with_capacity};
+use crate::budget::{Budget, Charge, try_with_capacity};
 use crate::error::{Error, Result};
 use crate::fields::{put_u32, read_length_prefixed, read_usize};
 use crate::numeric::NumericContext;
@@ -22,18 +15,17 @@ const FREQ_TOTAL: u32 = 1 << SCALE;
 const STATE_MIN: u32 = 1 << 16;
 const STATE_COUNT: usize = 4;
 
-/// Per octave of the log-quantized counts.
-const STEPS: u32 = 2;
+const STEPS_PER_OCTAVE: u32 = 2;
 /// 16.16 fixed point.
 #[inline]
 fn quantized_weight(quantized: u32) -> u64 {
     /// 2^(k/2) in 16.16 fixed point, k = 0, 1.
-    const STEP_POWERS: [u64; STEPS as usize] = [65536, 92682];
+    const STEP_POWERS: [u64; STEPS_PER_OCTAVE as usize] = [65536, 92682];
     if quantized == 0 {
         return 0;
     }
     let step = quantized - 1;
-    let (octave, octave_step) = (step / STEPS, step % STEPS);
+    let (octave, octave_step) = (step / STEPS_PER_OCTAVE, step % STEPS_PER_OCTAVE);
     let fraction = STEP_POWERS[octave_step as usize];
     if octave >= 40 {
         u64::MAX >> 8
@@ -49,10 +41,10 @@ fn quantize(count: u32) -> u32 {
     }
     let weight = u64::from(count) << 16;
     let octave = count.ilog2();
-    let mut step = octave * STEPS;
-    for octave_step in 0..STEPS {
-        if quantized_weight(1 + octave * STEPS + octave_step) <= weight {
-            step = octave * STEPS + octave_step;
+    let mut step = octave * STEPS_PER_OCTAVE;
+    for octave_step in 0..STEPS_PER_OCTAVE {
+        if quantized_weight(1 + octave * STEPS_PER_OCTAVE + octave_step) <= weight {
+            step = octave * STEPS_PER_OCTAVE + octave_step;
         }
     }
     let lo = quantized_weight(1 + step);
@@ -192,7 +184,6 @@ struct Counts {
     rest: Vec<u32>,
 }
 
-/// Per-context symbol counts of a stream, summed over the segments of a file.
 #[derive(Debug)]
 pub(crate) struct Tally {
     alphabet_size: usize,
@@ -387,8 +378,6 @@ fn build_model(counts: &Counts) -> Model {
     }
 }
 
-// --------------------------------------------------------------- model I/O
-
 const QUANTIZED_CONTEXTS: usize = 17 * 18;
 
 fn write_table(
@@ -525,8 +514,8 @@ fn read_model_header(
     }
     // the quantized tables (u8: quantized <= 160) until the layout is known
     let charge = budget.alloc(((own_count + 1) * alphabet_size + 4 * (own_count + 1)) as u64)?;
-    let mut quantized_tables: Vec<u8> = with_capacity((own_count + 1) * alphabet_size)?;
-    let mut keys: Vec<u32> = with_capacity(own_count)?;
+    let mut quantized_tables: Vec<u8> = try_with_capacity((own_count + 1) * alphabet_size)?;
+    let mut keys: Vec<u32> = try_with_capacity(own_count)?;
     let fallback = read_table(&mut decoder, &mut int_model, alphabet_size, None);
     quantized_tables.extend(fallback.iter().map(|&quantized| quantized as u8));
     let mut context = 0u32;
@@ -585,14 +574,14 @@ pub(crate) fn read_model(
     let map_len = keys.last().map_or(0, |&context| context as usize + 1);
     let charge = budget.alloc((pool_len * 2 + lut_len * 4 + map_len * 4) as u64)?;
     let mut model = DecoderModel {
-        map: with_capacity(map_len)?,
+        map: try_with_capacity(map_len)?,
         fallback: ENTRY_EMPTY,
         chunks,
-        pool: with_capacity(pool_len)?,
-        luts: with_capacity(lut_len)?,
+        pool: try_with_capacity(pool_len)?,
+        luts: try_with_capacity(lut_len)?,
         _charge: Some(charge),
     };
-    let mut entries = with_capacity(keys.len() + 1)?;
+    let mut entries = try_with_capacity(keys.len() + 1)?;
     for quantized in quantized_tables.chunks(alphabet_size) {
         let table =
             Table::from_quantized(quantized.iter().map(|&count| u32::from(count)).collect());
@@ -710,8 +699,6 @@ impl DecoderModel {
     }
 }
 
-// --------------------------------------------------------------- rANS core
-
 #[derive(Debug)]
 struct RansEncoder {
     states: [u32; STATE_COUNT],
@@ -783,7 +770,6 @@ impl<'a> RansDecoder<'a> {
         self.pos += 2;
         word
     }
-    /// No symbol can be decoded.
     fn finished_empty() -> RansDecoder<'static> {
         RansDecoder {
             states: [STATE_MIN; STATE_COUNT],
@@ -827,7 +813,6 @@ fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Vec<u8> {
     encoder.finish()
 }
 
-/// `rans_len u32 | rans | extra`
 fn put_body(out: &mut Vec<u8>, model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) {
     let body = rans_encode(model, symbols, contexts);
     out.reserve(body.len() + extra.len() + 4);
@@ -861,9 +846,6 @@ fn unpack(body: &[u8]) -> Result<Unpacked<'_>> {
     Ok(Unpacked { rans, extra: rest })
 }
 
-// --------------------------------------------------------------- file models
-
-/// A stream's model in the models block, built from all its segments.
 #[derive(Debug)]
 pub(crate) struct FileModel {
     model: Model,
@@ -873,7 +855,6 @@ pub(crate) struct FileModel {
 /// By stream id.
 pub(crate) type Models = Vec<Option<Arc<DecoderModel>>>;
 
-/// The models block, read and checked once when the file is opened.
 #[derive(Debug)]
 pub(crate) struct ModelsBlock {
     len: u64,
@@ -938,8 +919,6 @@ fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Mod
     Ok(models)
 }
 
-// --------------------------------------------------------------- byte streams
-
 #[inline(always)]
 fn byte_context(context: u32) -> u32 {
     context & 0xffff
@@ -994,8 +973,6 @@ impl<'a> ByteDecoder<'a> {
         self.used == self.count && self.decoder.is_finished()
     }
 }
-
-// --------------------------------------------------------------- numeric streams
 
 pub(crate) const NUMERIC_ALPHABET: usize = 65;
 
@@ -1235,7 +1212,6 @@ mod tests {
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
-    /// The shared model of `symbols` and its decoder model.
     fn models(
         symbols: &[u8],
         contexts: &[u16],
@@ -1294,9 +1270,8 @@ mod tests {
         Ok(())
     }
 
-    /// A model whose header would break the decision limit (thousands of
-    /// own tables of one symbol each cost almost no bytes) is made smaller
-    /// until it holds, and still codes the stream.
+    /// A model over the decision limit (thousands of one-symbol own tables cost almost no
+    /// bytes) is made smaller until it holds, and still codes the stream.
     #[test]
     fn model_over_the_decision_limit_shrinks() -> anyhow::Result<()> {
         let count = 60_000u32;

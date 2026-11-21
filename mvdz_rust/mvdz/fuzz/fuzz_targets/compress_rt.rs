@@ -1,8 +1,5 @@
 #![no_main]
-//! Arbitrary bytes through the encoder without the input check; the file must exist and
-//! round-trip at 1 and 2 threads. With `REQUIRE_TRANSFORM_LOSSLESS` set, no segment may
-//! fail the encoder's self-check (a transform bug). `encode` refuses exactly what
-//! `check_demo` refuses.
+//! Any bytes must round-trip through the encoder without its input check.
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
