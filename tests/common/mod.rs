@@ -331,21 +331,6 @@ unsafe extern "C" fn cb_read(
     c.read(b).map_or(-1, |k| k as i64)
 }
 
-unsafe extern "C" fn cb_seek(
-    user: *mut std::ffi::c_void,
-    off: std::ffi::c_longlong,
-    whence: std::ffi::c_int,
-) -> std::ffi::c_longlong {
-    use std::io::{Seek, SeekFrom};
-    let c = unsafe { &mut *(user as *mut Cursor<&[u8]>) };
-    let p = match whence {
-        0 => SeekFrom::Start(off as u64),
-        1 => SeekFrom::Current(off),
-        _ => SeekFrom::End(off),
-    };
-    c.seek(p).map_or(-1, |v| v as i64)
-}
-
 fn capi_read_all(r: *mut std::ffi::c_void) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut buf = vec![0u8; 50_000];
@@ -370,7 +355,7 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     let mut v = Vec::new();
     v.push(("whole 1t", mvdz::decompress(b, 1).map_err(e)));
     v.push(("whole 3t", mvdz::decompress(b, 3).map_err(e)));
-    let seq = |r: Result<mvdz::Reader<mvdz::Seq<_>>, mvdz::Error>| -> Result<Vec<u8>, String> {
+    let seq = |r: Result<mvdz::Reader<_>, mvdz::Error>| -> Result<Vec<u8>, String> {
         let mut r = r.map_err(e)?;
         let mut out = Vec::new();
         r.read_to_end(&mut out).map_err(|x| x.to_string())?;
@@ -388,14 +373,6 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
             Ok(std::mem::take(&mut out))
         });
     v.push(("sequential dribble", r));
-    let r = mvdz::Reader::open(Cursor::new(b), 2, &Default::default())
-        .map_err(e)
-        .and_then(|mut r| {
-            let mut out = Vec::new();
-            r.read_to_end(&mut out).map_err(|x| x.to_string())?;
-            Ok(out)
-        });
-    v.push(("seekable", r));
     let mut err = 0;
     let r = unsafe { mvdz_open_memory(b.as_ptr() as *const _, b.len(), 1, 0, &mut err) };
     v.push((
@@ -408,20 +385,9 @@ pub fn all_readers(b: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     ));
     let mut cur = Cursor::new(b);
     let u = &mut cur as *mut Cursor<&[u8]> as *mut std::ffi::c_void;
-    let r = unsafe { mvdz_open_callbacks(Some(cb_read), None, u, 1, 0, &mut err) };
+    let r = unsafe { mvdz_open_callbacks(Some(cb_read), u, 1, 0, &mut err) };
     v.push((
         "c sequential",
-        if r.is_null() {
-            Err(format!("capi {err}"))
-        } else {
-            capi_read_all(r)
-        },
-    ));
-    let mut cur = Cursor::new(b);
-    let u = &mut cur as *mut Cursor<&[u8]> as *mut std::ffi::c_void;
-    let r = unsafe { mvdz_open_callbacks(Some(cb_read), Some(cb_seek), u, 2, 0, &mut err) };
-    v.push((
-        "c seekable",
         if r.is_null() {
             Err(format!("capi {err}"))
         } else {

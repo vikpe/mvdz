@@ -15,7 +15,7 @@ container fields, five speed changes. See Decisions and Results per change.
 Also done: one fallback (ad53e50; see "One fallback" under Results per change), and
 measured at 1, 4 and 12 threads and in WebAssembly (see "Threads and WebAssembly").
 
-Tests: 45 pass, 5 fail, all five on the list under "Known failing tests".
+Tests: 44 pass, 5 fail, all five on the list under "Known failing tests".
 
 Whole session against `master`: see "Whole session" under Results per change.
 
@@ -67,6 +67,7 @@ All implemented unless marked.
 | Live QTV streams | Not compressed | 4-11 KB/s raw does not justify it |
 | QWD demos | Not supported; MVD only | Needs a second frame walker and a second playerinfo model in every port; 75 of 2,200 archive files (3.4 %) |
 | Streaming writer | Removed; finished `.mvd` only | One encoder path; shared models always available |
+| Seeking reader | Removed (2026-11-21): `Reader::open`, `seek_time`, `seek_segment`, `mvdz_seek_time`, `mvdz_seek_segment`, `mvdz_segment_count`, the seek callback of `mvdz_open_callbacks`. One reader, in order | A demo has no keyframes, so playback cannot start mid-file; part of a file is read by listing the segments and decoding the ones wanted; one reading mode for every port |
 | Gzip input and output | Removed (2026-11-21): library, C interface and tool take and give raw demos; a gzip file is refused with a message | Not part of the format; every user has gzip (`gzip -dc x.mvd.gz \| mvdz compress - x.mvdz`); one input type for every port |
 | Structural transform | Keep | Most of the compression (zstd -19 alone: 0.553 of raw) |
 | rANS | Keep | Best ratio (0.218 of raw at 256K) |

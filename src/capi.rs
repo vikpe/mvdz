@@ -18,7 +18,7 @@
 use crate::api::{self, Config};
 use crate::budget::Limits;
 use crate::error::Error;
-use crate::stream::{Reader, Seekable, Seq};
+use crate::stream::Reader;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_longlong, c_void};
 use std::io::{Read, Seek, SeekFrom};
@@ -257,15 +257,8 @@ impl Seek for Cb {
     }
 }
 
-enum RInner {
-    Seq(Reader<Seq<Cb>>),
-    Seek(Reader<Seekable<Cb>>),
-    Mem(Reader<Seekable<std::io::Cursor<Vec<u8>>>>),
-}
-
 struct RHandle {
-    r: RInner,
-    raw_size: i64,
+    r: Reader<Box<dyn Read + Send>>,
 }
 
 enum Handle {
@@ -386,25 +379,16 @@ pub unsafe extern "C" fn mvdz_open_memory(
             unsafe { set(err, MVDZ_E_INVALID) };
             return std::ptr::null_mut();
         };
-        let r = Reader::open(
-            std::io::Cursor::new(b.to_vec()),
-            crate::util::threads(threads.max(0) as usize),
-            &limits(max_memory),
-        )
-        .map(|r| RHandle {
-            raw_size: r.header().size as i64,
-            r: RInner::Mem(r),
-        });
-        open_result(r, err)
+        let src: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(b.to_vec()));
+        let th = crate::util::threads(threads.max(0) as usize);
+        open_result(Reader::new(src, th, &limits(max_memory)).map(|r| RHandle { r }), err)
     })
 }
 
-/// Opens a reader over callbacks. With `seek` NULL the file is read
-/// sequentially (seeking then fails with MVDZ_E_INVALID).
+/// Opens a reader over a read callback: the file is read in order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_open_callbacks(
     read: ReadFn,
-    seek: SeekFn,
     user: *mut c_void,
     threads: c_int,
     max_memory: u64,
@@ -415,25 +399,13 @@ pub unsafe extern "C" fn mvdz_open_callbacks(
             unsafe { set(err, MVDZ_E_INVALID) };
             return std::ptr::null_mut();
         }
-        let l = limits(max_memory);
-        let cb = Cb {
+        let src: Box<dyn Read + Send> = Box::new(Cb {
             rd: read,
-            sk: seek,
+            sk: None,
             user,
-        };
+        });
         let th = crate::util::threads(threads.max(0) as usize);
-        let r = if seek.is_some() {
-            Reader::open(cb, th, &l).map(|r| RHandle {
-                raw_size: r.header().size as i64,
-                r: RInner::Seek(r),
-            })
-        } else {
-            Reader::new(cb, th, &l).map(|r| RHandle {
-                raw_size: -1,
-                r: RInner::Seq(r),
-            })
-        };
-        open_result(r, err)
+        open_result(Reader::new(src, th, &limits(max_memory)).map(|r| RHandle { r }), err)
     })
 }
 
@@ -451,17 +423,7 @@ pub unsafe extern "C" fn mvdz_read(r: *mut MvdzReader, out: *mut c_void, n: usiz
             } else {
                 unsafe { std::slice::from_raw_parts_mut(out as *mut u8, n) }
             };
-            let res = match &mut h.r {
-                RInner::Seq(x) => x.read_demo(b),
-                RInner::Seek(x) => x.read_demo(b),
-                RInner::Mem(x) => x.read_demo(b),
-            };
-            if let RInner::Seq(x) = &h.r {
-                if h.raw_size < 0 {
-                    h.raw_size = x.header().size as i64;
-                }
-            }
-            match res {
+            match h.r.read_demo(b) {
                 Ok(k) => k as c_longlong,
                 Err(e) => code(&e) as c_longlong,
             }
@@ -469,77 +431,11 @@ pub unsafe extern "C" fn mvdz_read(r: *mut MvdzReader, out: *mut c_void, n: usiz
     })
 }
 
-/// Size of the original demo in bytes, or -1 if not known (yet).
+/// Size of the original demo in bytes (from the file's header).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mvdz_raw_size(r: *const MvdzReader) -> c_longlong {
     guard(MVDZ_E_PANIC as c_longlong, || {
-        with_reader(r, |h| h.raw_size)
-    })
-}
-
-/// Number of segments (seek points); negative if the reader cannot seek.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_segment_count(r: *const MvdzReader) -> c_longlong {
-    guard(MVDZ_E_PANIC as c_longlong, || {
-        with_reader(r, |h| match &h.r {
-            RInner::Seek(x) => x.segments() as c_longlong,
-            RInner::Mem(x) => x.segments() as c_longlong,
-            RInner::Seq(_) => MVDZ_E_INVALID as c_longlong,
-        })
-    })
-}
-
-/// Seeks to the segment holding demo time `ms`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_seek_time(
-    r: *mut MvdzReader,
-    ms: u64,
-    seg_start_ms: *mut u64,
-    raw_offset: *mut u64,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || {
-        with_reader(r, |h| {
-            let res = match &mut h.r {
-                RInner::Seek(x) => x.seek_time(ms),
-                RInner::Mem(x) => x.seek_time(ms),
-                RInner::Seq(_) => return MVDZ_E_INVALID,
-            };
-            match res {
-                Ok((_, t, o)) => {
-                    unsafe {
-                        set(seg_start_ms, t);
-                        set(raw_offset, o);
-                    }
-                    MVDZ_OK
-                }
-                Err(e) => code(&e),
-            }
-        })
-    })
-}
-
-/// Seeks to segment `i` (0 <= i < segment count).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mvdz_seek_segment(
-    r: *mut MvdzReader,
-    i: usize,
-    raw_offset: *mut u64,
-) -> c_int {
-    guard(MVDZ_E_PANIC, || {
-        with_reader(r, |h| {
-            let res = match &mut h.r {
-                RInner::Seek(x) => x.seek_segment(i),
-                RInner::Mem(x) => x.seek_segment(i),
-                RInner::Seq(_) => return MVDZ_E_INVALID,
-            };
-            match res {
-                Ok(o) => {
-                    unsafe { set(raw_offset, o) };
-                    MVDZ_OK
-                }
-                Err(e) => code(&e),
-            }
-        })
+        with_reader(r, |h| h.r.header().size as c_longlong)
     })
 }
 

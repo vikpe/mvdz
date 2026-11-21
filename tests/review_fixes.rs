@@ -166,7 +166,7 @@ fn r_m6_reentrant_callbacks() {
         });
         let up = &mut *u as *mut Reent as *mut std::ffi::c_void;
         let mut err = 0;
-        let r = unsafe { mvdz_open_callbacks(Some(re_read), None, up, 1, 0, &mut err) };
+        let r = unsafe { mvdz_open_callbacks(Some(re_read), up, 1, 0, &mut err) };
         assert!(!r.is_null());
         u.handle = r;
         let mut out = Vec::new();

@@ -72,7 +72,8 @@ extern "C" {
  * read: fill buf with up to n bytes; return the count, 0 at end of file,
  *       negative on error.
  * seek: move to offset relative to whence (0 SET, 1 CUR, 2 END); return
- *       the new absolute position, negative on error. Offsets are 64-bit. */
+ *       the new absolute position, negative on error. Offsets are 64-bit.
+ *       Only mvdz_info_json seeks; decoding reads in order. */
 typedef long long (*mvdz_read_fn)(void *user, void *buf, size_t n);
 typedef long long (*mvdz_seek_fn)(void *user, long long offset, int whence);
 
@@ -97,35 +98,20 @@ int mvdz_decompress(const void *in, size_t n, int threads, uint64_t max_memory, 
                     size_t *out_n);
 int mvdz_compress(const void *in, size_t n, int threads, unsigned char **out, size_t *out_n);
 
-/* Incremental decoding. mvdz_open_memory copies the buffer.
- * mvdz_open_callbacks: with seek == NULL the file is read strictly
- * sequentially (pipes, network streams) and the seek functions fail with
- * MVDZ_E_INVALID; with seek, the file must be complete: its whole
- * structure is checked when it is opened. *err (may be NULL) receives the
- * error code on failure. */
+/* Incremental decoding: the file is read in order (files, pipes, network
+ * streams), one segment at a time. mvdz_open_memory copies the buffer;
+ * mvdz_open_callbacks reads through `read`. Opening reads the file's
+ * header only. *err (may be NULL) receives the error code on failure. */
 mvdz_reader *mvdz_open_memory(const void *buf, size_t n, int threads, uint64_t max_memory, int *err);
-mvdz_reader *mvdz_open_callbacks(mvdz_read_fn read, mvdz_seek_fn seek, void *user, int threads,
-                                 uint64_t max_memory, int *err);
+mvdz_reader *mvdz_open_callbacks(mvdz_read_fn read, void *user, int threads, uint64_t max_memory,
+                                 int *err);
 /* Reads up to n bytes of the original demo: returns the count, 0 at the
  * end, or a negative MVDZ_E_* code. Every segment's CRC-32 is checked
- * before its bytes are returned; reading from the start, the end is
- * reported only after the whole-demo checks (CRC-32, size and timing)
- * have passed. Reading after a seek checks each segment only. */
+ * before its bytes are returned, and the end is reported only after the
+ * whole-demo checks (CRC-32, size and timing) have passed. */
 long long mvdz_read(mvdz_reader *r, void *out, size_t n);
 /* Size of the original demo in bytes (from the file's header). */
 long long mvdz_raw_size(const mvdz_reader *r);
-/* Number of segments (seek points), negative if the reader cannot seek. */
-long long mvdz_segment_count(const mvdz_reader *r);
-/* Seek to the segment that holds demo time ms (milliseconds from the
- * start): the last segment that starts before ms, so every frame at ms or
- * later is decoded. Reading resumes at that segment's first byte, which is
- * a demo frame boundary; *seg_start_ms and *raw_offset (may be NULL)
- * receive its start time and byte offset in the original demo. A player
- * still needs the game state at that point (the serverdata and baselines
- * are at the start of the demo). */
-int mvdz_seek_time(mvdz_reader *r, uint64_t ms, uint64_t *seg_start_ms, uint64_t *raw_offset);
-/* Seek to segment `segment` (0 <= segment < mvdz_segment_count). */
-int mvdz_seek_segment(mvdz_reader *r, size_t segment, uint64_t *raw_offset);
 void mvdz_close(mvdz_reader *r);
 
 /* The file's header (the demo's size, duration, CRC-32 and SHA-256) and

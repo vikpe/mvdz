@@ -1,6 +1,5 @@
 #![no_main]
-//! The sequential reader (in small reads) and the seekable reader agree
-//! with whole-file decoding.
+//! The reader (in small reads) agrees with whole-file decoding.
 use libfuzzer_sys::fuzz_target;
 use std::io::Read;
 
@@ -27,14 +26,5 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(whole.is_some(), seq.is_some());
     if let (Some(a), Some(b)) = (&whole, &seq) {
         assert!(a == b);
-    }
-    if let Ok(mut r) = mvdz::Reader::open(std::io::Cursor::new(data), 2, &l) {
-        let n = r.segments();
-        if n > 1 {
-            let _ = r.seek_segment(n / 2);
-            let mut v = Vec::new();
-            let _ = r.read_to_end(&mut v);
-        }
-        let _ = r.seek_time(1000);
     }
 });

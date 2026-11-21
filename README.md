@@ -3,7 +3,7 @@
 **mvdz** is a lossless compressor and file format for QuakeWorld MVD demos
 (`.mvd`). An `.mvdz` file is about a fifth of the raw demo and a third of
 the demo's gzip, decodes back to the exact original bytes (checked by
-SHA-256), can be read sequentially from a pipe or seeked by demo time, and
+SHA-256), can be read in order from a pipe as it arrives, and
 carries the demo's metadata (identity hash, server info, roster, a census
 of its contents, wall-clock time) so catalogues can read it without
 decoding. Files can also carry attachments stored beside the demo.
@@ -257,9 +257,8 @@ let demo2 = mvdz::decompress(&packed, 4)?;                                  // 4
 let demo3 = mvdz::decompress_with(&packed, 1, &Limits { memory: 256 << 20, ..Default::default() }.into())?;
 let demo4 = mvdz::decompress_with(&packed, 1, &ReadOptions { trusted: true, ..Default::default() })?;
 
-// sequential decoding from any io::Read; random access from io::Read + io::Seek
-let mut r = mvdz::Reader::open(std::fs::File::open("game.mvdz")?, 2, &ReadOptions::default())?;
-r.seek_time(60_000)?;                     // resume at the segment holding demo time 60 s
+// decoding in order from any io::Read, one segment at a time
+let mut r = mvdz::Reader::new(std::fs::File::open("game.mvdz")?, 2, &Default::default())?;
 std::io::copy(&mut r, &mut out)?;
 mvdz::decompress_stream(std::io::stdin(), std::io::stdout(), 1, &ReadOptions::default())?;
 
@@ -305,11 +304,10 @@ link-arg=-Wl,-soname,libmvdz.so.1"`).
 ```c
 #include "mvdz.h"
 
-/* decode through the engine's VFS callbacks, seek by time */
+/* decode through the engine's VFS read callback, in order */
 int err;
-mvdz_reader *r = mvdz_open_callbacks(vfs_read, vfs_seek, file, 2, 0, 0, &err);
+mvdz_reader *r = mvdz_open_callbacks(vfs_read, file, 2, 0, &err);
 if (!r) { printf("%s\n", mvdz_strerror(err)); return; }
-mvdz_seek_time(r, 60000, NULL, NULL);
 long long n;
 while ((n = mvdz_read(r, buf, sizeof buf)) > 0) feed_demo(buf, n);
 mvdz_close(r);
@@ -370,7 +368,8 @@ against 0.211 for mvdz normal: mvdz files are about 2.6 times smaller
 than zstd -19 and 2.2 times smaller than xz ([BENCHMARKS.md](BENCHMARKS.md)).
 A general-purpose compressor sees bytes; mvdz parses the demo, puts each
 field in its own stream and codes positions and angles as residuals
-against predictions. The container also gives seeking by demo time,
+against predictions. The container also gives decoding in order as the
+file arrives, segments that decode on their own,
 metadata without decoding, the demo's identity hash and attachments.
 
 **What is the licence?** MIT ([LICENSE](LICENSE)), and every dependency is

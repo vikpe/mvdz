@@ -37,4 +37,4 @@ pub use api::{
 pub use budget::Limits;
 pub use error::{Error, Result};
 pub use format::{Header, Index, IndexSeg};
-pub use stream::{Reader, Seekable, Seq};
+pub use stream::Reader;

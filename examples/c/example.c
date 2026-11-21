@@ -1,5 +1,5 @@
 /* Example: compress a demo, decode the .mvdz through stdio callbacks (as
- * an engine would through its VFS), seek by time and read the metadata.
+ * an engine would through its VFS) and read the file information.
  * Usage: example file.mvd  (any QuakeWorld MVD demo). */
 #define _FILE_OFFSET_BITS 64
 #include "mvdz.h"
@@ -59,9 +59,9 @@ int main(int argc, char **argv) {
 
     /* 3. decode through callbacks and compare */
     fseek(p, 0, SEEK_SET);
-    mvdz_reader *r = mvdz_open_callbacks(f_read, f_seek, p, 2, 0, &err);
+    mvdz_reader *r = mvdz_open_callbacks(f_read, p, 2, 0, &err);
     if (!r) return fail("open_callbacks", err);
-    printf("raw size %lld, segments %lld\n", mvdz_raw_size(r), mvdz_segment_count(r));
+    printf("raw size %lld\n", mvdz_raw_size(r));
     unsigned char *back = malloc(n + 1);
     long long got = 0, k;
     while ((k = mvdz_read(r, back + got, 7777 < n + 1 - got ? 7777 : (size_t)(n + 1 - got))) > 0) got += k;
@@ -69,18 +69,6 @@ int main(int argc, char **argv) {
     if (got != n || memcmp(back, demo, n) != 0) { fprintf(stderr, "MISMATCH\n"); return 1; }
     printf("decoded %lld bytes, identical\n", got);
 
-    /* 4. seek to the middle of the demo by time */
-    uint64_t t0, off;
-    rc = mvdz_seek_time(r, 60000, &t0, &off);
-    if (rc) return fail("seek_time", rc);
-    got = 0;
-    while ((k = mvdz_read(r, back + got, 65536)) > 0) got += k;
-    if (k < 0 || (uint64_t)got != (uint64_t)n - off || memcmp(back, demo + off, got) != 0) {
-        fprintf(stderr, "SEEK MISMATCH\n");
-        return 1;
-    }
-    printf("seek to 60 s: segment starts at %llu ms, byte %llu; tail identical\n",
-           (unsigned long long)t0, (unsigned long long)off);
     mvdz_close(r);
     mvdz_close(r); /* a closed handle is invalid, not a crash */
     if (mvdz_read(r, back, 10) != MVDZ_E_INVALID) { fprintf(stderr, "closed handle accepted\n"); return 1; }

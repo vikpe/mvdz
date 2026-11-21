@@ -1,6 +1,6 @@
 #![no_main]
 //! The C ABI driven by an operation script: readers over memory and over
-//! callbacks (sequential and seekable), reads of varying size, seeks,
+//! callbacks, reads of varying size,
 //! double closes, use after close, the file information JSON (must be
 //! NUL-terminated valid JSON).
 use libfuzzer_sys::fuzz_target;
@@ -75,7 +75,6 @@ fuzz_target!(|data: &[u8]| {
                 readers.push(unsafe {
                     mvdz_open_callbacks(
                         Some(rd),
-                        Some(sk),
                         &mut *mem as *mut Mem as *mut c_void,
                         2,
                         64 << 20,
@@ -88,7 +87,6 @@ fuzz_target!(|data: &[u8]| {
                 readers.push(unsafe {
                     mvdz_open_callbacks(
                         Some(rd),
-                        None,
                         &mut *mem as *mut Mem as *mut c_void,
                         1,
                         64 << 20,
@@ -105,28 +103,6 @@ fuzz_target!(|data: &[u8]| {
             6 => {
                 let k = unsafe { mvdz_read(r, std::ptr::null_mut(), 5) };
                 assert!(k < 0);
-            }
-            7 => {
-                let (mut t, mut o) = (0u64, 0u64);
-                let _ = unsafe { mvdz_seek_time(r, (op as u64) * 1000, &mut t, &mut o) };
-                let _ = unsafe {
-                    mvdz_seek_time(r, u64::MAX, std::ptr::null_mut(), std::ptr::null_mut())
-                };
-            }
-            8 => {
-                let n = unsafe { mvdz_segment_count(r) };
-                let mut o = 0u64;
-                let _ = unsafe {
-                    mvdz_seek_segment(
-                        r,
-                        if n > 0 {
-                            (op as usize) % n as usize
-                        } else {
-                            usize::MAX
-                        },
-                        &mut o,
-                    )
-                };
             }
             9 => {
                 let _ = unsafe { mvdz_raw_size(r) };

@@ -1,4 +1,4 @@
-//! C API reader handles: out-of-range seeks, one handle used from several
+//! C API reader handles: one handle used from several
 //! threads, closed handles, sticky read errors, empty results and the
 //! metadata JSON.
 
@@ -14,15 +14,6 @@ fn c_handles() {
         let mut err = 0;
         let r = mvdz_open_memory(c.as_ptr() as *const _, c.len(), 1, 0, &mut err);
         assert!(!r.is_null() && err == 0);
-        let n = mvdz_segment_count(r);
-        assert!(n > 1);
-        let mut off = 0u64;
-        assert_eq!(
-            mvdz_seek_segment(r, n as usize, &mut off),
-            MVDZ_E_INVALID,
-            "out of range"
-        );
-        assert_eq!(mvdz_seek_segment(r, 1, &mut off), MVDZ_OK);
         // one handle used from several threads: calls are serialised
         let rr = r as usize;
         std::thread::scope(|s| {

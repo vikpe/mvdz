@@ -4,7 +4,7 @@ use crate::budget::{Budget, Limits};
 use crate::decode::{SeekSrc, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
-use crate::stream::{Reader, Seq};
+use crate::stream::Reader;
 use std::io::{Read, Seek, Write};
 
 pub use crate::encode::{Config, Info};
@@ -282,6 +282,6 @@ pub fn write_file_atomic_with(
 }
 
 /// The original demo, read sequentially (any reader).
-pub fn reader<R: Read>(r: R, threads: usize) -> Result<Reader<Seq<R>>> {
+pub fn reader<R: Read>(r: R, threads: usize) -> Result<Reader<R>> {
     Reader::new(r, threads, &Limits::default())
 }

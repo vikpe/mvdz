@@ -1,9 +1,8 @@
 //! Round trips through every reader, at the format's segment size and at
-//! smaller ones; seeking; odd and non-MVD input; determinism.
+//! smaller ones; odd and non-MVD input; determinism.
 
 mod common;
 use common::*;
-use std::io::{Cursor, Read};
 
 fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) {
     for seg in [0usize, 65536] {
@@ -108,38 +107,6 @@ fn ratio_limit_fallback() {
         let (c, info) = compress_info(&src, &cfg(seg)).unwrap();
         assert!(info.fallback_segments > 0);
         assert!(readers_agree(&c, "nop").unwrap() == src);
-    }
-}
-
-#[test]
-fn seeking() {
-    let Some(src) = duel() else { return };
-    for c in [
-        compress(&src, &cfg(40_000)).unwrap(),
-        compress(&src, &cfg(50_000)).unwrap(),
-    ] {
-        let mut r = mvdz::Reader::open(Cursor::new(&c), 2, &Default::default()).unwrap();
-        let ix = r.index().unwrap().clone();
-        assert!(ix.segs.len() > 3);
-        for (i, s) in ix.segs.iter().enumerate() {
-            assert_eq!(r.seek_segment(i).unwrap(), s.raw_off);
-            let mut tail = Vec::new();
-            r.read_to_end(&mut tail).unwrap();
-            assert!(tail == src[s.raw_off as usize..], "segment {i}");
-        }
-        assert!(matches!(
-            r.seek_segment(ix.segs.len()),
-            Err(mvdz::Error::Invalid(_))
-        ));
-        let dur = ix.duration_ms;
-        for ms in [0, 1, 1000, dur / 2, dur, dur + 1] {
-            let (i, t, off) = r.seek_time(ms).unwrap();
-            assert!(i == 0 || t < ms, "segment {i} starts before {ms}");
-            assert!(i + 1 == ix.segs.len() || ix.segs[i + 1].t_start >= ms);
-            let mut tail = Vec::new();
-            r.read_to_end(&mut tail).unwrap();
-            assert!(tail == src[off as usize..]);
-        }
     }
 }
 
