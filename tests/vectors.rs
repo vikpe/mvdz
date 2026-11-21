@@ -142,7 +142,7 @@ fn transform_body(lazy: &[(usize, &[u8])], blobs: &[(usize, &[u8])]) -> (Vec<u8>
     for (id, syms) in lazy {
         let ctxs = vec![0u16; syms.len()];
         let mut t = rans::Tally::new(256);
-        t.add(&rans::byte_syms(syms, &ctxs));
+        t.add(syms, &ctxs);
         let m = t.shared().unwrap();
         bodies.push(rans::encode_bytes(syms, &ctxs, &m));
         models.resize_with(models.len().max(id + 1), || None);

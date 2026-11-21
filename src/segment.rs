@@ -329,19 +329,19 @@ pub fn train(segs: &[(&Walked, &Nums)], threads: usize) -> Vec<Option<rans::Shar
     // parallel, each over the segments in order
     let mut models: Vec<Option<rans::Shared>> = par_map(threads, N_STREAMS, |sid| {
         let mut tally: Option<rans::Tally> = None;
-        let mut add = |alpha: usize, v: &[(u32, u16)]| {
-            if !v.is_empty() {
+        let mut add = |alpha: usize, syms: &[u8], ctxs: &[u16]| {
+            if !syms.is_empty() {
                 tally
                     .get_or_insert_with(|| rans::Tally::new(alpha))
-                    .add(v);
+                    .add(syms, ctxs);
             }
         };
         for &(wk, nums) in segs {
             if sid < N_LAZY {
-                add(256, &rans::byte_syms(&wk.io.syms[sid], &wk.io.ctxs[sid]));
+                add(256, &wk.io.syms[sid], &wk.io.ctxs[sid]);
             }
             if let Some((gi, k)) = at[sid] {
-                add(rans::NALPHA, &nums[gi][k].syms);
+                add(rans::NALPHA, &nums[gi][k].syms, &nums[gi][k].ctxs);
             }
         }
         tally.and_then(|t| t.shared())

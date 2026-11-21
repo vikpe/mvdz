@@ -198,12 +198,13 @@ impl Tally {
         }
     }
 
-    pub fn add(&mut self, syms: &[(u32, u16)]) {
+    /// Counts the symbols `syms` of a stream, each with its context in
+    /// `ctxs`.
+    pub fn add(&mut self, syms: &[u8], ctxs: &[u16]) {
         let alpha = self.alpha;
-        let maxc = syms.iter().map(|&(c, _)| c).max().unwrap_or(0) as usize;
+        let maxc = ctxs.iter().copied().max().unwrap_or(0) as usize;
         // row_of, is_own and the model's map are dense arrays sized by the
         // largest context; contexts are 16-bit by spec (§6.12).
-        assert!(maxc <= 0xffff, "context {maxc:#x} over 16 bits");
         if self.row_of.len() <= maxc {
             self.row_of.resize(maxc + 1, u32::MAX);
         }
@@ -213,7 +214,8 @@ impl Tally {
             &mut self.keys,
             &mut self.global,
         );
-        for &(c, s) in syms {
+        for (&s, &c) in syms.iter().zip(ctxs) {
+            let c = c as u32;
             let r = row_of[c as usize];
             let r = if r == u32::MAX {
                 let r = keys.len() as u32;
@@ -756,10 +758,10 @@ impl<'a> RDec<'a> {
     }
 }
 
-fn rans_encode(model: &Model, syms: &[(u32, u16)]) -> Vec<u8> {
-    let tix: Vec<usize> = syms
+fn rans_encode(model: &Model, syms: &[u8], ctxs: &[u16]) -> Vec<u8> {
+    let tix: Vec<usize> = ctxs
         .iter()
-        .map(|&(c, _)| model.map.get(c as usize).copied().unwrap_or(0) as usize)
+        .map(|&c| model.map.get(c as usize).copied().unwrap_or(0) as usize)
         .collect();
     let mut coded = 0usize;
     let mut state_of = vec![0u8; syms.len()];
@@ -775,7 +777,7 @@ fn rans_encode(model: &Model, syms: &[(u32, u16)]) -> Vec<u8> {
         if t.det.is_some() {
             continue;
         }
-        let s = syms[i].1 as usize;
+        let s = syms[i] as usize;
         e.put(state_of[i] as usize, t.freq[s], t.cum[s]);
     }
     e.finish()
@@ -783,8 +785,8 @@ fn rans_encode(model: &Model, syms: &[(u32, u16)]) -> Vec<u8> {
 
 /// Appends `rans_len uv | rans | extra`: a stream body after its model
 /// header.
-fn put_body(out: &mut Vec<u8>, model: &Model, syms: &[(u32, u16)], extra: &[u8]) {
-    let body = rans_encode(model, syms);
+fn put_body(out: &mut Vec<u8>, model: &Model, syms: &[u8], ctxs: &[u16], extra: &[u8]) {
+    let body = rans_encode(model, syms, ctxs);
     out.reserve(body.len() + extra.len() + 4);
     put_uv(out, body.len() as u64);
     out.extend_from_slice(&body);
@@ -792,9 +794,9 @@ fn put_body(out: &mut Vec<u8>, model: &Model, syms: &[(u32, u16)], extra: &[u8])
 }
 
 /// A back end 3 stream body: no model header.
-fn pack_body(model: &Model, syms: &[(u32, u16)], extra: &[u8]) -> Vec<u8> {
+fn pack_body(model: &Model, syms: &[u8], ctxs: &[u16], extra: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    put_body(&mut out, model, syms, extra);
+    put_body(&mut out, model, syms, ctxs, extra);
     out
 }
 
@@ -906,17 +908,9 @@ fn byte_ctx(c: u32) -> u32 {
     c & 0xffff
 }
 
-/// The (context, symbol) pairs of a structural stream.
-pub fn byte_syms(syms: &[u8], ctxs: &[u16]) -> Vec<(u32, u16)> {
-    syms.iter()
-        .zip(ctxs)
-        .map(|(&s, &c)| (c as u32, s as u16))
-        .collect()
-}
-
 /// A structural stream coded with its model in the file, `file`.
 pub fn encode_bytes(syms: &[u8], ctxs: &[u16], file: &Shared) -> Vec<u8> {
-    pack_body(&file.model, &byte_syms(syms, ctxs), &[])
+    pack_body(&file.model, syms, ctxs, &[])
 }
 
 pub struct ByteDec<'a> {
@@ -1070,17 +1064,19 @@ impl<'a> BitR<'a> {
     }
 }
 
-/// The values of a numeric stream as they are coded: the (context,
-/// bucket) pair of each value and the mantissa bits of all of them.
+/// The values of a numeric stream as they are coded: the bucket of each
+/// value (its symbol), its context, and the mantissa bits of all of them.
 pub struct NumSyms {
-    pub syms: Vec<(u32, u16)>,
+    pub syms: Vec<u8>,
+    pub ctxs: Vec<u16>,
     pub extra: Vec<u8>,
 }
 
 /// Collects the values of numeric stream `sid` as [`NumSyms`].
 pub struct NumSymW {
     sid: usize,
-    syms: Vec<(u32, u16)>,
+    syms: Vec<u8>,
+    ctxs: Vec<u16>,
     bits: BitW,
 }
 
@@ -1089,18 +1085,23 @@ impl NumSymW {
         NumSymW {
             sid,
             syms: Vec::new(),
+            ctxs: Vec::new(),
             bits: BitW::default(),
         }
     }
     #[inline(always)]
     pub fn push(&mut self, c: &NCtx, v: i32) {
         let (b, n, m) = bucket(v);
-        self.syms.push((num_ctx(self.sid, c), b));
+        let ctx = num_ctx(self.sid, c);
+        debug_assert!(ctx <= 0xffff, "stream {}: context {ctx:#x} over 16 bits", self.sid);
+        self.syms.push(b as u8);
+        self.ctxs.push(ctx as u16);
         self.bits.put(m, n);
     }
     pub fn finish(self) -> NumSyms {
         NumSyms {
             syms: self.syms,
+            ctxs: self.ctxs,
             extra: self.bits.finish(),
         }
     }
@@ -1108,7 +1109,7 @@ impl NumSymW {
 
 /// A numeric stream coded with its model in the file, `file`.
 pub fn encode_num(num: &NumSyms, file: &Shared) -> Vec<u8> {
-    pack_body(&file.model, &num.syms, &num.extra)
+    pack_body(&file.model, &num.syms, &num.ctxs, &num.extra)
 }
 
 pub struct NumDec<'a> {
@@ -1169,9 +1170,9 @@ mod tests {
     use super::*;
 
     /// The shared model of `syms` and its decoder model.
-    fn models(syms: &[(u32, u16)], alpha: usize) -> (Shared, Arc<DModel>) {
+    fn models(syms: &[u8], ctxs: &[u16], alpha: usize) -> (Shared, Arc<DModel>) {
         let mut t = Tally::new(alpha);
-        t.add(syms);
+        t.add(syms, ctxs);
         let sh = t.shared().unwrap();
         let dm = read_model(&sh.hdr, alpha, &Budget::unlimited()).unwrap();
         (sh, Arc::new(dm))
@@ -1186,7 +1187,7 @@ mod tests {
                 [(i * 7 % 13) as u8, 100 + (i % 5) as u8, 200 + (i % 2) as u8][(i % 3) as usize]
             })
             .collect();
-        let (sh, dm) = models(&byte_syms(&syms, &ctxs), 256);
+        let (sh, dm) = models(&syms, &ctxs, 256);
         let b = encode_bytes(&syms, &ctxs, &sh);
         let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
         for (i, &s) in syms.iter().enumerate() {
@@ -1213,10 +1214,10 @@ mod tests {
         let ctxs: Vec<u16> = (0..n).map(|i| (i % 3000) as u16).collect();
         let syms: Vec<u8> = ctxs.iter().map(|&c| (c % 4) as u8).collect();
         let mut t = Tally::new(256);
-        t.add(&byte_syms(&syms, &ctxs));
+        t.add(&syms, &ctxs);
         let full = build_model(&select(&t));
         assert!(header(&full).is_none(), "the full model breaks rule M2");
-        let (sh, dm) = models(&byte_syms(&syms, &ctxs), 256);
+        let (sh, dm) = models(&syms, &ctxs, 256);
         assert!(sh.model.own.len() < full.own.len());
         let b = encode_bytes(&syms, &ctxs, &sh);
         let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
@@ -1243,7 +1244,7 @@ mod tests {
             w.push(c, *v);
         }
         let num = w.finish();
-        let (sh, dm) = models(&num.syms, NALPHA);
+        let (sh, dm) = models(&num.syms, &num.ctxs, NALPHA);
         let b = encode_num(&num, &sh);
         let mut d = NumDec::new(PI_OX, &b, vals.len(), &dm).unwrap();
         for &(c, v) in &vals {
