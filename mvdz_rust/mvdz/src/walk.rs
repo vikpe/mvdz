@@ -765,9 +765,12 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             self.has_error = true;
         }
         let mut origin_offset = offset;
-        for axis in 0..3 {
+        for (axis, axis_offset) in self.player_origin_offsets[number as usize]
+            .iter_mut()
+            .enumerate()
+        {
             if flags & DF_ORIGIN << axis != 0 {
-                self.player_origin_offsets[number as usize][axis] = origin_offset;
+                *axis_offset = origin_offset;
                 origin_offset += coord_width as u32;
             }
         }
@@ -1212,13 +1215,13 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         {
             self.has_error = true;
         }
-        for axis in 0..3 {
+        for (axis, axis_move) in state.moves.iter_mut().enumerate() {
             let low = self.coded_byte(
                 UC,
-                5 << 12 | (axis as u32) << 8 | u32::from(state.moves[axis] & 0xff),
+                5 << 12 | (axis as u32) << 8 | u32::from(*axis_move & 0xff),
             );
             let high = self.coded_byte(UC, 6 << 12 | (axis as u32) << 8 | u32::from(low));
-            state.moves[axis] = u16::from_le_bytes([low, high]);
+            *axis_move = u16::from_le_bytes([low, high]);
         }
         state.buttons = self.coded_byte(UC, 7 << 12 | u32::from(state.buttons));
         state.impulse = self.coded_byte(UC, 8 << 12 | u32::from(state.impulse));

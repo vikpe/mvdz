@@ -1263,8 +1263,8 @@ mod tests {
         // a body cut short is refused; a symbol short does not finish
         assert!(ByteDecoder::new(&body[..body.len() - 2], symbols.len(), &model).is_err());
         let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
-        for index in 0..symbols.len() - 1 {
-            decoder.get(u32::from(contexts[index]));
+        for &context in &contexts[..symbols.len() - 1] {
+            decoder.get(u32::from(context));
         }
         assert!(!decoder.is_done());
         Ok(())

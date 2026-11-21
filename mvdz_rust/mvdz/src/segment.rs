@@ -439,8 +439,8 @@ pub(crate) fn encode(
 ) -> Option<Vec<u8>> {
     // every non-empty stream is a job: (stream, kind, group, index in group)
     let mut jobs: Vec<(usize, Kind, usize, usize)> = Vec::new();
-    for stream in 0..LAZY_STREAM_COUNT {
-        if !walked.io.symbols[stream].is_empty() {
+    for (stream, symbols) in walked.io.symbols.iter().enumerate() {
+        if !symbols.is_empty() {
             jobs.push((stream, Kind::Lazy, 0, 0));
         }
     }

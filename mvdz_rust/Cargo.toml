@@ -60,10 +60,8 @@ redundant_pub_crate = "allow"
 # just before. Only the entropy coders drop high bits, on purpose.
 cast_possible_truncation = "allow"
 
-# The hot loops (walker, rANS, numeric groups) keep their written form,
-# which was benchmarked: parallel arrays indexed by one counter, forced
-# inlining
-needless_range_loop = "allow"
+# Forced inlining in the hot loops (walker, rANS, numeric groups) was
+# benchmarked
 inline_always = "allow"
 
 # No panics
