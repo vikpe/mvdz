@@ -236,12 +236,7 @@ pub const WAVE1: [Group; 10] = [
     Group::Uc,
 ];
 /// Wave 1 for pipelined decoding next to the walker (one task per worker).
-pub const WAVE1_PIPE: [Group; 4] = [
-    Group::PiAAll,
-    Group::PiOAll,
-    Group::PeAll,
-    Group::Uc,
-];
+pub const WAVE1_PIPE: [Group; 4] = [Group::PiAAll, Group::PiOAll, Group::PeAll, Group::Uc];
 pub const WAVE2: [Group; 2] = [Group::Snd, Group::Te];
 
 impl Group {

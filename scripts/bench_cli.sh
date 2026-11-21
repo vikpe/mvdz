@@ -6,7 +6,7 @@
 #
 #   scripts/bench_cli.sh WORKDIR FILELIST     (FILELIST: one .mvd path per line)
 #
-# Environment: MVDZ (binary, default target/release/mvdz), ARCHIVE (dir of
+# Environment: MVDZ (binary, default mvdz_rust/target/release/mvdz), ARCHIVE (dir of
 # <name>.gz), OUT (decoded output, default /dev/shm/mvdz-bench.out), REPS
 # (default 3). Prints, per codec: bytes, ratio to raw, ratio to gz, and
 # decode MB/s (MB = 10^6 bytes of raw demo) for 1 thread and for a batch of
@@ -14,7 +14,7 @@
 set -eu
 W=$1
 LIST=$2
-MVDZ=${MVDZ:-target/release/mvdz}
+MVDZ=${MVDZ:-mvdz_rust/target/release/mvdz}
 OUT=${OUT:-/dev/shm/mvdz-bench.out}
 REPS=${REPS:-3}
 mkdir -p "$W"/normal "$W"/fast "$W"/xz "$W"/zstd "$W"/gz

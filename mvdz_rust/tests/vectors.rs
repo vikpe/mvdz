@@ -228,7 +228,11 @@ fn hostile(v: &mut Vec<Vector>) {
     add("header-duration", q.build(), "the header's duration_ms + 1");
     let mut q = p.clone();
     q.header.crc ^= 1;
-    add("header-crc", q.build(), "one bit of the header's CRC-32 flipped");
+    add(
+        "header-crc",
+        q.build(),
+        "one bit of the header's CRC-32 flipped",
+    );
     let mut x = base.clone();
     x[30] = 1;
     add(
@@ -311,7 +315,11 @@ fn hostile(v: &mut Vec<Vector>) {
     for s in &p.segs {
         segment_block(&mut x, s);
     }
-    add("models-missing", x, "the base file without its models block");
+    add(
+        "models-missing",
+        x,
+        "the base file without its models block",
+    );
     // one usercmd block in a segment built by hand
     let mut one = Demo(Vec::new());
     one.hidden(
@@ -577,12 +585,7 @@ fn all_vectors() -> Option<Vec<Vector>> {
         &random,
         "the same, untransformed: one DEFLATE segment",
     );
-    add(
-        "empty.normal.mvdz",
-        one(b"", cfg(0)),
-        b"",
-        "an empty demo",
-    );
+    add("empty.normal.mvdz", one(b"", cfg(0)), b"", "an empty demo");
     let uc = usercmd_demo();
     add(
         "usercmd.normal.mvdz",

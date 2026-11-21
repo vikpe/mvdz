@@ -2,8 +2,8 @@
 //! the sample demos (skipped when absent) and the every-reader check.
 #![allow(dead_code)]
 
-use mvdz::format::*;
 use mvdz::Config;
+use mvdz::format::*;
 use std::io::{Cursor, Read};
 
 /// How a test compresses: the segment size (0: the format's own, 256 KiB;

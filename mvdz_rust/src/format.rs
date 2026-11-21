@@ -374,7 +374,10 @@ mod tests {
         let b = h.bytes();
         assert_eq!(b.len(), HEADER_LEN);
         assert_eq!(Header::parse(&b).unwrap(), h);
-        assert_eq!(Header::parse(b"MVD"), Err(Error::Format("not an MVDZ file")));
+        assert_eq!(
+            Header::parse(b"MVD"),
+            Err(Error::Format("not an MVDZ file"))
+        );
         assert_eq!(
             Header::parse(b"XXXX\x02\0\0\0"),
             Err(Error::Format("not an MVDZ file"))

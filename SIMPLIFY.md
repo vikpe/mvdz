@@ -4,6 +4,10 @@ MVDZ is a proposal with no files in the wild, so there is no compatibility burde
 
 ## Status (2026-11-20, evening)
 
+Since 2026-11-21 the Rust implementation is in `mvdz_rust/` (the crate is still named
+`mvdz`): paths in this file such as `src/...`, `tests/...` and `fuzz/...` are relative to
+that directory. The specification, this file and the benchmarks stay at the root.
+
 Branch `feature/simplify`, 15 commits on `master` (rc.4, a9ac8fc), last commit 4e297d1.
 The working tree is clean; this file is untracked. Viktor commits each change himself.
 

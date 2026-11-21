@@ -34,7 +34,10 @@ fn header_describes_the_demo() {
             assert!(s.t_start >= t, "segment {i}");
             assert!(s.raw_len > 0, "segment {i}");
             let part = &demo[raw as usize..(raw + s.raw_len) as usize];
-            assert_eq!(s.t_start, mvdz::segment::frame_scan(&demo[..raw as usize]).1);
+            assert_eq!(
+                s.t_start,
+                mvdz::segment::frame_scan(&demo[..raw as usize]).1
+            );
             raw += s.raw_len;
             t = s.t_start;
             assert!(!part.is_empty());
@@ -93,13 +96,28 @@ fn wrong_header_fields_are_refused() {
     // an unknown version, another magic
     let mut v = c.clone();
     v[4] = 3;
-    assert!(matches!(mvdz::decompress(&v, 1), Err(mvdz::Error::Format(_))));
+    assert!(matches!(
+        mvdz::decompress(&v, 1),
+        Err(mvdz::Error::Format(_))
+    ));
     assert!(readers_agree(&v, "version").is_none());
     let mut m = c.clone();
     m[0] = b'N';
-    assert!(matches!(mvdz::decompress(&m, 1), Err(mvdz::Error::Format(_))));
+    assert!(matches!(
+        mvdz::decompress(&m, 1),
+        Err(mvdz::Error::Format(_))
+    ));
     // every cut of the file
-    for cut in [0, 3, 7, HEADER_LEN - 1, HEADER_LEN, HEADER_LEN + 1, c.len() / 2, c.len() - 1] {
+    for cut in [
+        0,
+        3,
+        7,
+        HEADER_LEN - 1,
+        HEADER_LEN,
+        HEADER_LEN + 1,
+        c.len() / 2,
+        c.len() - 1,
+    ] {
         assert!(readers_agree(&c[..cut], "cut").is_none(), "cut at {cut}");
     }
 }

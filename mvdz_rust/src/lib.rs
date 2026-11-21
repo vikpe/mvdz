@@ -27,11 +27,9 @@ pub mod streams;
 pub mod util;
 pub mod walk;
 
-
 pub use api::{
-    Config, FileInfo, Info, check_demo, compress, compress_info, decompress,
-    decompress_stream, decompress_with, is_mvdz, read_info, read_info_with, write_file_atomic,
-    write_file_atomic_with,
+    Config, FileInfo, Info, check_demo, compress, compress_info, decompress, decompress_stream,
+    decompress_with, is_mvdz, read_info, read_info_with, write_file_atomic, write_file_atomic_with,
 };
 pub use budget::Limits;
 pub use error::{Error, Result};

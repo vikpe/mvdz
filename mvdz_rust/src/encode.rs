@@ -181,11 +181,7 @@ pub fn compress_segmented(src: &[u8], segment: usize, cfg: &Config) -> Result<(V
 /// Compresses a demo with every segment coded without the transform (as
 /// DEFLATE): the layout the encoder falls back to. For test vectors.
 #[doc(hidden)]
-pub fn compress_untransformed(
-    src: &[u8],
-    segment: usize,
-    cfg: &Config,
-) -> Result<(Vec<u8>, Info)> {
+pub fn compress_untransformed(src: &[u8], segment: usize, cfg: &Config) -> Result<(Vec<u8>, Info)> {
     compress_inner(src, segment, cfg, true)
 }
 
@@ -223,7 +219,9 @@ fn compress_inner(
                 shared: Vec::new(),
                 protos: vec![Proto::default(); nseg],
                 walked: vec![false; nseg],
-                durs: (0..nseg).map(|i| frame_scan(&src[cuts[i]..cuts[i + 1]]).1).collect(),
+                durs: (0..nseg)
+                    .map(|i| frame_scan(&src[cuts[i]..cuts[i + 1]]).1)
+                    .collect(),
             }
         } else {
             train(src, &cuts, outer, inner, threads)

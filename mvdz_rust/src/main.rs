@@ -1,5 +1,5 @@
-use mvdz::api::{self, Config};
 use mvdz::Limits;
+use mvdz::api::{self, Config};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -240,12 +240,11 @@ fn jobs(a: &Args, compress: bool) -> Vec<(String, Result<String, String>)> {
     let mut seen = std::collections::HashMap::new();
     f.iter()
         .map(|i| {
-            let o = output_name(i, compress).and_then(|o| {
-                match seen.insert(o.clone(), i.clone()) {
+            let o =
+                output_name(i, compress).and_then(|o| match seen.insert(o.clone(), i.clone()) {
                     Some(prev) => Err(format!("{o} is also the output of {prev}")),
                     None => Ok(o),
-                }
-            });
+                });
             (i.clone(), o)
         })
         .collect()
@@ -377,7 +376,8 @@ fn loadavg() -> String {
 /// In-memory library benchmark: every figure is MB/s of raw demo
 /// (MB = 10^6 bytes), the median of `reps` runs with [min-max].
 fn bench(a: &Args) {
-    let files: Vec<(String, Vec<u8>)> = a.files.iter().map(|f| (f.clone(), read_input(f))).collect();
+    let files: Vec<(String, Vec<u8>)> =
+        a.files.iter().map(|f| (f.clone(), read_input(f))).collect();
     let raw: usize = files.iter().map(|f| f.1.len()).sum();
     let mb = raw as f64 / 1e6;
     let nt = a.threads.max(1);
@@ -397,8 +397,7 @@ fn bench(a: &Args) {
         "MB/s of raw demo: median [min-max] over {reps} runs; 'batch' = files in parallel on {nt} threads, 1 thread each"
     );
     let mut stream_rows: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    let mut perfile =
-        String::from("file\traw\tpacked\tsha_ok\tfallback_segments\tescaped\n");
+    let mut perfile = String::from("file\traw\tpacked\tsha_ok\tfallback_segments\tescaped\n");
     let cfg = |threads: usize| Config {
         threads,
         verify: !a.no_verify,

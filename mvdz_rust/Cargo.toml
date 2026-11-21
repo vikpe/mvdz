@@ -8,10 +8,10 @@ description = "Lossless, format-aware compression of QuakeWorld MVD demos"
 repository = "https://github.com/galfthan/mvdz"
 homepage = "https://github.com/galfthan/mvdz"
 documentation = "https://github.com/galfthan/mvdz"
-readme = "README.md"
+readme = "../README.md"
 keywords = ["quakeworld", "mvd", "demo", "compression", "rans"]
 categories = ["compression", "game-development", "command-line-utilities"]
-exclude = ["/fuzz", "/scripts", "/.github"]
+exclude = ["/fuzz"]
 
 [dependencies]
 sha2 = "0.10"

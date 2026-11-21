@@ -8,6 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# The Rust implementation is in mvdz_rust
+defaults:
+  run:
+    working-directory: mvdz_rust
+
 # Linux only. Other platforms build from source with cargo but are not
 # tested here.
 jobs:

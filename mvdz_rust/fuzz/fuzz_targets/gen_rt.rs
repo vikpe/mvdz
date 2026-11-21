@@ -29,8 +29,7 @@ fuzz_target!(|data: &[u8]| {
         threads,
         verify: false,
     };
-    let (c, _) =
-        mvdz::encode::compress_segmented(&demo, seg, &cfg).expect("compress (no verify)");
+    let (c, _) = mvdz::encode::compress_segmented(&demo, seg, &cfg).expect("compress (no verify)");
     if std::env::var("REQUIRE_TRANSFORM_LOSSLESS").is_ok() {
         rt(&c, &demo, "unverified transform");
     } else if mvdz::decompress(&c, 1).ok().as_deref() != Some(&demo[..]) {

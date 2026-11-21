@@ -10,7 +10,7 @@ decoding. Files can also carry attachments stored beside the demo.
 
 It comes as a command-line tool and a Rust library, and builds for
 WebAssembly. The format is specified in [FORMAT.md](FORMAT.md), precisely
-enough to write an independent decoder, and `tests/vectors/` holds valid
+enough to write an independent decoder, and `mvdz_rust/tests/vectors/` holds valid
 and hostile test files. The work now is the specification and this Rust
 implementation; implementations in C, Go and other languages follow once
 the format is settled.
@@ -52,7 +52,7 @@ it to `.mvd` first (`mvdz decompress game.mvdz game.mvd`).
 and a C compiler (for the bundled libzstd).
 
 ```
-git clone https://github.com/galfthan/mvdz && cd mvdz
+git clone https://github.com/galfthan/mvdz && cd mvdz/mvdz_rust
 cargo build --release            # target/release/mvdz
 cargo install --path .           # or: put mvdz on your PATH
 ```
@@ -306,7 +306,7 @@ real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `sample/` with demos named `<sha256>.mvd`, `gen/` with constructed demos,
 `poc/` with hostile model headers) and say so when it is unset.
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors (it needs the sample
-demos they were made from). Fuzz targets are in `fuzz/` (`cargo +nightly
+demos they were made from). Fuzz targets are in `mvdz_rust/fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
 `stream_writer`, `compress_rt` and the structure-aware `gen_rt`).
 The feature `scalar` forces the portable code paths (as on wasm).

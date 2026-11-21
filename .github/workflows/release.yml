@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
 
+# The Rust implementation is in mvdz_rust
+defaults:
+  run:
+    working-directory: mvdz_rust
+
 jobs:
   linux:
     runs-on: ubuntu-latest
@@ -47,7 +52,7 @@ jobs:
             mkdir "$name"
             cp "$dir/$TARGET/release/mvdz" "$name/"
             strip "$name/mvdz"
-            cp LICENSE README.md "$name/"
+            cp ../LICENSE ../README.md "$name/"
             tar czf "dist/$name.tar.gz" "$name"
           done
           (cd dist && sha256sum *.tar.gz > SHA256SUMS)
@@ -57,7 +62,7 @@ jobs:
         run: |
           # the newest CHANGELOG entry, and which download to take
           # (relative links made absolute: the notes are not shown in the tree)
-          awk '/^## /{n++} n==1' CHANGELOG.md \
+          awk '/^## /{n++} n==1' ../CHANGELOG.md \
             | sed "s#](\([A-Za-z][^):]*\))#](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/\1)#g" > notes.md
           cat >> notes.md <<'NOTES'
 

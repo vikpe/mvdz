@@ -4,9 +4,9 @@
 
 mod common;
 use common::*;
+use mvdz::Error;
 use mvdz::format::*;
 use mvdz::util::put_uv;
-use mvdz::Error;
 use std::io::Cursor;
 use std::time::Instant;
 

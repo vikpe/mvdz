@@ -169,8 +169,7 @@ fn walk_dec<'a>(
         blobs,
         over: false,
     };
-    let mut w: Walker<false, DecIO> =
-        Walker::new(&[], dst.ptr(), dst.len(), recs, io, proto);
+    let mut w: Walker<false, DecIO> = Walker::new(&[], dst.ptr(), dst.len(), recs, io, proto);
     w.run(tail);
     if w.err || w.io.over {
         return bad("structure");
@@ -225,14 +224,8 @@ impl Walked {
 pub fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
     let recs = Recs::growable(src.len());
     let (io, tail, pend, err) = {
-        let mut w: Walker<true, EncIO> = Walker::new(
-            src,
-            std::ptr::null_mut(),
-            0,
-            &recs,
-            EncIO::new(),
-            proto,
-        );
+        let mut w: Walker<true, EncIO> =
+            Walker::new(src, std::ptr::null_mut(), 0, &recs, EncIO::new(), proto);
         let tail = w.run(0);
         (w.io, tail, w.proto, w.err)
     };
@@ -276,7 +269,11 @@ fn pack_one(
     file: Option<&rans::Shared>,
 ) -> Option<Vec<u8>> {
     match kind {
-        Kind::Lazy => Some(rans::encode_bytes(&wk.io.syms[sid], &wk.io.ctxs[sid], file?)),
+        Kind::Lazy => Some(rans::encode_bytes(
+            &wk.io.syms[sid],
+            &wk.io.ctxs[sid],
+            file?,
+        )),
         Kind::Num => Some(rans::encode_num(num?, file?)),
         Kind::Blobs => {
             let ids = blob_ids(wk);
@@ -307,7 +304,11 @@ pub fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Nums {
     par_map(threads, groups.len(), |gi| {
         let g = groups[gi];
         let mut io = NumEnc {
-            vals: g.streams().iter().map(|&sid| rans::NumSymW::new(sid)).collect(),
+            vals: g
+                .streams()
+                .iter()
+                .map(|&sid| rans::NumSymW::new(sid))
+                .collect(),
         };
         g.run::<true, NumEnc>(&wk.recs, buf, &mut io);
         io.vals.into_iter().map(|w| w.finish()).collect()
@@ -782,15 +783,7 @@ mod tests {
         threads: usize,
     ) -> Vec<u8> {
         let mut dst = vec![0u8; len];
-        decode(
-            body,
-            h,
-            &mut dst,
-            tables,
-            threads,
-            &Budget::unlimited(),
-        )
-        .unwrap();
+        decode(body, h, &mut dst, tables, threads, &Budget::unlimited()).unwrap();
         dst
     }
 

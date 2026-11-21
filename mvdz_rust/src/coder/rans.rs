@@ -258,7 +258,12 @@ impl Counts {
         let alpha = self.alpha;
         let row = |i: usize| &self.own_counts[i * alpha..(i + 1) * alpha];
         let mut order: Vec<usize> = (0..self.own.len()).collect();
-        order.sort_by_key(|&i| (row(i).iter().map(|&x| x as u64).sum::<u64>(), std::cmp::Reverse(i)));
+        order.sort_by_key(|&i| {
+            (
+                row(i).iter().map(|&x| x as u64).sum::<u64>(),
+                std::cmp::Reverse(i),
+            )
+        });
         let mut drop = vec![false; self.own.len()];
         for &i in order.iter().take(n) {
             drop[i] = true;
@@ -1093,7 +1098,11 @@ impl NumSymW {
     pub fn push(&mut self, c: &NCtx, v: i32) {
         let (b, n, m) = bucket(v);
         let ctx = num_ctx(self.sid, c);
-        debug_assert!(ctx <= 0xffff, "stream {}: context {ctx:#x} over 16 bits", self.sid);
+        debug_assert!(
+            ctx <= 0xffff,
+            "stream {}: context {ctx:#x} over 16 bits",
+            self.sid
+        );
         self.syms.push(b as u8);
         self.ctxs.push(ctx as u16);
         self.bits.put(m, n);

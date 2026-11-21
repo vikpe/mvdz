@@ -9,13 +9,9 @@ fn check_all_ways(src: &[u8], what: &str, expect_transform: bool) {
         let c = cfg(seg);
         let (one, info) = unchecked(src, &c).unwrap();
         if expect_transform {
-            assert_eq!(
-                info.fallback_segments, 0,
-                "{what}: seg {seg} fell back"
-            );
+            assert_eq!(info.fallback_segments, 0, "{what}: seg {seg} fell back");
         }
-        let back = readers_agree(&one, what)
-            .unwrap_or_else(|| panic!("{what}: seg {seg} refused"));
+        let back = readers_agree(&one, what).unwrap_or_else(|| panic!("{what}: seg {seg} refused"));
         assert!(back == src, "{what}: seg {seg}");
     }
 }
@@ -43,7 +39,7 @@ fn sample_demos() {
 fn empty_and_tiny_inputs() {
     let mut rng = Rng(7);
     let random: Vec<u8> = (0..10_000).map(|_| rng.next() as u8).collect();
-    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap();
+    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md")).unwrap();
     let inputs: [&[u8]; 7] = [
         b"",
         b"\x00",
@@ -67,7 +63,7 @@ fn empty_and_tiny_inputs() {
 fn non_mvd_input_streams() {
     let mut rng = Rng(7);
     let random: Vec<u8> = (0..10_000).map(|_| rng.next() as u8).collect();
-    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap();
+    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md")).unwrap();
     let mut inputs = vec![vec![1u8], random, text];
     if let Some(d) = duel() {
         inputs.push(d[..300].to_vec());
@@ -149,7 +145,10 @@ fn edited_demos_round_trip() {
         }
         let c = compress(&d, &cfg(seg)).unwrap();
         assert!(mvdz::decompress(&c, 1).unwrap() == d, "case {case}");
-        assert!(mvdz::decompress(&c, 2).unwrap() == d, "case {case}, 2 threads");
+        assert!(
+            mvdz::decompress(&c, 2).unwrap() == d,
+            "case {case}, 2 threads"
+        );
     }
     // edits within the demo keep it a demo: only cuts into the first frame
     // are refused
@@ -186,10 +185,7 @@ fn constructed_demos() {
         }
         for seg in [0usize, 50_000] {
             let c = compress(&src, &cfg(seg)).unwrap();
-            assert!(
-                mvdz::decompress(&c, 2).unwrap() == src,
-                "{name} seg {seg}"
-            );
+            assert!(mvdz::decompress(&c, 2).unwrap() == src, "{name} seg {seg}");
             assert!(
                 mvdz::decompress(&c, 1).unwrap() == src,
                 "{name} seg {seg}, 1 thread"

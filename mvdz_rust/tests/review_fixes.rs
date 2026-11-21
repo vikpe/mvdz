@@ -4,10 +4,10 @@
 
 mod common;
 use common::*;
+use mvdz::Error;
 use mvdz::budget::Limits;
 use mvdz::format::*;
 use mvdz::util::put_uv;
-use mvdz::Error;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
@@ -145,10 +145,7 @@ fn c_m1_segment_limit() {
     let demo = sets(MAX_SEGMENTS + 10);
     let t = Instant::now();
     let e = compress(&demo, &cfg(1)).unwrap_err();
-    assert_eq!(
-        e,
-        Error::Invalid("too many segments")
-    );
+    assert_eq!(e, Error::Invalid("too many segments"));
     assert!(t.elapsed() < Duration::from_secs(5));
     // at the limit itself, the file is written and decodes
     let demo = sets(2000);
