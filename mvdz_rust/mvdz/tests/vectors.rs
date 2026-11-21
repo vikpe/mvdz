@@ -466,28 +466,6 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The entries (stream id, model) of a models block.
-fn tables_entries(b: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
-    let mut r = mvdz::util::Rd::new(b);
-    let n = r.u32z().context("the entry count")?;
-    (0..n)
-        .map(|_| Some((r.u32z()?, r.bytes()?.to_vec())))
-        .collect::<Option<_>>()
-        .context("a models entry")
-}
-
-/// A models block from its entries.
-fn tables_body(e: &[(usize, Vec<u8>)]) -> Vec<u8> {
-    let mut b = Vec::new();
-    put_u32(&mut b, e.len());
-    for (sid, m) in e {
-        put_u32(&mut b, *sid);
-        put_u32(&mut b, m.len());
-        b.extend_from_slice(m);
-    }
-    b
-}
-
 /// Every hostile vector is refused by every reader (they are built from
 /// synthetic demos, so this runs without the demo cache).
 #[test]

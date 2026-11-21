@@ -86,6 +86,7 @@ A format simple enough to stay unchanged for 10+ years.
 | Self-check fallbacks | `Info::self_check_fallbacks` counts segments that failed the self-check and were written as all tail; fuzz targets (with `REQUIRE_TRANSFORM_LOSSLESS`) and round-trip tests require 0 | A transform bug otherwise only costs size |
 | Checksums | CRC-32 of zlib per segment and for the whole demo, both checked on decode; SHA-256 in the header, never recomputed on decode | CRC-32 is in every standard library that has DEFLATE. The whole-demo check catches segments in the wrong order; the segment check serves subset decodes. SHA-256 on decode cost 9.1 % of a 4-thread decode with SHA instructions and 19.7 % of a batch decode without; a consumer that must authenticate hashes the output |
 | Edge inputs | A demo ending inside a frame: the partial bytes are the `TAIL` of its segment. Input not starting like an MVD: refused (`check_demo`, `NotMvd`); the unchecked entry point and `--allow-non-demo` write it. Unframed bytes are tail; past 1 MiB the rest is cut every 1 MiB and each piece walked afresh | Already round-trips and is tested |
+| Unused models | A models block may list a model no segment uses; readers ignore it. The encoder writes only used models (`assemble` recomputes them after every self-check round). Test: `unused_model_is_ignored` | No decoder rule to implement in every port; a streaming encoder can write the models block before it knows which segments fall back; the cost is bounded by the 16 MiB limit |
 | Flippable bits (open question 9) | Kept as is | See "Bit-flip probe" for the counts and the options if revisited |
 | Thread count | Tool: all logical cores, `-j` overrides. Library: default 1, 0 means all logical cores | A library should not take every core unasked |
 | Threads | Across segments only, encoder and decoder; nothing inside a segment runs in parallel. The streaming reader decodes up to `threads` segments at once | No `unsafe`, one rule. Costs: 1-thread decode +7 %, demos of 1 segment at `-j 4` up to 0.9 ms (decode) and 1.5 ms (encode) slower; the CLI at `-j 4` on a 16 MB demo decodes 30 % faster. Demos are typically 1 MB or more |
@@ -302,8 +303,10 @@ Code:
    narrowed from `usize` to `u32` (a `u32` walker cursor would remove them; hot loop:
    measure).
 4. Eight `#[doc(hidden)] pub` modules (`coder`, `deflate`, `encode`, `format`, `proto`,
-   `segment`, `streams`, `util`) are public only for tests that build files by hand;
-   moving those tests into the crate lets every module be private.
+   `segment`, `streams`, `util`) are public for tests that build files by hand and for
+   the tool (`util::par_map`, `util::threads`, `encode::compress`, `format::VERSION`);
+   moving those tests into the crate and re-exporting the tool's items lets every
+   module be private.
 5. The work budget (`Limits::work_per_byte`): with segments at 1 MiB and models at
    16 MiB the work a file can demand is bounded by its size; maybe only the memory limit
    is needed. Check what the hostile-file tests rely on first.
@@ -324,28 +327,27 @@ API gaps:
 
 Format and specification:
 
-12. May the models block list a model no segment uses? No decoder check, no test.
-    Saying yes keeps an encoder free to write segments as it codes them.
-13. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
-14. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
+12. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
+13. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
     sharing, attachments, streaming (sections 3, 4, 5.3, 10, 11) and the C interface.
     State: the 1 MiB segment rule (it still gives 4 GiB and "only the last segment may
     end inside a frame"); `MAX_SEGMENTS` as a 16 GiB demo limit; section 12 rule 1 as
     the 1 MiB cut with each piece walked afresh, rule 5 as all tail; encoders refuse
-    input not starting like an MVD; "scan back from the last segment" for demoinfo.
+    input not starting like an MVD; "scan back from the last segment" for demoinfo;
+    a model no segment uses is allowed and ignored.
     Stale: line 668 (decode waves), line 357 (`FileInfo::to_json`, now `info_json` in
     `mvdz_cli/src/main.rs`).
-15. README: passages pointing at removed sections and features (CLI options, API
+14. README: passages pointing at removed sections and features (CLI options, API
     examples, the fuzz target list).
-16. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
-17. Later: implementations in C, Go and other languages from the settled
+15. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
+16. Later: implementations in C, Go and other languages from the settled
     specification, with a shared test suite.
 
 Not measured:
 
-18. Size of a decoder-only wasm build.
-19. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-20. rayon on the final code (optional).
+17. Size of a decoder-only wasm build.
+18. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
+19. rayon on the final code (optional).
 
 ## Verification
 

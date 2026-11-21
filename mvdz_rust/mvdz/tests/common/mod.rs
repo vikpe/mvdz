@@ -374,6 +374,28 @@ pub(crate) fn readers_agree(b: &[u8], what: &str) -> Option<Vec<u8>> {
 
 // ---------------------------------------------------------------- file surgery
 
+/// The entries (stream id, model) of a models block.
+pub(crate) fn tables_entries(body: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
+    let mut reader = mvdz::util::Rd::new(body);
+    let count = reader.u32z().context("the entry count")?;
+    (0..count)
+        .map(|_| Some((reader.u32z()?, reader.bytes()?.to_vec())))
+        .collect::<Option<_>>()
+        .context("a models entry")
+}
+
+/// A models block from its entries.
+pub(crate) fn tables_body(entries: &[(usize, Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    mvdz::util::put_u32(&mut body, entries.len());
+    for (stream, model) in entries {
+        mvdz::util::put_u32(&mut body, *stream);
+        mvdz::util::put_u32(&mut body, model.len());
+        body.extend_from_slice(model);
+    }
+    body
+}
+
 /// A file taken apart: its header, the body of its models block and the
 /// body of every segment (its header fields after the length, then its
 /// coded data).

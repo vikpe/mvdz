@@ -107,6 +107,33 @@ fn sequential_reader_threads_agree() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A model no segment uses is allowed: every reader ignores it.
+#[test]
+fn unused_model_is_ignored() -> anyhow::Result<()> {
+    let demo = several_segments(&synthetic(&[], false));
+    let file = compress(&demo)?;
+    let mut file_parts = parts(&file)?;
+    let mut entries = tables_entries(&file_parts.models)?;
+    anyhow::ensure!(
+        entries.iter().all(|entry| entry.0 != mvdz::streams::UC),
+        "the demo has no usercmd blocks"
+    );
+    let structural = entries
+        .iter()
+        .find(|entry| mvdz::streams::is_lazy(entry.0))
+        .context("a structural stream's model")?
+        .1
+        .clone();
+    entries.push((mvdz::streams::UC, structural));
+    entries.sort_by_key(|entry| entry.0);
+    file_parts.models = tables_body(&entries);
+    let with_unused = file_parts.build();
+    assert!(with_unused.len() > file.len());
+    let decoded = readers_agree(&with_unused, "unused model").context("a reader refuses it")?;
+    assert!(decoded == demo);
+    Ok(())
+}
+
 #[test]
 fn empty_and_tiny_inputs() -> anyhow::Result<()> {
     let mut rng = Rng(7);
