@@ -315,7 +315,33 @@ Code:
 API gaps:
 
 2. Part of a file (a time range, the last segment) cannot be decoded from outside the
-   crate. If wanted: one public function, and each segment's starting protocol state.
+   crate. Each segment already stores its starting protocol state (`fte`, `fte2`,
+   `mvd1`), so only the API is missing. Proposal: parse once into `Segments`; a
+   `Segment` is only made by it, so it is always in range and of that file.
+
+   ```rust
+   pub struct Segments<'a> { file: &'a [u8], layout: Layout }
+   impl<'a> Segments<'a> {
+       pub fn new(file: &'a [u8]) -> Result<Self>;
+       pub fn header(&self) -> &Header;
+       pub fn iter(&self) -> impl Iterator<Item = Segment<'_>>;
+       pub fn last(&self) -> Option<Segment<'_>>; // None for an empty demo
+       pub fn at_ms(&self, time_ms: u64) -> Option<Segment<'_>>;
+   }
+   pub struct Segment<'a> { segments: &'a Segments<'a>, index: usize }
+   impl Segment<'_> {
+       pub fn raw_offset(&self) -> u64;
+       pub fn raw_len(&self) -> u32;
+       pub fn start_ms(&self) -> u64;
+       pub fn duration_ms(&self) -> u32;
+       pub fn decode(&self) -> Result<Vec<u8>>; // CRC-32 checked
+   }
+   ```
+
+   Only segment CRCs are checked; the demo CRC-32 and SHA-256 need the whole demo.
+   Playback from mid-demo also needs segment 0 (server data, model and sound lists,
+   baselines). Left out until a client needs them: range decode in one call, a thread
+   count, a `Read + Seek` variant.
 
 Format and specification:
 
@@ -331,7 +357,6 @@ Not measured:
 
 5. Size of a decoder-only wasm build.
 6. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-7. rayon on the final code (optional).
 
 ## Verification
 
