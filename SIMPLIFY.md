@@ -353,10 +353,6 @@ Format and specification:
 4. Later: implementations in C, Go and other languages from the settled
    specification, with a shared test suite.
 
-Not measured:
-
-5. Size of a decoder-only wasm build.
-6. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
 
 ## Verification
 
