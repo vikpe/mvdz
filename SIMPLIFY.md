@@ -813,7 +813,8 @@ On the 120 demos with `-j 4` (wall, median) and the 500 with `bench -r 3 -j 4`.
   files. One thread and batch are untouched.
 - No gain: the `mimalloc` allocator on glibc. Compress 5.50 s to 5.71 s, decompress
   1.92 s to 2.45 s.
-- Found, a behaviour question: the tool calls `fsync` twice for each output file (the
+- Found, a behaviour question (settled 2026-11-21: no fsync, see "Out of the
+  library" 1): the tool calls `fsync` twice for each output file (the
   file, its directory): 2.9 ms a file on this NVMe disk, 0.34 s of the 1.92 s of
   decompression (18 %) and 0.32 s of the 5.5 s of compression (6 %). gzip and zstd do
   not sync by default; xz does since 5.8, with `--no-sync` to turn it off.
@@ -1283,8 +1284,16 @@ number is given.
 
 ### Out of the library (not the codec)
 
-1. Atomic file writing (`write_file_atomic*`, `replace_locked`, `temp_name`, `gid` in
-   `api.rs`, about 110 lines, Unix-specific parts): move to `main.rs`.
+1. Done 2026-11-21 (not committed; Viktor chose the direct write): atomic file
+   writing removed from the library and not kept in the tool. `mvdz` writes a regular
+   output with `File::create` and removes it when the write fails, as gzip and zstd
+   do; devices and pipes are written as they are. Gone: temp file and rename, both
+   fsyncs (2.9 ms a file, see "Cheap wins tried"), the permission probe, `fchown`,
+   about 110 lines. Known ceilings: a failed `-f` overwrite loses the old file; a
+   killed process leaves a partial file. The library exports lose
+   `write_file_atomic` and `write_file_atomic_with`. New unit test
+   `failed_output_is_removed`. Checked by hand: an overwrite keeps mode 640, a cut
+   file leaves no output, `-o /dev/null` and `-` work.
 2. JSON rendering (`FileInfo::to_json*`): only `mvdz info` uses it. Return the struct,
    print in the tool.
 3. Done (2026-11-21, not committed): `mvdz bench` removed from `main.rs` (its

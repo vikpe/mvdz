@@ -143,9 +143,10 @@ fn try_write_output(p: &str, data: &[u8]) -> Result<(), String> {
     })
 }
 
-/// Writes an output with `fill`: standard output, a device or pipe
-/// directly, a regular file atomically (temporary file and rename: when
-/// `fill` fails, no file is left).
+/// Writes an output with `fill`: standard output, a device or pipe as it is, a
+/// regular file directly (removed again when `fill` fails, as gzip and zstd do).
+/// ponytail: a failed `-f` overwrite loses the old file and a killed process leaves
+/// a partial one; a temporary file and rename would prevent both.
 fn try_write_with(
     p: &str,
     fill: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
@@ -155,16 +156,19 @@ fn try_write_with(
         return Ok(());
     }
     let path = std::path::Path::new(p);
-    match std::fs::metadata(path) {
-        Ok(m) if !m.is_file() => {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .open(path)
-                .map_err(|e| e.to_string())?;
-            fill(&mut f).map_err(|e| e.to_string())
-        }
-        _ => mvdz::write_file_atomic_with(path, |f| fill(f)).map_err(|e| e.to_string()),
+    let is_special = std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file());
+    if is_special {
+        let mut device = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        return fill(&mut device).map_err(|error| error.to_string());
     }
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    fill(&mut file).map_err(|error| {
+        let _ = std::fs::remove_file(path);
+        error.to_string()
+    })
 }
 
 /// Whether `name` ends with the ASCII suffix `suf`, ignoring case.
@@ -324,5 +328,26 @@ fn info(a: &Args) {
             Ok(fi) => out!("{}", fi.to_json()),
             Err(e) => die(format!("{f}: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Context as _;
+
+    #[test]
+    fn failed_output_is_removed() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("mvdz-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("out");
+        let name = path.to_str().context("a UTF-8 path")?;
+        try_write_with(name, |out| out.write_all(b"one")).map_err(anyhow::Error::msg)?;
+        assert_eq!(std::fs::read(&path)?, b"one");
+        let failed = try_write_with(name, |_| Err(std::io::Error::other("fill")));
+        assert!(failed.is_err());
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 }
