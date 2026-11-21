@@ -8,7 +8,7 @@ Resume point: "After steps B and C" in the Handoff below. Five format decisions 
 2026-11-21; steps A (149c415), B (d1a8c06) and C (3fedb9d, every integer a u32) are
 done. Open questions 6, 13 and 14 decided later the same day (see Decisions); the
 self-check switch is removed (f0c2019). 12 decided: every stream model stays (see
-Measurements and Decisions). Open: 9 (needs a new probe). Then "Suggestions (2026-11-21)" near the end of this file.
+Measurements and Decisions). 9 kept as is for now (probe re-run 2026-11-21, options noted under Open questions). Then "Suggestions (2026-11-21)" near the end of this file.
 No unsafe code since the same night (3f737db; see Decisions); the encoder threads
 across segments only (72d5175). Tests (`cargo nextest run --release` in `mvdz_rust/`): 41 pass, 4 fail (the
 known four).
@@ -42,8 +42,8 @@ Whole session against `master`: see "Whole session" under Results per change.
 
 Next, in this order (nothing below is started):
 
-1. The open question that can still change the file format: 9 (4, 12, 13 and 14 are
-   decided).
+1. Open question 9: kept as is for now (2026-11-21; options noted there). 4, 12, 13
+   and 14 are decided.
 2. The other open question, 11 (5, 6, 7 and 10 are decided).
 3. Finishing work, once the format no longer changes: regenerate the test vectors
    (clears the 4 failing tests), rewrite FORMAT.md and README, update BENCHMARKS.md.
@@ -430,6 +430,30 @@ All Viktor's to decide. Of those left, 9 and 12 can change the file format.
 9. Bits that can be flipped without changing the decoded demo: 784 of 30,696 in the
    probe's small file (256 are the header's SHA-256, 80 in the models block, 448 in the
    chunks); never with a different demo. Accept, or require every flip to be refused.
+   Re-measured 2026-11-21 on 312f6ae+ (probe: every bit of the file flipped, decoded
+   with `mvdz::decompress`, `/tmp/seqdec/flip/zz_flip.rs`). No flip ever decodes to a
+   different demo. Flips that decode to the same demo:
+
+   | Region | 20 KB prefix (7,364-byte file) | 237 KB demo (65,619-byte file) | Cause |
+   |---|---|---|---|
+   | Header SHA-256 | 256 of 256 | 256 of 256 | not checked on decode, by decision |
+   | Segment `fte` / `fte2` / `mvd1` | 31 / 32 / 31 of 32 each | same | decoding reads only `FTE_FLOAT`, `FTE_TRANS`, `FTE_COLOURMOD`, `fte != 0` and `MVD1_FLOAT`; `fte2` is never read |
+   | Models block | 572 of 7,040 | 587 of 31,664 | per model: the range coder's first byte (8 bits, always 0, the decoder shifts it out) and a few bits in its last 4 to 5 flush bytes |
+   | Numeric rANS bodies | 32 of 21,624 | 31 of 383,544 | padding bits after the mantissa bits, last byte of a stream; not checked to be 0 |
+   | DEFLATE blob body | 23 of 19,320 | 69 of 30,880 | final padding bits and bits the inflater ignores mid-stream |
+   | Everything else | 0 | 0 | |
+   | Total | 977 of 58,912 | 1,037 of 524,952 | |
+
+   The flag fields count per segment; the models block per model (about 25 bits each),
+   the other bodies per stream.
+
+   Decided 2026-11-21: kept as is for now. Options on file, if revisited:
+   1. Reader checks, no format change: the range coder's first byte must be 0 (8 bits
+      per model), numeric padding bits must be 0 (about 3 per numeric stream).
+   2. Format change: one `u32` holding the 5 flags decoding reads, other bits 0;
+      `fte2` (never read) goes, 8 bytes less per segment.
+   3. Not practical: SHA-256 check on decode (decode speed), an exact range-coder
+      flush, DEFLATE slack (needs re-encoding to check).
 10. Optional features: the built-in profiler is removed (`sampler.rs`, the `sampler`
     feature and the optional `libc` dependency; `perf` does its job). The `mimalloc`
     feature is removed too (2026-11-21): no speed gain on glibc and 2-4 times the
