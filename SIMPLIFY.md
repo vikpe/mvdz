@@ -345,12 +345,7 @@ API gaps:
 
 Format and specification:
 
-3. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
-   list are current (2026-11-21). Still rc.4: the intro (levels, metadata, attachments,
-   C), Install (the AVX2 speed claim), Ratios and speeds (numbers now in BENCHMARKS.md,
-   mentions `--trusted` and the fast level), the FAQ (metadata, attachments) and the
-   Tests paragraph's `MVDZ_WRITE_VECTORS` note (updated 2026-11-21).
-4. Later: implementations in C, Go and other languages from the settled
+3. Later: implementations in C, Go and other languages from the settled
    specification, with a shared test suite.
 
 

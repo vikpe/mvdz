@@ -3,10 +3,9 @@
 **mvdz** is a lossless compressor and file format for QuakeWorld MVD demos
 (`.mvd`). An `.mvdz` file is about a fifth of the raw demo and a third of
 the demo's gzip, decodes back to the exact original bytes (checked by
-SHA-256), can be read in order from a pipe as it arrives, and
-carries the demo's metadata (identity hash, server info, roster, a census
-of its contents, wall-clock time) so catalogues can read it without
-decoding. Files can also carry attachments stored beside the demo.
+CRC-32), and can be read in order from a pipe as it arrives. Its 64-byte
+header gives the demo's size, duration and identity (the SHA-256 of the
+raw demo) without decoding.
 
 It comes as a command-line tool and a Rust library, and builds for
 WebAssembly. The format is specified in [FORMAT.md](FORMAT.md), precisely
@@ -18,17 +17,17 @@ the format is settled.
 **Status: 1.0.0-rc.4, a release candidate for comments.** The file format
 may still change before 1.0: files written by a release candidate are not
 guaranteed to be readable by 1.0, so keep the original `.mvd` files for
-now. Later additions after 1.0 will use the forward-compatible extension
-points of FORMAT.md.
+now. The format has no extension points: a reader refuses any version
+but its own.
 
-How it works: the demo is walked command by command (`svc_*` layouts from
-mvdsv and ezQuake). Every field goes to its own stream; numeric fields
-(player and entity origins, view angles, sound and temp-entity
-coordinates) are coded as residuals against predictors. Each stream is then
-entropy-coded: static rANS with per-context tables at the **normal** level
-(the default), or zstd at the **fast** level (faster to compress and
-decode, larger). Anything that does not parse is stored raw, so any input
-round-trips.
+How it works: the demo is cut into segments of about 256 KiB, and each is
+walked command by command (`svc_*` layouts from mvdsv and ezQuake). Every
+field goes to its own stream; numeric fields (player and entity origins,
+view angles, sound and temp-entity coordinates) are coded as residuals
+against predictors. Structural and numeric streams are coded with static
+rANS under per-context models stored once per file; every other byte goes
+to one raw DEFLATE stream per segment. Anything that does not parse is
+stored as it is, so damaged and truncated demos round-trip too.
 
 ## What reads .mvdz today?
 
@@ -43,7 +42,7 @@ it to `.mvd` first (`mvdz decompress game.mvdz game.mvd`).
 
 | download | for |
 |---|---|
-| `mvdz-<version>-x86_64-unknown-linux-musl-v3.tar.gz` | any x86-64 CPU from about 2015 on (AVX2); faster |
+| `mvdz-<version>-x86_64-unknown-linux-musl-v3.tar.gz` | any x86-64 CPU from about 2015 on (AVX2); about 5 % faster |
 | `mvdz-<version>-x86_64-unknown-linux-musl.tar.gz` | any x86-64 CPU (if unsure) |
 
 **From source**, on any platform (only Linux is tested): the latest stable
@@ -55,12 +54,11 @@ cargo build --release            # target/release/mvdz
 cargo install --path mvdz_cli    # or: put mvdz on your PATH
 ```
 
-The default build runs on any CPU of its architecture. Building for the
-machine you run on, with `RUSTFLAGS="-C target-cpu=native" cargo build
---release`, is faster on x86-64 CPUs with AVX2 (about 10-15 % at the
-normal level; [BENCHMARKS.md](BENCHMARKS.md)). The release downloads are
-static musl builds, which run on any Linux but are slower than a glibc
-build (musl's allocator).
+The default build runs on any CPU of its architecture. Building for
+x86-64 CPUs with AVX2, with `RUSTFLAGS="-C target-cpu=x86-64-v3" cargo
+build --release`, compresses about 3 % and decodes about 5 % faster on one
+thread. The release downloads are static musl builds, which run on any
+Linux but are slower than a glibc build (musl's allocator).
 
 ## Quickstart
 
@@ -78,41 +76,34 @@ segments decode in parallel.
 
 ## Ratios and speeds
 
-Sizes: on a 72 GB archive of gzip-compressed demos (about 112 GB raw),
-measured on an independent stratified sample of 585 demos, with 95 %
-intervals. Speeds: the release download (baseline x86-64), one core of a
-4-vCPU x86-64 VM (Skylake Xeon), on 8 demos (18.9 MB raw), CLI one process
-per file. Method, samples, per-era ratios, more speeds and the other
-builds (the `-v3` download is 10-20 % faster) are in
-[BENCHMARKS.md](BENCHMARKS.md).
+Sizes: weighted to a 72 GB archive of gzip-compressed demos (about 112 GB
+raw), measured on a stratified sample of 379 of its demos, with 95 %
+intervals. Speeds: `mvdz decompress`, one process per file, on 8 demos
+(18.4 MB raw); a glibc build for baseline x86-64, pinned to four cores of
+an Intel Core i5-12400F. Method, samples, per-era ratios and more speeds
+are in [BENCHMARKS.md](BENCHMARKS.md).
 
-| format | size / raw | decode, CLI, 1 process | decode, library, 1 thread |
-|---|---|---|---|
-| mvdz normal | 0.211 [0.206-0.216] | 22 MB/s | 27 MB/s |
-| mvdz fast | 0.255 [0.250-0.261] | 34 MB/s | 44 MB/s |
-| gzip (the archive's files) | 0.64 | 79 MB/s | |
-| xz -9e | 0.47 | 27 MB/s | |
-| zstd -19 | 0.55 | 104 MB/s | |
+| format | size / raw | decode, 1 process |
+|---|---|---|
+| mvdz, `-j 1` | 0.193 [0.190-0.197] | 81 MB/s |
+| mvdz, `-j 4` | 0.193 | 211 MB/s |
+| gzip -9 | 0.566 | 144 MB/s |
+| xz -9e | 0.429 | 38 MB/s |
+| zstd -19 | 0.508 | 406 MB/s |
 
-The gzip size is that of the archive's own files (level unknown; `gzip
--6` gives 0.611 on the 8 demos), and the xz size is `xz -9e` (`xz -9`:
-0.468 on 300 random demos). The decode speeds of those rows are for `gzip
--6`, `xz -9` and `zstd -19` files of the 8 demos.
+The decode speeds of the last three rows are for `gzip -9`, `xz -9` and
+`zstd -19` files of the 8 demos. The archive's own gzip files are 0.593 of
+raw; the whole archive would take about 23.5 GB as mvdz.
 
-MB = 10^6 bytes of raw demo. The whole archive would take about 23.7 GB
-at the normal level and 28.6 GB at the fast level. Recent demos (2023-26)
-compress to about 0.18: current mvdsv records a snapshot every server
-frame (`sv_demofps 77`; about 62 a second in practice) where older demos
-mostly hold 20-27, at about the same compressed bytes per second of game.
-Demos that record every player input (mvdsv's usercmd hidden blocks) are
-about twice as large raw and compress to about 0.10. Every decode checks the CRC-32C of each segment and of the whole
-demo, and by default the SHA-256 identity (about 20 % of the decode time
-at the normal level, 30 % at the fast level); a cache that verified the
-identity once can decode with `--trusted`, about 1.2 to 1.5 times faster.
-Compression runs at about 8 MB/s (normal) and 13 MB/s (fast) per thread,
-including a check that the output decodes to the input. The fastest
-settings and what they give up are in
-[BENCHMARKS.md](BENCHMARKS.md#fastest-settings).
+MB = 10^6 bytes of raw demo. Recent demos compress better: about 0.18 for
+2023-24 and 0.16 for 2025-26, against 0.24 to 0.26 before 2021. Current
+mvdsv records a snapshot every server frame (`sv_demofps 77`; about 62 a
+second in practice) where older demos mostly hold 20-27; the smaller time
+step makes each snapshot easier to predict. Every decode checks the CRC-32
+of each segment and of the whole demo; it does not recompute the SHA-256
+(see Hashes and trust). Compression runs at about 30 MB/s on one thread
+and 73 MB/s with `-j 4`, including a check that the output decodes to the
+input.
 
 ## Command line
 
@@ -242,14 +233,14 @@ directory, one file at a time at 4 threads and at 1, with criterion
 ## FAQ
 
 **Why not just compress the `.mvd` with zstd or xz?** On the same
-stratified sample, `zstd -19` gives 0.553 of raw and `xz -9e` 0.473,
-against 0.211 for mvdz normal: mvdz files are about 2.6 times smaller
-than zstd -19 and 2.2 times smaller than xz ([BENCHMARKS.md](BENCHMARKS.md)).
+stratified sample, `zstd -19` gives 0.508 of raw and `xz -9e` 0.429,
+against 0.193 for mvdz: mvdz files are about 2.6 times smaller than
+zstd -19 and 2.2 times smaller than xz -9e ([BENCHMARKS.md](BENCHMARKS.md)).
 A general-purpose compressor sees bytes; mvdz parses the demo, puts each
 field in its own stream and codes positions and angles as residuals
 against predictions. The container also gives decoding in order as the
-file arrives, segments that decode on their own,
-metadata without decoding, the demo's identity hash and attachments.
+file arrives, segments that decode on their own, and the demo's size,
+duration and identity hash without decoding.
 
 **What is the licence?** MIT ([LICENSE](LICENSE)), and every dependency is
 permissive (MIT, Apache-2.0 or BSD). MIT code can be linked into GPL
@@ -258,8 +249,8 @@ programs such as the GPL-2 QuakeWorld engines and servers.
 **Is the format stable?** Not yet. This is a release candidate: the
 format may change before 1.0, and files written by a release candidate
 are not guaranteed to be readable by 1.0, so keep the original `.mvd`
-files. After 1.0, later additions will use the forward-compatible
-extension points of FORMAT.md (new sections, metadata tags and keys).
+files. The format has no extension points, so the goal is that 1.0 does
+not change: a reader refuses any version but its own.
 
 **Where do I give feedback?** Open an issue on GitHub
 (<https://github.com/galfthan/mvdz/issues>), for the release and the
