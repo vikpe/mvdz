@@ -276,7 +276,8 @@ budget), `Invalid` (a bad argument, a configuration a reader would
 refuse), `NotFound`, `Io` and `Internal`. Decoders never panic on corrupt
 input; they return an error. Every size a file declares is bounded by the
 bytes actually present (FORMAT.md §9), and `Limits` caps the memory one
-decode may use.
+decode may use. A decode works on up to `threads` segments at once, each with
+memory of its own: a tight memory limit may need fewer threads.
 
 ## WebAssembly
 

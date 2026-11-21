@@ -24,41 +24,9 @@ pub(crate) trait NumIO {
     /// decoded residual.
     fn code(&mut self, k: usize, ctx: NCtx, v: i32) -> i32;
     /// The segment: the input on encode, the output on decode.
-    fn buf(&self) -> &[u8];
+    fn bytes(&self) -> &[u8];
     /// The output segment on decode; empty on encode, which writes nothing.
-    fn buf_mut(&mut self) -> &mut [u8];
-}
-
-/// The little-endian u16 at `off` (0 outside `b`).
-#[inline(always)]
-fn rd16(b: &[u8], off: u32) -> u16 {
-    b.get(off as usize..)
-        .and_then(<[u8]>::first_chunk)
-        .map_or(0, |a| u16::from_le_bytes(*a))
-}
-
-/// The little-endian u32 at `off` (0 outside `b`).
-#[inline(always)]
-fn rd32(b: &[u8], off: u32) -> u32 {
-    b.get(off as usize..)
-        .and_then(<[u8]>::first_chunk)
-        .map_or(0, |a| u32::from_le_bytes(*a))
-}
-
-/// Writes `v` at `off` as little-endian (nothing outside `b`).
-#[inline(always)]
-fn wr16(b: &mut [u8], off: u32, v: u16) {
-    if let Some(a) = b.get_mut(off as usize..).and_then(<[u8]>::first_chunk_mut) {
-        *a = v.to_le_bytes();
-    }
-}
-
-/// Writes `v` at `off` as little-endian (nothing outside `b`).
-#[inline(always)]
-fn wr32(b: &mut [u8], off: u32, v: u32) {
-    if let Some(a) = b.get_mut(off as usize..).and_then(<[u8]>::first_chunk_mut) {
-        *a = v.to_le_bytes();
-    }
+    fn bytes_mut(&mut self) -> &mut [u8];
 }
 
 /// Sign and bit-length bucket of a residual: 0 for zero, else
@@ -116,6 +84,46 @@ fn pred_dt(last: u16, prev: u16, dt_now: i32, dt_prev: i32) -> u16 {
     }
 }
 
+/// The little-endian u16 at `off` (0 outside `bytes`).
+#[inline(always)]
+fn rd16(bytes: &[u8], off: u32) -> u16 {
+    bytes
+        .get(off as usize..)
+        .and_then(<[u8]>::first_chunk)
+        .map_or(0, |le| u16::from_le_bytes(*le))
+}
+
+/// The little-endian u32 at `off` (0 outside `bytes`).
+#[inline(always)]
+fn rd32(bytes: &[u8], off: u32) -> u32 {
+    bytes
+        .get(off as usize..)
+        .and_then(<[u8]>::first_chunk)
+        .map_or(0, |le| u32::from_le_bytes(*le))
+}
+
+/// Writes `value` at `off` as little-endian (nothing outside `bytes`).
+#[inline(always)]
+fn wr16(bytes: &mut [u8], off: u32, value: u16) {
+    if let Some(le) = bytes
+        .get_mut(off as usize..)
+        .and_then(<[u8]>::first_chunk_mut)
+    {
+        *le = value.to_le_bytes();
+    }
+}
+
+/// Writes `value` at `off` as little-endian (nothing outside `bytes`).
+#[inline(always)]
+fn wr32(bytes: &mut [u8], off: u32, value: u32) {
+    if let Some(le) = bytes
+        .get_mut(off as usize..)
+        .and_then(<[u8]>::first_chunk_mut)
+    {
+        *le = value.to_le_bytes();
+    }
+}
+
 #[inline(always)]
 fn x16<const ENC: bool, IO: NumIO>(
     off: u32,
@@ -125,14 +133,14 @@ fn x16<const ENC: bool, IO: NumIO>(
     c: NCtx,
 ) -> (u16, i32) {
     if ENC {
-        let v = rd16(io.buf(), off);
+        let v = rd16(io.bytes(), off);
         let r = i32::from(v.wrapping_sub(pred).cast_signed());
         io.code(k, c, r);
         (v, r)
     } else {
         let r = io.code(k, c, 0);
         let v = pred.wrapping_add(r.cast_unsigned() as u16);
-        wr16(io.buf_mut(), off, v);
+        wr16(io.bytes_mut(), off, v);
         (v, i32::from(r as i16))
     }
 }
@@ -146,27 +154,27 @@ fn x32<const ENC: bool, IO: NumIO>(
     c: NCtx,
 ) -> (u32, i32) {
     if ENC {
-        let v = rd32(io.buf(), off);
+        let v = rd32(io.bytes(), off);
         let r = v.wrapping_sub(pred).cast_signed();
         io.code(k, c, r);
         (v, r)
     } else {
         let r = io.code(k, c, 0);
         let v = pred.wrapping_add(r.cast_unsigned());
-        wr32(io.buf_mut(), off, v);
+        wr32(io.bytes_mut(), off, v);
         (v, r)
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Group {
-    PiO(u8),
-    PiA(u8),
     PeO(u8),
-    /// usercmd angles on the grid
-    Uc,
+    PiA(u8),
+    PiO(u8),
     Snd,
     Te,
+    /// usercmd angles on the grid
+    Uc,
 }
 
 /// Every group, in decoding order: sounds and temp entities last, as they
@@ -441,13 +449,13 @@ fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
                 f: [q(t.res), q(d), q(d2), a as u8, 0, 0],
             };
             let v = if ENC {
-                let v = crate::walk::on_grid(rd32(io.buf(), off))
+                let v = crate::walk::on_grid(rd32(io.bytes(), off))
                     .expect("the walker saw it on the grid");
                 io.code(0, c, i32::from(v.wrapping_sub(pred).cast_signed()));
                 v
             } else {
                 let v = pred.wrapping_add(io.code(0, c, 0).cast_unsigned() as u16);
-                wr32(io.buf_mut(), off, crate::walk::grid_f32(v));
+                wr32(io.bytes_mut(), off, crate::walk::grid_f32(v));
                 v
             };
             t.res = i32::from(v.wrapping_sub(pred).cast_signed());
@@ -459,14 +467,14 @@ fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
 }
 
 #[inline(always)]
-fn rd_ref(b: &[u8], r: u32) -> u16 {
-    if r == NONE { 0 } else { rd16(b, r) }
+fn rd_ref(bytes: &[u8], r: u32) -> u16 {
+    if r == NONE { 0 } else { rd16(bytes, r) }
 }
 
 fn snd<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
     for r in recs.snd.iter() {
         for i in 0..3u32 {
-            let pred = rd_ref(io.buf(), r.refs[i as usize]);
+            let pred = rd_ref(io.bytes(), r.refs[i as usize]);
             let c = NCtx {
                 f: [i as u8 | r.kind << 2, r.num, 0, 0, 0, 0],
             };
@@ -481,7 +489,7 @@ fn te<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
         if matches!(r.ty, 5 | 6 | 9) {
             let mut start = [0u16; 3];
             for i in 0..3u32 {
-                let pred = rd_ref(io.buf(), r.refs[i as usize]);
+                let pred = rd_ref(io.bytes(), r.refs[i as usize]);
                 let c = NCtx {
                     f: [i as u8 | 1 << 2, r.ty, 0, 0, 0, 0],
                 };

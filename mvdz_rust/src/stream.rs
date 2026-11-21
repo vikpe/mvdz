@@ -35,9 +35,8 @@ pub struct Reader<R: Read> {
     at: usize,
     /// decoded and checked segments after the current one
     ready: VecDeque<(Vec<u8>, Charge)>,
-    /// an error met after the segments in `ready`, reported once they
-    /// are read
-    later: Option<Error>,
+    /// an error met after the segments in `ready`, reported once they are read
+    deferred_error: Option<Error>,
     done: bool,
     failed: Option<Error>,
     threads: usize,
@@ -71,7 +70,7 @@ impl<R: Read> Reader<R> {
             cur_charge: None,
             at: 0,
             ready: VecDeque::new(),
-            later: None,
+            deferred_error: None,
             done: false,
             failed: None,
             threads: crate::util::threads(threads),
@@ -83,6 +82,26 @@ impl<R: Read> Reader<R> {
     /// The file's header: the demo's size, duration and hashes.
     pub fn header(&self) -> &Header {
         &self.lay.header
+    }
+
+    /// Reads demo bytes; returns 0 at the end. The first error is returned
+    /// again by every later call.
+    pub fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.check_failed()?;
+        while self.at == self.cur.len() && !self.done {
+            if let Err(e) = self.advance() {
+                self.failed = Some(e);
+                self.cur = Vec::new();
+                self.cur_charge = None;
+                self.ready.clear();
+                self.at = 0;
+                return Err(e);
+            }
+        }
+        let n = buf.len().min(self.cur.len() - self.at);
+        buf[..n].copy_from_slice(&self.cur[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
     }
 
     fn check_failed(&self) -> Result<()> {
@@ -124,62 +143,63 @@ impl<R: Read> Reader<R> {
         Ok((v, c))
     }
 
-    /// The next segment of the stream: its header and its bytes, charged
-    /// to the budget while the charge lives.
+    /// The next segment of the stream: its header and its bytes, charged to the
+    /// budget while the charge lives.
     fn read_segment(&mut self) -> Result<(SegHdr, Vec<u8>, Charge)> {
-        // the stream may end here, short of the demo: the complete
-        // segments before this point are delivered first (`fill`)
+        // the stream may end here, short of the demo: `decode_batch` delivers the
+        // complete segments before it first
         let Some(coded) = self.read_len()? else {
             return bad("incomplete file");
         };
         check_coded_len(coded)?;
-        let s = Sec {
+        let section = Sec {
             off: self.pos,
             len: coded + SEG_FIELDS as u64,
         };
-        let (b, c) = self.read_body(s.len)?;
-        let h = parse_seg_hdr(&b[..SEG_FIELDS])?;
-        let h = self.lay.segment(&s, h)?;
-        self.pos = s.end();
-        Ok((h, b, c))
+        let (body, charge) = self.read_body(section.len)?;
+        let header = parse_seg_hdr(&body[..SEG_FIELDS])?;
+        let header = self.lay.segment(&section, header)?;
+        self.pos = section.end();
+        Ok((header, body, charge))
     }
 
-    /// Reads up to `threads` segments, decodes them in parallel and queues
-    /// them in order, each checked. An error after the first segment waits
-    /// in `later` until the segments before it have been read.
-    fn fill(&mut self) -> Result<()> {
-        let mut segs = Vec::new();
-        while segs.len() < self.threads && !self.lay.complete() {
+    /// Reads up to `threads` segments, decodes them in parallel and queues them
+    /// in order, each checked.
+    /// ponytail: reading and decoding take turns and a batch waits for its
+    /// slowest segment; a rolling window would overlap them.
+    fn decode_batch(&mut self) -> Result<()> {
+        let mut segments = Vec::new();
+        while segments.len() < self.threads && !self.lay.complete() {
             match self.read_segment() {
-                Ok(seg) => segs.push(seg),
-                Err(e) if !segs.is_empty() => {
-                    self.later = Some(e);
+                Ok(segment) => segments.push(segment),
+                Err(error) if !segments.is_empty() => {
+                    self.deferred_error = Some(error);
                     break;
                 }
-                Err(e) => return Err(e),
+                Err(error) => return Err(error),
             }
         }
         let (lay, budget) = (&self.lay, &self.budget);
-        let decoded = par_map(self.threads, segs.len(), |i| {
-            let (h, body, _) = &segs[i];
-            let charge = budget.alloc(u64::from(h.raw_len))?;
-            budget.work(u64::from(h.raw_len))?;
-            let mut out = zeroed(h.raw_len as usize)?;
-            let tm = decode_segment(lay, body, h, &mut out, budget)?;
-            Ok((out, charge, tm))
+        let decoded = par_map(self.threads, segments.len(), |index| {
+            let (header, body, _) = &segments[index];
+            let charge = budget.alloc(u64::from(header.raw_len))?;
+            budget.work(u64::from(header.raw_len))?;
+            let mut out = zeroed(header.raw_len as usize)?;
+            let timing = decode_segment(lay, body, header, &mut out, budget)?;
+            Ok((out, charge, timing))
         });
-        for r in decoded {
-            let checked = r.and_then(|(out, charge, tm)| {
-                if let Some(c) = self.check.as_mut() {
-                    c.segment(&out, tm)?;
+        for result in decoded {
+            let checked = result.and_then(|(out, charge, timing)| {
+                if let Some(check) = self.check.as_mut() {
+                    check.segment(&out, timing)?;
                 }
                 Ok((out, charge))
             });
             match checked {
-                Ok(seg) => self.ready.push_back(seg),
-                Err(e) => {
-                    // an earlier error than any met while reading on
-                    self.later = Some(e);
+                Ok(segment) => self.ready.push_back(segment),
+                Err(error) => {
+                    // earlier in the demo than any error met while reading on
+                    self.deferred_error = Some(error);
                     break;
                 }
             }
@@ -199,8 +219,8 @@ impl<R: Read> Reader<R> {
             self.cur = Vec::new();
             self.cur_charge = None;
             self.at = 0;
-            if let Some(e) = self.later.take() {
-                return Err(e);
+            if let Some(error) = self.deferred_error.take() {
+                return Err(error);
             }
             if !self.lay.has_models() {
                 let Some(len) = self.read_len()? else {
@@ -237,29 +257,9 @@ impl<R: Read> Reader<R> {
                 self.done = true;
                 break;
             }
-            self.fill()?;
+            self.decode_batch()?;
         }
         Ok(())
-    }
-
-    /// Reads demo bytes; returns 0 at the end. The first error is returned
-    /// again by every later call.
-    pub fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.check_failed()?;
-        while self.at == self.cur.len() && !self.done {
-            if let Err(e) = self.advance() {
-                self.failed = Some(e);
-                self.cur = Vec::new();
-                self.cur_charge = None;
-                self.ready.clear();
-                self.at = 0;
-                return Err(e);
-            }
-        }
-        let n = buf.len().min(self.cur.len() - self.at);
-        buf[..n].copy_from_slice(&self.cur[self.at..self.at + n]);
-        self.at += n;
-        Ok(n)
     }
 }
 

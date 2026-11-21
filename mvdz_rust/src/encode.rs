@@ -33,6 +33,9 @@ pub struct Info {
     /// Input bytes the transform stored raw (escapes and unframeable tail).
     pub escaped: usize,
     pub streams: Vec<StreamStat>,
+    /// Segments that failed the self-check and were coded as all tail instead:
+    /// nonzero only for a transform bug.
+    pub self_check_fallbacks: usize,
 }
 
 /// True if `b` starts like an MVD demo.
@@ -220,11 +223,13 @@ fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, 
     let mut bodies = bodies.into_iter().collect::<Result<Vec<Body>>>()?;
     let shared = &t.shared;
     let fails = || Error::Internal("the encoder's output does not decode to its input");
+    let mut fallbacks = 0;
     loop {
-        let (out, info) = assemble(&header, shared, &bodies);
+        let (out, mut info) = assemble(&header, shared, &bodies);
         // None: the container itself does not decode, nothing to fall back to
         let bad = failing_segments(&out, src, &cuts, threads).ok_or_else(fails)?;
         if !bad.contains(&true) {
+            info.self_check_fallbacks = fallbacks;
             return Ok((out, info));
         }
         for i in (0..nseg).filter(|&i| bad[i]) {
@@ -232,6 +237,7 @@ fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, 
                 return Err(fails());
             }
             bodies[i] = tail_body(i)?;
+            fallbacks += 1;
         }
     }
 }

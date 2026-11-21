@@ -15,32 +15,36 @@ impl Read for Dribble<'_> {
 }
 
 /// The bytes the reader yields before its first error, and that error.
-fn read(data: &[u8], threads: usize, l: &mvdz::Limits) -> (Vec<u8>, Option<mvdz::Error>) {
+fn read_until_error(
+    data: &[u8],
+    threads: usize,
+    limits: &mvdz::Limits,
+) -> (Vec<u8>, Option<mvdz::Error>) {
     let mut out = Vec::new();
-    let mut r = match mvdz::Reader::new(Dribble(data, 0), threads, l) {
-        Ok(r) => r,
-        Err(e) => return (out, Some(e)),
+    let mut reader = match mvdz::Reader::new(Dribble(data, 0), threads, limits) {
+        Ok(reader) => reader,
+        Err(error) => return (out, Some(error)),
     };
     let mut buf = [0u8; 4096];
     loop {
-        match r.read_demo(&mut buf) {
+        match reader.read_demo(&mut buf) {
             Ok(0) => return (out, None),
-            Ok(n) => out.extend_from_slice(&buf[..n]),
-            Err(e) => return (out, Some(e)),
+            Ok(len) => out.extend_from_slice(&buf[..len]),
+            Err(error) => return (out, Some(error)),
         }
     }
 }
 
 fuzz_target!(|data: &[u8]| {
-    let l = mvdz::Limits {
+    let limits = mvdz::Limits {
         memory: 256 << 20,
         ..Default::default()
     };
-    let whole = mvdz::decompress_with(data, 1, &l).ok();
-    let one = read(data, 1, &l);
-    assert_eq!(whole.is_some(), one.1.is_none());
-    if let Some(a) = &whole {
-        assert!(*a == one.0);
+    let whole = mvdz::decompress_with(data, 1, &limits).ok();
+    let (out, error) = read_until_error(data, 1, &limits);
+    assert_eq!(whole.is_some(), error.is_none());
+    if let Some(demo) = &whole {
+        assert!(*demo == out);
     }
-    assert!(read(data, 3, &l) == one);
+    assert!(read_until_error(data, 3, &limits) == (out, error));
 });

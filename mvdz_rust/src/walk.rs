@@ -109,44 +109,44 @@ pub(crate) struct UcRec {
     pub(crate) grid: u8,
 }
 
-/// A record list: the walker appends, the numeric groups read it once the
-/// walk is done.
+/// A record list: the walker appends, the numeric groups read it after the walk.
+#[derive(Debug, Clone)]
 pub(crate) struct RecBuf<T> {
-    v: Vec<T>,
-    /// records allowed (decode: the count from the stream table)
-    cap: usize,
+    records: Vec<T>,
+    /// decode: the count from the stream table
+    capacity: usize,
 }
 
 impl<T> RecBuf<T> {
-    /// A list of at most `cap` records, allocated up front; allocation
-    /// failure is an error.
-    pub(crate) fn fixed(cap: usize) -> crate::error::Result<Self> {
+    /// At most `capacity` records, allocated up front.
+    pub(crate) fn fixed(capacity: usize) -> crate::error::Result<Self> {
         Ok(Self {
-            v: crate::budget::with_capacity(cap)?,
-            cap,
+            records: crate::budget::with_capacity(capacity)?,
+            capacity,
         })
     }
-    /// A list without a limit, `n` records reserved.
-    pub(crate) fn growable(n: usize) -> Self {
+    /// No limit; `reserve` records allocated up front.
+    pub(crate) fn growable(reserve: usize) -> Self {
         Self {
-            v: Vec::with_capacity(n),
-            cap: usize::MAX,
+            records: Vec::with_capacity(reserve),
+            capacity: usize::MAX,
         }
     }
-    /// Appends `r`; false if the list is full.
+    /// Appends `record`; false if the list is full.
     #[inline(always)]
-    pub(crate) fn push(&mut self, r: T) -> bool {
-        if self.v.len() == self.cap {
+    pub(crate) fn push(&mut self, record: T) -> bool {
+        if self.records.len() == self.capacity {
             return false;
         }
-        self.v.push(r);
+        self.records.push(record);
         true
     }
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
-        self.v.iter()
+        self.records.iter()
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct Recs {
     pub(crate) pi: RecBuf<PiRec>,
     pub(crate) pe: RecBuf<PeRec>,
@@ -249,9 +249,8 @@ pub(crate) struct Walker<'a, const ENC: bool, IO: SymIO> {
 }
 
 impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
-    /// `dst`: the output segment (decode; empty on encode). The walker
-    /// writes only structural bytes; the numeric groups fill in the
-    /// reserved bytes after the walk.
+    /// `dst`: the output segment (decode; empty on encode). The walker writes the
+    /// structural bytes; the numeric groups fill in the rest after the walk.
     #[expect(
         clippy::large_stack_arrays,
         reason = "fixed-size tables keep byte-indexed lookups free of bounds checks"
@@ -316,8 +315,8 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
 
     #[inline(always)]
     fn wr(&mut self, v: u8) {
-        if let Some(d) = self.dst.get_mut(self.p) {
-            *d = v;
+        if let Some(out) = self.dst.get_mut(self.p) {
+            *out = v;
         } else {
             self.err = true;
         }
@@ -425,8 +424,8 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
         } else {
             let p = self.p;
             match (self.io.take_blob(sid, n), self.dst.get_mut(p..p + n)) {
-                (Some(b), Some(d)) => {
-                    d.copy_from_slice(b);
+                (Some(blob), Some(out)) => {
+                    out.copy_from_slice(blob);
                     self.p += n;
                 }
                 _ => self.err = true,
@@ -522,8 +521,8 @@ impl<'a, const ENC: bool, IO: SymIO> Walker<'a, ENC, IO> {
                 self.payload(0, ty);
             }
             let n = (self.p - at - 4) as u32;
-            if let Some(d) = self.dst.get_mut(at..at + 4) {
-                d.copy_from_slice(&n.to_le_bytes());
+            if let Some(out) = self.dst.get_mut(at..at + 4) {
+                out.copy_from_slice(&n.to_le_bytes());
             }
         }
     }

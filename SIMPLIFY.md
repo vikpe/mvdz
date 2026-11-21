@@ -916,8 +916,17 @@ always), old and new alternated twice, `-j 4`, cores 0, 2, 4, 6, silent machine,
   slices (`Cow` was only ever borrowed); `compress_rt` and `gen_rt` (fuzz) compile
   again. Their check that the transform alone is lossless is gone with
   `Config::verify` (f0c2019): a transform bug now costs size, as the self-check codes
-  the segment as all tail, but does not fail the fuzzer. Open: restore it through a
-  hidden count of self-check fallbacks, or accept the loss.
+  the segment as all tail, but does not fail the fuzzer. Restored the same day (not
+  committed at the time of writing): `Info::self_check_fallbacks` counts the segments
+  that failed the self-check; `compress_rt` and `gen_rt` panic on a nonzero count
+  with `REQUIRE_TRANSFORM_LOSSLESS` set, as before f0c2019, and the round-trip tests
+  (`check_all_ways`) require 0. Checked by breaking the transform's decode: the
+  synthetic and empty-input round trips fail with "the transform is lossy". Fuzzed 30
+  s each with the variable set: compress_rt 1,748 runs, gen_rt 4,397, no failure.
+- `-j` against `--max-memory` (not committed at the time of writing): the CLI help
+  and the README say that a decode works on up to `-j` segments at once, each with
+  memory of its own, so a tight limit may need a lower `-j`. Measured peak of the CLI
+  at `-j 4` on the 16 MB demo: 8.3 MiB, against the default limit of 1 GiB.
 - Fuzzing after the change (cargo-fuzz 0.13.2, 30 s a target, `-max_len=200000`, seeds
   in `/tmp/seqdec/corpus`: 18 demo prefixes of 1.5 to 20 KB, their files, and files of
   1 and 3 segments): decode 2,487 runs, read_info 5,176, stream_reader 1,596,
@@ -1265,9 +1274,7 @@ number is given.
    constants written as hex. Delete each comment the new
    name makes redundant (about 800 of 7,680 source lines are comments). Removes the
    last temporary allow, `many_single_char_names`. No logic changes in the same commit.
-2. `unsafe`: 20 occurrences (walker 9, predictors 6, parallel map 3, rANS 2). Not linted
-   yet. Decide: hard rule, or allowed where a benchmark shows it pays. One site at a
-   time, measured.
+2. Done 2026-11-21 (3f737db): no `unsafe`, `unsafe_code = "forbid"` in `Cargo.toml`.
 3. `main.rs` allows `clippy::exit` for the whole file: return `ExitCode` from `main`.
 4. `pretty_assertions` in tests.
 5. Truncating casts: 86 in the library under one stated allow. About 37 are positions
@@ -1397,7 +1404,12 @@ After the format decisions (open questions 4, 9, 12, 13):
    §12 rule 5 (the zstd/stored fallback) becomes all tail; state that input not
    starting like an MVD is refused by encoders; the consumer note "decode the last
    chunk" becomes "scan back from the last segment".
-3. BENCHMARKS.md from the final measurements.
+   From "No unsafe code" (3f737db): FORMAT.md:668 ("wave 1, in parallel") describes the
+   removed decode waves; the README's fuzz target list names removed targets
+   (`read_metadata`, `attachments`, `stream_writer`).
+3. BENCHMARKS.md from the final measurements. Its "Fuzzing and Miri" section says Miri
+   tests "the pipelined decoder's raw-pointer writer": gone with every `unsafe`
+   (3f737db), so Miri has nothing left to check and can be dropped.
 4. Later, from the settled specification: implementations in C, Go and other
    languages, with a test suite they share.
 

@@ -8,7 +8,11 @@ use std::assert_matches;
 
 fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
-        let (one, _) = unchecked(&src)?;
+        let (one, info) = unchecked(&src)?;
+        assert_eq!(
+            info.self_check_fallbacks, 0,
+            "{what} {how}: the transform is lossy"
+        );
         let back = readers_agree(&one, what).with_context(|| format!("{what} {how}: refused"))?;
         assert!(back == src, "{what} {how}");
     }
@@ -32,63 +36,74 @@ fn sample_demos() -> anyhow::Result<()> {
 }
 
 /// Input that is not an MVD demo is refused by the encoder.
-/// The bytes a sequential reader at `threads` threads yields before its
-/// first error, and that error.
-fn read_until_error(f: &[u8], threads: usize) -> (Vec<u8>, Option<mvdz::Error>) {
+/// The bytes a sequential reader at `threads` threads yields before its first
+/// error, and that error.
+fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<mvdz::Error>) {
     let mut out = Vec::new();
-    let l = mvdz::Limits::default();
-    let mut r = match mvdz::Reader::new(std::io::Cursor::new(f), threads, &l) {
-        Ok(r) => r,
-        Err(e) => return (out, Some(e)),
+    let limits = mvdz::Limits::default();
+    let mut reader = match mvdz::Reader::new(std::io::Cursor::new(file), threads, &limits) {
+        Ok(reader) => reader,
+        Err(error) => return (out, Some(error)),
     };
     let mut buf = [0u8; 4096];
     loop {
-        match r.read_demo(&mut buf) {
+        match reader.read_demo(&mut buf) {
             Ok(0) => return (out, None),
-            Ok(n) => out.extend_from_slice(&buf[..n]),
-            Err(e) => return (out, Some(e)),
+            Ok(len) => out.extend_from_slice(&buf[..len]),
+            Err(error) => return (out, Some(error)),
         }
     }
 }
 
-/// A sequential reader that decodes several segments at once yields what
-/// one decoding a segment at a time does: the segments before a cut or a
-/// damaged segment, then the same error.
+/// A reader decoding several segments at once yields what one decoding a segment
+/// at a time does: the segments before a cut or a damaged segment, then the error.
 #[test]
 fn sequential_reader_threads_agree() -> anyhow::Result<()> {
+    const CUTS: usize = 7;
     let demo = several_segments(&synthetic(&[], false));
-    let f = compress(&demo)?;
-    let p = parts(&f)?;
-    anyhow::ensure!(p.segs.len() >= 4, "{} segments", p.segs.len());
+    let file = compress(&demo)?;
+    let file_parts = parts(&file)?;
+    anyhow::ensure!(
+        file_parts.segs.len() >= 4,
+        "{} segments",
+        file_parts.segs.len()
+    );
     let mut cases = Vec::new();
-    for k in 1..8 {
-        cases.push(f[..f.len() * k / 8].to_vec());
+    for eighth in 1..=CUTS {
+        cases.push(
+            file.get(..file.len() * eighth / 8)
+                .context("a cut")?
+                .to_vec(),
+        );
     }
-    for i in 0..p.segs.len() {
-        let mut q = p.clone();
-        let s = q.segs[i].last_mut().context("a segment body")?;
-        *s ^= 0x55;
-        cases.push(q.build());
+    for segment in 0..file_parts.segs.len() {
+        let mut damaged = file_parts.clone();
+        let last_byte = damaged
+            .segs
+            .get_mut(segment)
+            .and_then(|body| body.last_mut())
+            .context("a segment body")?;
+        *last_byte ^= 0x55;
+        cases.push(damaged.build());
     }
-    let mut partial = 0;
-    for (k, c) in cases.iter().enumerate() {
-        let one = read_until_error(c, 1);
-        assert!(demo.starts_with(&one.0), "case {k}");
-        if k < 7 {
-            assert!(one.1.is_some(), "cut {k} is refused");
+    let mut partial_reads = 0;
+    for (case, bytes) in cases.iter().enumerate() {
+        let (out, error) = read_until_error(bytes, 1);
+        assert!(demo.starts_with(&out), "case {case}");
+        let is_cut = case < CUTS;
+        if is_cut {
+            assert!(error.is_some(), "cut {case} is refused");
         }
-        if one.1.is_some() && !one.0.is_empty() {
-            partial += 1;
+        if error.is_some() && !out.is_empty() {
+            partial_reads += 1;
         }
         for threads in [2, 4] {
-            assert!(
-                read_until_error(c, threads) == one,
-                "case {k}, {threads} threads"
-            );
+            let is_same = read_until_error(bytes, threads) == (out.clone(), error);
+            assert!(is_same, "case {case}, {threads} threads");
         }
     }
     // the cases include errors after some segments were delivered
-    assert!(partial >= 2, "{partial}");
+    assert!(partial_reads >= 2, "{partial_reads}");
     Ok(())
 }
 

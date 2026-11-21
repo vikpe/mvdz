@@ -444,21 +444,20 @@ pub(crate) struct DModel {
     _charge: Option<Charge>,
 }
 
-/// Number of entries of `c[0..16*chunks]` that are <= slot.
-///
-/// One counter per position in a chunk of 16 keeps the loop in a form the
-/// compiler turns into vector instructions. A counter counts at most
-/// `chunks` (at most `SEARCH_MAX / 16`); `slot` is below `T`, so fits a u16.
+/// Number of entries of `table[..16 * chunks]` that are <= `slot` (below `T`).
+/// ponytail: about 6 % slower decode than the SSE2 search it replaced, which needs
+/// `unsafe`; `std::simd` once stable.
 #[inline(always)]
-fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
-    let s = slot as u16;
-    let mut n = [0u16; 16];
-    for ch in c[..16 * chunks].as_chunks::<16>().0 {
-        for i in 0..16 {
-            n[i] += u16::from(ch[i] <= s);
+fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
+    let slot = slot as u16;
+    // one counter per lane: the compiler vectorizes this form
+    let mut counts = [0u16; 16];
+    for chunk in table[..16 * chunks].as_chunks::<16>().0 {
+        for lane in 0..16 {
+            counts[lane] += u16::from(chunk[lane] <= slot);
         }
     }
-    n.iter().map(|&v| usize::from(v)).sum()
+    counts.iter().map(|&count| usize::from(count)).sum()
 }
 
 /// A model header's own tables' contexts and q values of every
@@ -633,9 +632,7 @@ impl DModel {
         let slot = x & (T - 1);
         let (sym, mut x) = if e & E_LUT == 0 {
             let m = 16 * self.chunks;
-            // every search entry was built pointing at a table of 2*m + 1
-            // pool entries (read_model), and entries are never changed
-            // afterwards
+            // in range: `read_model` points every search entry at 2*m + 1 pool entries
             let t = &self.pool[e as usize..=e as usize + 2 * m];
             let k = count_le(&t[1..], self.chunks, slot);
             let lo = u32::from(t[k]);
@@ -1172,6 +1169,20 @@ mod tests {
         let sh = t.shared().context("a model")?;
         let dm = read_model(&sh.hdr, alpha, &Budget::unlimited())?;
         Ok((sh, Arc::new(dm)))
+    }
+
+    #[test]
+    fn count_le_counts_entries_up_to_slot() {
+        let table: Vec<u16> = (0..64u16).map(|entry| entry * 70).collect();
+        for chunks in 1..=4 {
+            for slot in [0, 1, 69, 70, 71, 2000, 4095] {
+                let expected = table[..16 * chunks]
+                    .iter()
+                    .filter(|&&entry| u32::from(entry) <= slot)
+                    .count();
+                assert_eq!(count_le(&table, chunks, slot), expected, "{chunks} {slot}");
+            }
+        }
     }
 
     #[test]

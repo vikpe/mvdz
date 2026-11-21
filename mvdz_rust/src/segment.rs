@@ -100,10 +100,10 @@ impl NumIO for NumEnc<'_> {
         self.vals[k].push(ctx, v);
         v
     }
-    fn buf(&self) -> &[u8] {
+    fn bytes(&self) -> &[u8] {
         self.src
     }
-    fn buf_mut(&mut self) -> &mut [u8] {
+    fn bytes_mut(&mut self) -> &mut [u8] {
         &mut []
     }
 }
@@ -141,11 +141,11 @@ impl SymIO for DecIO<'_> {
     }
 }
 
-/// Streams in a group, at most.
-const MAXK: usize = 2;
+/// Most streams of one numeric group.
+const MAX_GROUP_STREAMS: usize = 2;
 
 struct NumDecIO<'a> {
-    d: [rans::NumDec<'a>; MAXK],
+    d: [rans::NumDec<'a>; MAX_GROUP_STREAMS],
     dst: &'a mut [u8],
     over: bool,
 }
@@ -160,10 +160,10 @@ impl NumIO for NumDecIO<'_> {
             0
         }
     }
-    fn buf(&self) -> &[u8] {
+    fn bytes(&self) -> &[u8] {
         self.dst
     }
-    fn buf_mut(&mut self) -> &mut [u8] {
+    fn bytes_mut(&mut self) -> &mut [u8] {
         self.dst
     }
 }
@@ -204,7 +204,7 @@ fn run_group(
     ents: &[StreamEnt],
     fm: Option<&rans::Models>,
 ) -> Result<()> {
-    let mut d: [rans::NumDec; MAXK] = std::array::from_fn(|_| rans::NumDec::empty());
+    let mut d: [rans::NumDec; MAX_GROUP_STREAMS] = std::array::from_fn(|_| rans::NumDec::empty());
     for (k, &sid) in g.streams().iter().enumerate() {
         if let Some((b, c)) = ents[sid] {
             d[k] = rans::NumDec::new(sid, b, c, coder::file_model(fm, sid)?)?;
@@ -330,16 +330,16 @@ pub(crate) type Nums = Vec<Vec<rans::NumSyms>>;
 pub(crate) fn numerics(src: &[u8], wk: &Walked) -> Nums {
     GROUPS
         .iter()
-        .map(|&g| {
+        .map(|&group| {
             let mut io = NumEnc {
-                vals: g
+                vals: group
                     .streams()
                     .iter()
                     .map(|&sid| rans::NumSymW::new(sid))
                     .collect(),
                 src,
             };
-            g.run::<true, NumEnc>(&wk.recs, &mut io);
+            group.run::<true, NumEnc>(&wk.recs, &mut io);
             io.vals
                 .into_iter()
                 .map(super::coder::rans::NumSymW::finish)
@@ -472,8 +472,8 @@ pub(crate) fn encode(
         jobs.push((BLOB_BODY, Kind::Blobs, 0, 0));
     }
     let mut packed: Vec<Vec<u8>> = Vec::with_capacity(jobs.len());
-    for &(sid, kind, gi, i) in &jobs {
-        let num = matches!(kind, Kind::Num).then(|| &nums[gi][i]);
+    for &(sid, kind, gi, index) in &jobs {
+        let num = matches!(kind, Kind::Num).then(|| &nums[gi][index]);
         let file = shared.get(sid).and_then(|m| m.as_ref());
         packed.push(pack_one(kind, sid, wk, num, file)?);
     }
@@ -717,14 +717,14 @@ pub(crate) fn decode(
         cnt(UC) / UC_MIN_SYMS,
     )?;
     let mut lazy: [rans::ByteDec; N_LAZY] = std::array::from_fn(|_| rans::ByteDec::empty());
-    for (id, e) in lazy_ents.iter().enumerate() {
-        if let Some((b, c)) = *e {
-            lazy[id] = rans::ByteDec::new(b, c, coder::file_model(fm, id)?)?;
+    for (id, entry) in lazy_ents.iter().enumerate() {
+        if let Some((stream_body, count)) = *entry {
+            lazy[id] = rans::ByteDec::new(stream_body, count, coder::file_model(fm, id)?)?;
         }
     }
     walk_dec(lazy, blob_bufs, dst, &mut recs, h.proto, h.tail)?;
-    for g in GROUPS {
-        run_group(g, &recs, dst, &num_ents, fm)?;
+    for group in GROUPS {
+        run_group(group, &recs, dst, &num_ents, fm)?;
     }
     Ok(())
 }

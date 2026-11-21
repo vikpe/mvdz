@@ -103,34 +103,40 @@ pub fn par_map<T: Send, F: Fn(usize) -> T + Sync>(threads: usize, n: usize, f: F
         return (0..n).map(f).collect();
     }
     let next = AtomicUsize::new(0);
-    // each thread claims the next index and keeps what it computed; the
-    // results are put in order once every thread has finished
-    let done: Vec<Vec<(usize, T)>> = std::thread::scope(|s| {
+    // each thread claims the next index and keeps its results; they are put in
+    // order once every thread has finished
+    let done: Vec<Vec<(usize, T)>> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads.min(n))
             .map(|_| {
-                s.spawn(|| {
-                    let mut mine = Vec::new();
+                scope.spawn(|| {
+                    let mut results = Vec::new();
                     loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= n {
-                            break mine;
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= n {
+                            break results;
                         }
-                        mine.push((i, f(i)));
+                        results.push((index, f(index)));
                     }
                 })
             })
             .collect();
         workers
             .into_iter()
-            .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
             .collect()
     });
     let mut out: Vec<Option<T>> = Vec::from_fn(n, |_| None);
-    for (i, v) in done.into_iter().flatten() {
-        out[i] = Some(v);
+    for (index, value) in done.into_iter().flatten() {
+        if let Some(slot) = out.get_mut(index) {
+            *slot = Some(value);
+        }
     }
     out.into_iter()
-        .map(|v| v.expect("every index is filled"))
+        .map(|value| value.expect("every index is filled"))
         .collect()
 }
 

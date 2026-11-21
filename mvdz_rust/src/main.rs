@@ -32,7 +32,9 @@ output, as is -o. compress takes a raw demo: input that is not an MVD demo
 is refused (--allow-non-demo stores it anyway), and a .mvd.gz is to be
 decompressed first (gzip -dc game.mvd.gz | mvdz compress - game.mvdz).
 Sizes take K, M, G suffixes (binary: 1M = 1048576). Compression has no settings: the demo is cut into
-independently decodable segments of 256 KiB."
+independently decodable segments of 256 KiB. decompress decodes up to -j
+segments at once, each with memory of its own: a tight --max-memory may need
+a lower -j."
     );
     std::process::exit(2)
 }
