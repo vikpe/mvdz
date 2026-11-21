@@ -281,10 +281,9 @@ decode may use.
 ## WebAssembly
 
 The library builds for `wasm32-unknown-unknown` and `wasm32-wasip1`
-(`cargo build --lib --target wasm32-unknown-unknown`). There, zstd is the
-pure-Rust `ruzstd` (the `pure-zstd` feature selects it natively too) and
-decoding is single-threaded; files are identical whichever zstd decoder
-reads them. The format's resource rules bound memory by the input, and
+(`cargo build --lib --target wasm32-unknown-unknown`). There, decoding is
+single-threaded; every dependency is pure Rust, so nothing changes between
+targets. The format's resource rules bound memory by the input, and
 `ReadOptions::limits` caps it further, which matters in a browser.
 
 ## Tests

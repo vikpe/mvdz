@@ -24,8 +24,7 @@ impl<'a> Rd<'a> {
         Rd { b, i: 0 }
     }
     pub(crate) fn u32le(&mut self) -> Option<u32> {
-        let s = self.take(4)?;
-        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+        Some(u32::from_le_bytes(*self.take(4)?.first_chunk()?))
     }
     /// A little-endian u32 as a count or length; `None` where it does not
     /// fit in a `usize` (a 16-bit target).
@@ -50,8 +49,6 @@ impl<'a> Rd<'a> {
     }
 }
 
-/// `u64` to `usize`, or `None` on a 32-bit target when it does not fit.
-#[inline]
 /// A count or size as a float, for ratios and estimates.
 #[expect(clippy::cast_precision_loss, reason = "exact below 2^53")]
 pub fn approx_f64(count: u64) -> f64 {

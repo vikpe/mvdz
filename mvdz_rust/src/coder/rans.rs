@@ -483,7 +483,7 @@ fn count_le(c: &[u16], chunks: usize, slot: u32) -> usize {
     {
         c[..16 * chunks]
             .iter()
-            .filter(|&&x| x as u32 <= slot)
+            .filter(|&&x| u32::from(x) <= slot)
             .count()
     }
 }
@@ -753,10 +753,11 @@ impl<'a> RDec<'a> {
     }
     #[inline(always)]
     fn word(&mut self) -> u16 {
-        let v = match self.b.get(self.pos..self.pos + 2) {
-            Some(s) => u16::from_le_bytes([s[0], s[1]]),
-            None => 0,
-        };
+        let v = self
+            .b
+            .get(self.pos..)
+            .and_then(<[u8]>::first_chunk)
+            .map_or(0, |s| u16::from_le_bytes(*s));
         self.pos += 2;
         v
     }

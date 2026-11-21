@@ -354,7 +354,7 @@ impl Cur<'_> {
 
 #[inline]
 pub(crate) fn le32(b: &[u8]) -> u32 {
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    u32::from_le_bytes(*b.first_chunk().expect("caller checked 4 bytes"))
 }
 
 /// Total length of the demo frame at `src[p..]`, or `None` if it does not

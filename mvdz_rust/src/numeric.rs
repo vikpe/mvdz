@@ -62,7 +62,7 @@ impl Buf {
     pub(crate) fn rd16(&self, off: u32) -> u16 {
         let o = off as usize;
         if o.wrapping_add(2) <= self.len && o < self.len {
-            unsafe { u16::from_le_bytes([*self.ptr.add(o), *self.ptr.add(o + 1)]) }
+            unsafe { u16::from_le_bytes(self.ptr.add(o).cast::<[u8; 2]>().read_unaligned()) }
         } else {
             0
         }
@@ -71,12 +71,7 @@ impl Buf {
     pub(crate) fn rd32(&self, off: u32) -> u32 {
         let o = off as usize;
         if o.wrapping_add(4) <= self.len && o < self.len {
-            unsafe {
-                (self.ptr.add(o) as *const [u8; 4])
-                    .read_unaligned()
-                    .map(|x| x)
-                    .into_le()
-            }
+            unsafe { u32::from_le_bytes(self.ptr.add(o).cast::<[u8; 4]>().read_unaligned()) }
         } else {
             0
         }
@@ -103,16 +98,6 @@ impl Buf {
                     .write_unaligned(v.to_le_bytes());
             }
         }
-    }
-}
-
-trait IntoLe {
-    fn into_le(self) -> u32;
-}
-impl IntoLe for [u8; 4] {
-    #[inline(always)]
-    fn into_le(self) -> u32 {
-        u32::from_le_bytes(self)
     }
 }
 
