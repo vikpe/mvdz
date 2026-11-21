@@ -19,9 +19,7 @@ the format is settled.
 may still change before 1.0: files written by a release candidate are not
 guaranteed to be readable by 1.0, so keep the original `.mvd` files for
 now. Later additions after 1.0 will use the forward-compatible extension
-points of FORMAT.md. Media attachments (voice,
-commentary, transcripts) are
-[proposed for version 2, open for discussion](proposals/media-attachments.md).
+points of FORMAT.md.
 
 How it works: the demo is walked command by command (`svc_*` layouts from
 mvdsv and ezQuake). Every field goes to its own stream; numeric fields
@@ -232,10 +230,6 @@ Files from elsewhere are untrusted input: decoders bound memory and work
 content of any type, not access-controlled: anyone holding a file can read
 all of them. FORMAT.md §14 covers this.
 
-**Media attachments** (voice, commentary, transcripts, their timing and a
-privacy convention) are not part of version 1: they are
-[proposed for version 2, open for discussion](proposals/media-attachments.md).
-
 ## Rust
 
 Not on crates.io yet: depend on it by git
@@ -334,16 +328,14 @@ files. After 1.0, later additions will use the forward-compatible
 extension points of FORMAT.md (new sections, metadata tags and keys).
 
 **Where do I give feedback?** Open an issue on GitHub
-(<https://github.com/galfthan/mvdz/issues>), for the release, the format
-and the [media attachments proposal](proposals/media-attachments.md)
-alike.
+(<https://github.com/galfthan/mvdz/issues>), for the release and the
+format alike.
 
 ## Contributing
 
 Issues and pull requests are welcome on GitHub. Please run `cargo fmt`,
 `cargo clippy --all-targets` and `cargo test` (CI runs them on Linux, with
-the pure-zstd tests, a wasm build and the minimum Rust version). Changes to the file format go through FORMAT.md first; larger
-ideas fit `proposals/`. See [CHANGELOG.md](CHANGELOG.md) for releases.
+the pure-zstd tests, a wasm build and the minimum Rust version). Changes to the file format go through FORMAT.md first. See [CHANGELOG.md](CHANGELOG.md) for releases.
 Pull requests from automated agents without a human author who reviews
 and answers for them are closed.
 

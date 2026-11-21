@@ -1922,8 +1922,7 @@ with a vendor prefix, a name followed by a dot (`mvda.schema`,
 readers accept and preserve every key, prefixed or not, exactly as
 stored, and ignore keys they do not know. Uniqueness of keys within an
 entry is bytewise. A future version can then define keys of its own
-(see `proposals/media-attachments.md` for media keys proposed for
-version 2) without colliding with keys already in files.
+without colliding with keys already in files.
 
 ### 10.2 Bundle hash (`api.rs:bundle_hash`)
 
