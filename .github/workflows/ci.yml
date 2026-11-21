@@ -34,6 +34,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       # tests that need real demos skip without MVDZ_TEST_DATA
+      # (scripts/fetch_samples.sh sample40 DIR/sample downloads them)
       - run: cargo nextest run --cargo-profile fast
       # nextest does not run the documentation examples
       - run: cargo test --profile fast --doc

@@ -299,16 +299,20 @@ nextest leaves out. Everything runs on synthetic demos; tests that can also use
 real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `sample/` with demos named `<sha256>.mvd`, `gen/` with constructed demos,
 `poc/` with hostile model headers) and say so when it is unset.
+`scripts/fetch_samples.sh sample40 testdata/sample` downloads the
+development sample there (`MVDZ_TEST_DATA=$PWD/testdata`).
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors (it needs the sample
-demos they were made from). Fuzz targets are in `mvdz_rust/fuzz/` (`cargo +nightly
+demos they were made from, which the download lacks). Fuzz targets are in `mvdz_rust/fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
 `stream_writer`, `compress_rt` and the structure-aware `gen_rt`).
 The feature `scalar` forces the portable code paths (as on wasm).
 
-Speed: `MVDZ_BENCH_DEMOS=/path/to/demos cargo bench --bench codec` (in
-`mvdz_rust/`) times compress and decompress of every `*.mvd` in that
+Speed: `MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path
+mvdz_rust/Cargo.toml --bench codec` times compress and decompress of every `*.mvd` in that
 directory, one file at a time at 4 threads and at 1, with criterion
 (`-- --save-baseline name` and `-- --baseline name` compare two builds).
+`scripts/fetch_samples.sh set8 demos/set8` downloads the speed set
+([BENCHMARKS.md](BENCHMARKS.md), Samples).
 
 ## FAQ
 

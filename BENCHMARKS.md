@@ -50,6 +50,14 @@ The lists of every sample (the SHA-256 of each raw demo, which is the
 hub's `demo_sha256`), with their seeds and, for the stratified sample, the
 cells and weights, are in [`benchmarks/samples/`](benchmarks/samples).
 
+The demos of set8, sample40 and stratified can be downloaded, unpacked
+(`<sha256>.mvd`), from `https://dev.quake.world/mvdz/<set>.tar.gz`;
+`scripts/fetch_samples.sh <set> <dir>` downloads one, unpacks it and checks
+every SHA-256. Not every listed demo could be found again: the
+downloads have 6 of set8's 8, 32 of sample40's 40 and 379 of stratified's
+585, and each lists the missing ones in `MISSING.txt`. holdout, fresh and
+campaign are not published as downloads.
+
 The headline ratios use the stratified sample, weighted to the archive,
 with 95 % stratified bootstrap intervals (2,000 resamples). The 300 =
 holdout + fresh give 0.204 (normal) and 0.248 (fast), inside the same
@@ -357,26 +365,29 @@ tests (the pipelined decoder's raw-pointer writer, `par_map`).
 ## Reproducing
 
 The demos used here are public QuakeWorld demos; any collection of `.mvd`
-files works the same way. A demo hub that serves demos by their SHA-256
-(as the QuakeWorld hub's CDN does) makes a sample reproducible from a list
-of hashes: [`benchmarks/samples/`](benchmarks/samples) holds the lists
-used here.
+files works the same way. [`benchmarks/samples/`](benchmarks/samples)
+holds the lists of hashes used here, and set8, sample40 and stratified
+can be downloaded (Samples).
 
 ```
+# the demos: set8 for speeds, sample40 for development, stratified for ratios
+scripts/fetch_samples.sh set8 demos/set8
+
 # library speeds over a set of demos (every *.mvd in the directory),
 # compress and decompress at 4 threads and 1, with criterion
-MVDZ_BENCH_DEMOS=$PWD/demos cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
+MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
 
 # command-line decode speed against gzip, xz and zstd (one process per
 # file); for the speed tables each command ran once per round, 5 rounds
-ls demos/*.mvd > list.txt
-scripts/bench_cli.sh /tmp/bench list.txt
+ls demos/set8/*.mvd > demos/set8.list
+scripts/bench_cli.sh demos/cli-bench demos/set8.list
 
 # round trips: every demo through the whole-file and the sequential reader
-cargo run --release --example sweep -- demos/*.mvd
+cargo run --manifest-path mvdz_rust/Cargo.toml --release --example sweep -- demos/set8/*.mvd
 
 # the tests, with real demos where they help (see README, Tests)
-MVDZ_TEST_DATA=/path/to/testdata cargo nextest run --release
+scripts/fetch_samples.sh sample40 testdata/sample
+MVDZ_TEST_DATA=$PWD/testdata cargo nextest run --manifest-path mvdz_rust/Cargo.toml --release
 ```
 
 For the confidence intervals, draw the sample at random from the whole

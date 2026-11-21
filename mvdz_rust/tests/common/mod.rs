@@ -241,7 +241,8 @@ pub(crate) fn usercmd_demo() -> Vec<u8> {
 // ---------------------------------------------------------------- sample demos
 
 /// Optional test data, from the directory in `MVDZ_TEST_DATA`:
-/// `sample/` (real demos named `<sha256>.mvd`), `gen/` (constructed demos,
+/// `sample/` (real demos named `<sha256>.mvd`; `scripts/fetch_samples.sh
+/// sample40 DIR/sample` downloads sample40), `gen/` (constructed demos,
 /// e.g. `float_mvd1.mvd`) and `poc/` (hostile model headers). Tests that
 /// need it skip, with a note, when the variable is unset or the file is
 /// missing; everything else runs on synthetic demos.

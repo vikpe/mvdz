@@ -1,14 +1,19 @@
 //! Encode and decode speed over a fixed set of demos, at 4 threads and 1.
 //!
 //! The demos are every `*.mvd` in the directory named by `MVDZ_BENCH_DEMOS`
-//! (none are in the repository); without it nothing is measured. One
+//! (none are in the repository; `scripts/fetch_samples.sh set8 DIR` downloads
+//! set8, the speed set of BENCHMARKS.md); without it nothing is measured. One
 //! iteration codes every demo once, one file at a time, as the library
 //! does by default: the encoder with its self-check, the decoder with
 //! every check. Throughput is MB/s of raw demo (MB = 10^6 bytes).
 //!
 //! ```text
-//! MVDZ_BENCH_DEMOS=/path/to/demos cargo bench --bench codec -- --save-baseline before
-//! MVDZ_BENCH_DEMOS=/path/to/demos cargo bench --bench codec -- --baseline before
+//! # from the repository root
+//! scripts/fetch_samples.sh set8 demos/set8
+//! MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml \
+//!     --bench codec -- --save-baseline before
+//! MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml \
+//!     --bench codec -- --baseline before
 //! ```
 //!
 //! Compressed size and peak memory are not measured here.

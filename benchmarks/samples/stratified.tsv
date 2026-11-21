@@ -7,6 +7,8 @@
 # weight = (cell size / n) * 50951 / (demos considered): the demo's weight in the
 # archive-weighted ratio, sum(weight * packed) / sum(weight * raw).
 # year: from matchdate or the server info (NA if unknown). gz_bytes: the archive's file.
+# Download, unpacked: https://dev.quake.world/mvdz/stratified.tar.gz (379 of the 585;
+# the other 206 could not be found again), or scripts/fetch_samples.sh stratified DIR.
 # Columns: sha256 (raw demo, the hub's demo_sha256), era, size_tercile, year, gz_bytes, weight
 sha256	era	size_tercile	year	gz_bytes	weight
 116e68f84a8c718dd5d9405bf61ebf205a95c9bb58dcb0ccadfc9bc6168cca8d	E1 <=2006	S1	NA	150674	102.4909989051002

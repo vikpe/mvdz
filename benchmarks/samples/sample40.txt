@@ -1,6 +1,8 @@
 # sample40: 40 demos (140 MB raw), the development sample: 27 archive demos
 # and 13 recent hub games (4on4, 2on2 and duels) taken from a test corpus.
 # The SHA-256 of each raw demo (the hub's demo_sha256). Sorted here.
+# Download, unpacked: https://dev.quake.world/mvdz/sample40.tar.gz (32 of the 40; the
+# other 8 could not be found again), or scripts/fetch_samples.sh sample40 DIR.
 0d536b3aa554a423a55e9d5cd7726c3bd099e0670cc6e51b38d557c3e0b01c03
 0d57c09703b5392954778825804d2174d2184a2a0ff1e2ac4bf449a7f92dae99
 0d5bfbc9c286ea6a2de520d3adfb75ef4c873e956d0772174c28f91d882d22db

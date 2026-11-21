@@ -1,6 +1,8 @@
 # set8: 8 demos of sample40 (18.9 MB raw), the set of the speed tables:
 # the 8th, 12th, 15th, 18th, 21st, 25th, 30th and 35th largest, 0.65 to
 # 6.2 MB. The SHA-256 of each raw demo. Sorted here.
+# Download, unpacked: https://dev.quake.world/mvdz/set8.tar.gz (6 of the 8; the other
+# 2 could not be found again), or scripts/fetch_samples.sh set8 DIR.
 0d6b7053fd1d7def25426135cdd121cd5fcccc989656526f1690a8e8f614d9f9
 3fe0ac3a668037f0446a1242c1a2269e845109bee68e661c9b30f6afb723f426
 3fe477dc5e4c050fc411d82be87a24c5ec04d6f18b3c6bc0561789a4c4561416

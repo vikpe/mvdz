@@ -87,14 +87,11 @@ the file is history and measurements.
 - Code: `mvdz_rust/` (crate `mvdz`). Paths below are relative to it.
 - Step A is committed: 149c415 "Replace the ratio rule with a 2 MiB cap on a segments
   coded length". Step B starts from there, on branch `feature/simplify`.
-- Demos for measuring: `~/dev/mvdz-bench` and `~/dev/qwdemos` do not exist on this
-  machine. Use the archive: `/media/vikpe/qw_storage/demos_storage/all_demos/index.jsonl`
-  (one JSON object per line; fields `format`, `size_bytes`, `duration_ms`, `xxh3_64`,
-  `sha256`, `server_info`); the file of a row is
-  `all_demos/processed/<xxh3_64[:3]>/<xxh3_64[3:]>.gz` (gzip of the raw demo). Take only
-  rows with `"format":"mvd"`. The sample used today: sort the mvd paths, shuffle with
-  Python `random.Random(20261121)`, take the first 500. Decompress with Python `gzip`
-  to a temporary file, run `target/release/mvdz compress -j 4 -f in.mvd out.mvdz`.
+- Demos for measuring: set8, sample40 and stratified of `benchmarks/samples/`, unpacked
+  (`<sha256>.mvd`), from `https://dev.quake.world/mvdz/<set>.tar.gz`;
+  `scripts/fetch_samples.sh <set> <dir>` downloads one and checks every SHA-256. They
+  hold 6/8, 32/40 and 379/585 (the rest could not be found again), without the
+  golden-vector duel (`3ff1f82b…`) and the FTE demo (`3fdd8018…`) of `tests/`.
 - Reference sources: `~/dev/reference/mvdsv` (demo writer in `src/sv_demo.c`,
   `src/sv_demo_misc.c`; constants in `src/bothdefs.h`, `src/server.h`) and
   `~/dev/reference/qwprot/src/protocol.h` (message types `dem_*`, hidden block ids).
@@ -1070,7 +1067,7 @@ number is given.
    builds with `cargo bench --bench codec -- --save-baseline a` and `-- --baseline a`.
    Size and peak memory stay outside criterion. Still open: which demos (set8 of
    `benchmarks/samples/` is 18.9 MB, the old speed-table set; 6 of its 8 are in the
-   archive index); `Info::streams`, `util::par_map`, `streams::name` and `approx_f64`
+   download); `Info::streams`, `util::par_map`, `streams::name` and `approx_f64`
    no longer need to be public for the tool (`Info::streams` has no reader left).
    First run (11 random archive demos, 36,183,640 bytes raw, in `/tmp/mvdz-bench-demos`,
    not kept; MB/s, criterion's estimate): compress 4t 88.2, 1t 33.6; decompress 4t

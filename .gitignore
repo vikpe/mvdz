@@ -2,3 +2,5 @@ target/
 target-*/
 *.mvdz
 !mvdz_rust/tests/vectors/*.mvdz
+/demos/
+/testdata/
