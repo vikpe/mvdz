@@ -37,7 +37,9 @@ Tests (`cargo nextest run --release`): 44 pass, 4 fail (see "Known failing tests
 
 - Demos: set8, sample40 and stratified of `benchmarks/samples/`, from
   `https://dev.quake.world/mvdz/<set>.tar.gz`; `scripts/fetch_samples.sh <set> <dir>`
-  downloads one and checks every SHA-256 (6/8, 32/40 and 379/585 present). Stratified
+  downloads one and checks every SHA-256 (8/8,
+  32/40 and 379/585 present). Single demos: `https://d.quake.world/<first 3 hex>/<sha256>.mvd.gz`
+  (some only). Stratified
   is unpacked in `/tmp/mvdz-strat/demos` (`/tmp` does not survive a reboot).
 - Library speed: `benches/codec.rs` (criterion; demos from `MVDZ_BENCH_DEMOS`).
   Session harness in `/tmp/seqdec/harness`: `quick.sh` (library, CLI, memory, wasm),
@@ -101,6 +103,7 @@ A format simple enough to stay unchanged for 10+ years.
 | Library scope | No file writing, no JSON: `mvdz info`'s JSON is built in `mvdz_cli/src/main.rs` | Not the codec's job |
 | Public API | `encode`, `decode`, `Encoder` (`Encoder::new(writer)`, `.max_threads(n)`, implements `io::Write`, buffers the demo; `finish` encodes and writes, since the encoder needs the whole demo), `Decoder` (`Decoder::new(reader)?`, `.max_threads(n)`, implements `io::Read`; bounded memory); the pair as gzip libraries have it, Viktor 2026-11-21, `Decoder::header()` (`Header`, the file header's fields, which all describe the demo: getters only, no format version; as gzip's decoder exposes its header). No `info`: the file size is a file-system call, the segment list waits for part-of-file decoding (task 4), `Error`, `Result`. Everything else is `pub(crate)`. The opt-in feature `fuzz` adds a hidden `fuzz` module (`encode_any`, `check_demo`) for the fuzz targets; the fuzz generator tracks the protocol state itself. Tests that build files by hand are unit tests in `src/tests/` | Information hiding: what a crate exposes is its contract |
 | Memory limit | Fixed: 1 GiB on 64-bit, 256 MiB on 32-bit (`DEFAULT_MAX_MEMORY`); no option, no `--max-memory` | Viktor, 2026-11-21 |
+| Truncating casts | One workspace `allow` (`cast_possible_truncation`), reason in `Cargo.toml` | 83 casts: 30 positions bounded by the 1 MiB segment, 2 MiB coded segment and 16 MiB models block; 53 intended bit and byte extraction. Every alternative adds code or error paths that cannot fail (Viktor, 2026-11-21) |
 | Work limit | Removed (2026-11-21); only the memory limit stays | Rule M2 and at most 34 models bound model decoding far below the old 4096 units per input byte; output is at most 1 MiB per segment (about 10^4 times the input, estimated), and whole-file `decode` is capped by memory. The most compressible demos measured encode at 1,471:1. gzip and zstd have no work limit either |
 | Non-demo input | Refused; `--allow-non-demo` and `compress_any` removed | Viktor, 2026-11-21 |
 | Tool exit status | `main` returns `ExitCode` (2 bad command line, 1 a failed file, 0 when standard output closes early); no `process::exit` | Errors return to `main` instead of ending the process where they occur |
@@ -300,22 +303,21 @@ Rule: between commits no test may fail that is not on this list.
 
 Code:
 
-1. Truncating casts: 86 in the library under one allow; about 37 are positions
-   narrowed from `usize` to `u32` (a `u32` walker cursor would remove them; hot loop:
-   measure).
-2. `benches/codec.rs`: which demos (set8 is 18.9 MB; 6 of its 8 are in the download).
-3. Streaming input for the encoder (read the demo twice instead of holding it): peak
+1. Streaming input for the encoder (read the demo twice instead of holding it): peak
    drops by the raw size; 250 MB works today at about 410 MiB.
 
 API gaps:
 
-4. Part of a file (a time range, the last segment) cannot be decoded from outside the
+2. Part of a file (a time range, the last segment) cannot be decoded from outside the
    crate. If wanted: one public function, and each segment's starting protocol state.
 
 Format and specification:
 
-5. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
-6. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
+3. Regenerate the vectors in `tests/vectors/` (clears the known failing tests). Their
+   source demos `3ff1f82b…` (duel) and `3fdd8018…` (FTE float) are in neither the sample40
+   tarball nor `d.quake.world`, and `gen/float_mvd1.mvd` is not on this machine: pick new
+   sources from the 32 present demos.
+4. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
    sharing, attachments, streaming (sections 3, 4, 5.3, 10, 11) and the C interface.
    State: the 1 MiB segment rule (it still gives 4 GiB and "only the last segment may
    end inside a frame"); `MAX_SEGMENTS` as a 16 GiB demo limit; section 12 rule 1 as
@@ -327,20 +329,21 @@ Format and specification:
    `decode.rs:Decoder`), line 382 (`info` JSON: now the header only: `size_bytes`, `duration_ms`,
    `crc32`, `sha256`), line 668 (decode waves), line 357 (`FileInfo::to_json`, now `header_json` in
    `mvdz_cli/src/main.rs`).
-7. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
+5. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
    list are current (2026-11-21). Still rc.4: the intro (levels, metadata, attachments,
-   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 8's numbers,
+   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 6's numbers,
    mentions `--trusted` and the fast level), the FAQ (metadata, attachments) and the
-   Tests paragraph's `MVDZ_WRITE_VECTORS` note (check after task 5).
-8. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
-9. Later: implementations in C, Go and other languages from the settled
+   Tests paragraph's `MVDZ_WRITE_VECTORS` note (check after task 3).
+6. BENCHMARKS.md from the final measurements, on the new set8 (18.4 MB; README and
+   BENCHMARKS.md still say 18.9 MB); drop Miri (no `unsafe` left).
+7. Later: implementations in C, Go and other languages from the settled
    specification, with a shared test suite.
 
 Not measured:
 
-10. Size of a decoder-only wasm build.
-11. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-12. rayon on the final code (optional).
+8. Size of a decoder-only wasm build.
+9. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
+10. rayon on the final code (optional).
 
 ## Verification
 
