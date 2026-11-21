@@ -1,8 +1,6 @@
 #![no_main]
-//! Review target: a structure-aware demo; (1) the transform alone, with
-//! verification off, must round-trip (else the encoder relies on its
-//! all-tail fallback: a transform bug); (2) the normal path (verify on) must
-//! succeed and round-trip at any thread count.
+//! Review target: a structure-aware demo must compress and round-trip at
+//! any thread count.
 use libfuzzer_sys::fuzz_target;
 mod mgen;
 
@@ -19,23 +17,7 @@ fuzz_target!(|data: &[u8]| {
     }
     let threads = 1 + (data[0] as usize >> 2) % 3;
     let demo = mgen::demo(&data[1..]);
-    // (1) the transform without verification
-    let cfg = mvdz::Config {
-        threads,
-        verify: false,
-    };
-    let (c, _) = mvdz::encode::compress(&demo, &cfg).expect("compress (no verify)");
-    if std::env::var("REQUIRE_TRANSFORM_LOSSLESS").is_ok() {
-        rt(&c, &demo, "unverified transform");
-    } else if mvdz::decompress(&c, 1).ok().as_deref() != Some(&demo[..]) {
-        eprintln!("NOTE unverified transform differs");
-    }
-    // (2) verified paths
-    let cfg = mvdz::Config {
-        threads,
-        ..Default::default()
-    };
-    let (c, _) = mvdz::encode::compress(&demo, &cfg).expect("compress");
+    let (c, _) = mvdz::encode::compress(&demo, &mvdz::Config { threads }).expect("compress");
     rt(&c, &demo, "one-shot");
     assert!(mvdz::decompress(&c, 3).unwrap() == demo);
 });

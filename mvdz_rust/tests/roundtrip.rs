@@ -81,7 +81,10 @@ fn sequential_reader_threads_agree() -> anyhow::Result<()> {
             partial += 1;
         }
         for threads in [2, 4] {
-            assert!(read_until_error(c, threads) == one, "case {k}, {threads} threads");
+            assert!(
+                read_until_error(c, threads) == one,
+                "case {k}, {threads} threads"
+            );
         }
     }
     // the cases include errors after some segments were delivered

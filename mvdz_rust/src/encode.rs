@@ -90,9 +90,9 @@ struct Trained {
 
 /// The first pass: walks every segment in order (the protocol state
 /// carries over), runs its numeric predictors and counts its symbols for
-/// the models (FORMAT.md §12). `window` segments are held at a time, their
+/// the models (FORMAT.md §12). `threads` segments are held at a time, their
 /// predictors run in parallel; nothing but the counts is kept.
-fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize) -> Trained {
+fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
     let nseg = cuts.len() - 1;
     let seg = |i: usize| &src[cuts[i]..cuts[i + 1]];
     let trainer = segment::Trainer::default();
@@ -103,8 +103,8 @@ fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize
         walked: Vec::with_capacity(nseg),
         durs: (0..nseg).map(|i| frame_scan(seg(i)).1).collect(),
     };
-    for first in (0..nseg).step_by(window) {
-        let n = window.min(nseg - first);
+    for first in (0..nseg).step_by(threads) {
+        let n = threads.min(nseg - first);
         let walks: Vec<Option<Walked>> = (first..first + n)
             .map(|i| {
                 t.protos.push(proto);
@@ -113,8 +113,8 @@ fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize
                 Some(wk)
             })
             .collect();
-        let nums = par_map(window, n, |k| {
-            Some(segment::numerics(seg(first + k), walks[k].as_ref()?, inner))
+        let nums = par_map(threads, n, |k| {
+            Some(segment::numerics(seg(first + k), walks[k].as_ref()?))
         });
         let segs: Vec<(&Walked, &Nums)> = walks
             .iter()
@@ -137,12 +137,11 @@ pub(crate) fn transform_body(
     wk: &Walked,
     nums: &Nums,
     dur_ms: u64,
-    threads: usize,
     st: &mut Vec<StreamStat>,
     shared: &[Option<Shared>],
 ) -> Option<Vec<u8>> {
     let mut b = seg_hdr_bytes(s.len() as u32, dur_ms as u32, crc32(s));
-    b.extend_from_slice(&segment::encode(wk, nums, threads, st, shared)?);
+    b.extend_from_slice(&segment::encode(wk, nums, st, shared)?);
     ((b.len() - SEG_FIELDS) as u64 <= MAX_SEG_CODED).then_some(b)
 }
 
@@ -170,11 +169,6 @@ fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, 
     if nseg > MAX_SEGMENTS {
         return Err(Error::Invalid("too many segments"));
     }
-    let (outer, inner) = if nseg >= threads {
-        (threads, 1)
-    } else {
-        (1, threads)
-    };
     // the first pass: the models. Its walk runs on one thread: with more,
     // the demo's checksum and SHA-256 are computed beside it
     let hashes = || (crc32(src), <[u8; 32]>::from(Sha256::digest(src)));
@@ -189,7 +183,7 @@ fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, 
                     .collect(),
             }
         } else {
-            train(src, &cuts, outer, inner, threads)
+            train(src, &cuts, threads)
         }
     };
     let (t, (crc, sha256)) = if threads > 1 && HAS_THREADS {
@@ -212,19 +206,12 @@ fn compress_inner(src: &[u8], cfg: &Config, all_tail: bool) -> Result<(Vec<u8>, 
     // all tail
     let tail_body = |i: usize| {
         let s = &src[cuts[i]..cuts[i + 1]];
-        Body::new(
-            s,
-            &segment::walk_tail(s, t.protos[i]),
-            t.durs[i],
-            inner,
-            &[],
-            true,
-        )
+        Body::new(s, &segment::walk_tail(s, t.protos[i]), t.durs[i], &[], true)
     };
-    let bodies: Vec<Result<Body>> = par_map(outer, nseg, |i| {
+    let bodies: Vec<Result<Body>> = par_map(threads, nseg, |i| {
         let s = &src[cuts[i]..cuts[i + 1]];
         if let Some((wk, _)) = t.walked[i].then(|| segment::walk(s, t.protos[i])).flatten()
-            && let Ok(b) = Body::new(s, &wk, t.durs[i], inner, &t.shared, false)
+            && let Ok(b) = Body::new(s, &wk, t.durs[i], &t.shared, false)
         {
             return Ok(b);
         }
@@ -267,13 +254,12 @@ impl Body {
         s: &[u8],
         wk: &Walked,
         dur_ms: u64,
-        threads: usize,
         shared: &[Option<Shared>],
         is_all_tail: bool,
     ) -> Result<Self> {
-        let nums = segment::numerics(s, wk, threads);
+        let nums = segment::numerics(s, wk);
         let mut streams = Vec::new();
-        let bytes = transform_body(s, wk, &nums, dur_ms, threads, &mut streams, shared)
+        let bytes = transform_body(s, wk, &nums, dur_ms, &mut streams, shared)
             .ok_or(Error::Internal("a segment that cannot be coded"))?;
         Ok(Self {
             bytes,

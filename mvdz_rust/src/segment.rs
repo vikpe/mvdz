@@ -33,7 +33,6 @@ use crate::streams::{
 };
 use crate::util::{Rd, par_map, put_u32};
 use crate::walk::{Recs, SymIO, Walker};
-use std::borrow::Cow;
 
 /// Raw bytes per segment: a segment is cut at the first frame boundary at
 /// or after this many bytes.
@@ -113,7 +112,7 @@ impl NumIO for NumEnc<'_> {
 
 pub(crate) struct DecIO<'a> {
     lazy: [rans::ByteDec<'a>; N_LAZY],
-    blobs: Vec<(Cow<'a, [u8]>, usize)>,
+    blobs: Vec<(&'a [u8], usize)>,
     pub(crate) over: bool,
 }
 
@@ -174,7 +173,7 @@ type StreamEnt<'a> = Option<(&'a [u8], usize)>;
 
 fn walk_dec<'a>(
     lazy: [rans::ByteDec<'a>; N_LAZY],
-    blobs: Vec<(Cow<'a, [u8]>, usize)>,
+    blobs: Vec<(&'a [u8], usize)>,
     dst: &mut [u8],
     recs: &mut Recs,
     proto: Proto,
@@ -246,8 +245,7 @@ impl Walked {
 pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
     let mut recs = Recs::growable(src.len());
     let (io, tail, pend, err) = {
-        let mut w: Walker<true, EncIO> =
-            Walker::new(src, &mut [], &mut recs, EncIO::new(), proto);
+        let mut w: Walker<true, EncIO> = Walker::new(src, &mut [], &mut recs, EncIO::new(), proto);
         let tail = w.run(0);
         (w.io, tail, w.proto, w.err)
     };
@@ -329,23 +327,25 @@ pub(crate) type Nums = Vec<Vec<rans::NumSyms>>;
 /// Runs the numeric predictors over a walked segment `src`. The encoder
 /// does this once: the models are trained on the values and the segment is
 /// coded from them.
-pub(crate) fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Nums {
-    par_map(threads, GROUPS.len(), |gi| {
-        let g = GROUPS[gi];
-        let mut io = NumEnc {
-            vals: g
-                .streams()
-                .iter()
-                .map(|&sid| rans::NumSymW::new(sid))
-                .collect(),
-            src,
-        };
-        g.run::<true, NumEnc>(&wk.recs, &mut io);
-        io.vals
-            .into_iter()
-            .map(super::coder::rans::NumSymW::finish)
-            .collect()
-    })
+pub(crate) fn numerics(src: &[u8], wk: &Walked) -> Nums {
+    GROUPS
+        .iter()
+        .map(|&g| {
+            let mut io = NumEnc {
+                vals: g
+                    .streams()
+                    .iter()
+                    .map(|&sid| rans::NumSymW::new(sid))
+                    .collect(),
+                src,
+            };
+            g.run::<true, NumEnc>(&wk.recs, &mut io);
+            io.vals
+                .into_iter()
+                .map(super::coder::rans::NumSymW::finish)
+                .collect()
+        })
+        .collect()
 }
 
 /// Builds the shared models of a file (FORMAT.md §12 rule 11).
@@ -448,7 +448,6 @@ fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
 pub(crate) fn encode(
     wk: &Walked,
     nums: &Nums,
-    threads: usize,
     stats: &mut Vec<StreamStat>,
     shared: &[Option<rans::Shared>],
 ) -> Option<Vec<u8>> {
@@ -472,23 +471,11 @@ pub(crate) fn encode(
     if !blobs.is_empty() {
         jobs.push((BLOB_BODY, Kind::Blobs, 0, 0));
     }
-    let size = |j: &(usize, Kind, usize, usize)| match j.1 {
-        Kind::Lazy => wk.io.syms[j.0].len(),
-        Kind::Num => nums[j.2][j.3].syms.len() * 2,
-        Kind::Blobs => blob_total,
-    };
-    // biggest first for load balance; output in stream id order
-    let mut order: Vec<usize> = (0..jobs.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(size(&jobs[i])));
-    let packed_sorted = par_map(threads, jobs.len(), |k| {
-        let (sid, kind, gi, i) = jobs[order[k]];
+    let mut packed: Vec<Vec<u8>> = Vec::with_capacity(jobs.len());
+    for &(sid, kind, gi, i) in &jobs {
         let num = matches!(kind, Kind::Num).then(|| &nums[gi][i]);
         let file = shared.get(sid).and_then(|m| m.as_ref());
-        pack_one(kind, sid, wk, num, file)
-    });
-    let mut packed: Vec<Vec<u8>> = Vec::from_fn(jobs.len(), |_| Vec::new());
-    for (k, p) in packed_sorted.into_iter().enumerate() {
-        packed[order[k]] = p?;
+        packed.push(pack_one(kind, sid, wk, num, file)?);
     }
     // table order: stream id; the blob streams follow (their ids are the
     // highest), each with its own entry but one shared body
@@ -706,12 +693,10 @@ pub(crate) fn decode(
     } else {
         Vec::new()
     };
-    let mut blob_bufs: Vec<(Cow<[u8]>, usize)> = (0..N_STREAMS)
-        .map(|_| (Cow::Borrowed(&[][..]), 0))
-        .collect();
+    let mut blob_bufs: Vec<(&[u8], usize)> = vec![(&[][..], 0); N_STREAMS];
     let mut at = 0;
     for &(id, count, _) in h.ents.iter().filter(|e| is_blob(e.0)) {
-        blob_bufs[id].0 = Cow::Borrowed(&blob_bytes[at..at + count]);
+        blob_bufs[id].0 = &blob_bytes[at..at + count];
         at += count;
     }
     let mut num_ents: Vec<StreamEnt> = vec![None; N_STREAMS];
@@ -774,11 +759,11 @@ mod tests {
     /// models as a reader has them.
     fn coded(src: &[u8]) -> anyhow::Result<(Vec<u8>, FileTables)> {
         let (wk, _) = walk(src, Proto::default()).context("the demo walks")?;
-        let nums = numerics(src, &wk, 1);
+        let nums = numerics(src, &wk);
         let models = train(&[(&wk, &nums)]);
         let ids: Vec<usize> = (0..models.len()).filter(|&i| models[i].is_some()).collect();
         let ft = FileTables::new(&tables_body(&models, &ids), 1, &Budget::unlimited())?;
-        let body = encode(&wk, &nums, 1, &mut Vec::new(), &models).context("a transform body")?;
+        let body = encode(&wk, &nums, &mut Vec::new(), &models).context("a transform body")?;
         Ok((body, ft))
     }
 
@@ -877,7 +862,7 @@ mod tests {
     fn tables_limit() -> anyhow::Result<()> {
         let src = demo();
         let (wk, _) = walk(&src, Proto::default()).context("the demo walks")?;
-        let nums = numerics(&src, &wk, 1);
+        let nums = numerics(&src, &wk);
         let mut models = train(&[(&wk, &nums), (&wk, &nums)]);
         let ids = |m: &[Option<rans::Shared>]| -> Vec<usize> {
             (0..m.len()).filter(|&i| m[i].is_some()).collect()
@@ -902,7 +887,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(
-            encode(&wk, &nums, 1, &mut Vec::new(), &models).is_none(),
+            encode(&wk, &nums, &mut Vec::new(), &models).is_none(),
             "a stream without a model: no transform body"
         );
         // nothing fits: no model is kept

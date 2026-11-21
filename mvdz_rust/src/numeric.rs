@@ -228,15 +228,7 @@ impl Group {
                 let mut tm = vec![(0u32, 0u32); 256];
                 for r in recs.pi.iter() {
                     let (dn, dp) = times(&mut tm[r.num as usize], r.t);
-                    pi_angle_step::<ENC, IO>(
-                        a as usize,
-                        &mut st[r.num as usize],
-                        r,
-                        dn,
-                        dp,
-                        io,
-                        0,
-                    );
+                    pi_angle_step::<ENC, IO>(a as usize, &mut st[r.num as usize], r, dn, dp, io, 0);
                 }
             }
             Self::PeO(a) => {
@@ -449,7 +441,8 @@ fn uc<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
                 f: [q(t.res), q(d), q(d2), a as u8, 0, 0],
             };
             let v = if ENC {
-                let v = crate::walk::on_grid(rd32(io.buf(), off)).expect("the walker saw it on the grid");
+                let v = crate::walk::on_grid(rd32(io.buf(), off))
+                    .expect("the walker saw it on the grid");
                 io.code(0, c, i32::from(v.wrapping_sub(pred).cast_signed()));
                 v
             } else {
@@ -498,8 +491,7 @@ fn te<const ENC: bool, IO: NumIO>(recs: &Recs, io: &mut IO) {
                 let c = NCtx {
                     f: [i as u8 | 2 << 2, r.ty, 0, 0, 0, 0],
                 };
-                last[i as usize] =
-                    x16::<ENC, IO>(r.off + 6 + 2 * i, start[i as usize], io, 0, c).0;
+                last[i as usize] = x16::<ENC, IO>(r.off + 6 + 2 * i, start[i as usize], io, 0, c).0;
             }
         } else {
             for i in 0..3u32 {
