@@ -1,6 +1,6 @@
 #![no_main]
-//! The reader (in small reads) agrees with whole-file decoding, and at 3
-//! threads it yields the same bytes before the same error as at 1.
+//! The `Decoder` (fed in small reads) agrees with whole-file decoding, and at 3 threads
+//! it yields the same bytes before the same error as at 1.
 use libfuzzer_sys::fuzz_target;
 use std::io::Read;
 
@@ -14,37 +14,26 @@ impl Read for Dribble<'_> {
     }
 }
 
-/// The bytes the reader yields before its first error, and that error.
-fn read_until_error(
-    data: &[u8],
-    threads: usize,
-    limits: &mvdz::Limits,
-) -> (Vec<u8>, Option<mvdz::Error>) {
+/// The bytes read before the first error, and that error.
+fn decode_until_error(bytes: &[u8], max_threads: u8) -> (Vec<u8>, Option<mvdz::Error>) {
     let mut out = Vec::new();
-    let mut reader = match mvdz::Reader::new(Dribble(data, 0), threads, limits) {
-        Ok(reader) => reader,
-        Err(error) => return (out, Some(error)),
+    let error = match mvdz::Decoder::new(Dribble(bytes, 0)) {
+        Ok(decoder) => decoder
+            .max_threads(max_threads)
+            .read_to_end(&mut out)
+            .err()
+            .map(mvdz::Error::from),
+        Err(error) => Some(error),
     };
-    let mut buf = [0u8; 4096];
-    loop {
-        match reader.read_demo(&mut buf) {
-            Ok(0) => return (out, None),
-            Ok(len) => out.extend_from_slice(&buf[..len]),
-            Err(error) => return (out, Some(error)),
-        }
-    }
+    (out, error)
 }
 
-fuzz_target!(|data: &[u8]| {
-    let limits = mvdz::Limits {
-        memory: 256 << 20,
-        ..Default::default()
-    };
-    let whole = mvdz::decompress_with(data, 1, &limits).ok();
-    let (out, error) = read_until_error(data, 1, &limits);
+fuzz_target!(|bytes: &[u8]| {
+    let whole = mvdz::decode(bytes, 1).ok();
+    let (out, error) = decode_until_error(bytes, 1);
     assert_eq!(whole.is_some(), error.is_none());
     if let Some(demo) = &whole {
         assert!(*demo == out);
     }
-    assert!(read_until_error(data, 3, &limits) == (out, error));
+    assert!(decode_until_error(bytes, 3) == (out, error));
 });

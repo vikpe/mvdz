@@ -8,13 +8,15 @@ Earlier versions of this file (plans of done steps, superseded results) are in g
 Branch `feature/simplify` on `master` (rc.4, a9ac8fc). Every open question is decided
 (see Decisions). Code is in `mvdz_rust/`, a virtual workspace: the library in `mvdz/`, the tool in `mvdz_cli/`.
 Paths below are relative to `mvdz_rust/mvdz/` unless they start with `mvdz_cli/`.
-Tests (`cargo nextest run --release`): 43 pass, 4 fail (see "Known failing tests").
-`cargo clippy --all-targets -- -D warnings` is clean. Next: "Open tasks".
+Tests (`cargo nextest run --release`): 45 pass, 4 fail (see "Known failing tests").
+`cargo clippy --all-targets -- -D warnings` is clean, with no lint allowed for naming. Next: "Open tasks".
 
 ## Working rules
 
 - Viktor commits every change himself. Never commit, never `git add`. Stop after each
-  step, list the changed files, suggest a commit message, and wait.
+  step, list the changed files, suggest a commit message, and wait. Exception: all
+  refactoring (names, scope, order, comments; no change in behavior) goes in one commit,
+  so continue through it without stopping.
 - Plan until Viktor says to implement. Decisions are his: recommend, number the options,
   each suggestion as a table with the current and the proposed solution side by side.
 - Every change follows `~/dev/slipgate/AGENTS.md` and `~/dev/slipgate/rust/AGENTS.md`.
@@ -42,9 +44,10 @@ Tests (`cargo nextest run --release`): 43 pass, 4 fail (see "Known failing tests
   `quick_enc.sh`, `roundtrip.sh`; bit-flip probe `/tmp/seqdec/flip/zz_flip.rs`.
 - Not on this machine: `~/dev/mvdz-bench` (500-demo list `rand500.txt`, `compare4.sh`)
   and `~/dev/qwdemos`.
-- Reference sources: `~/dev/reference/mvdsv` (demo writer in `src/sv_demo.c`,
+- Reference sources: `~/dev/slipgate/reference/mvdsv` (demo writer in `src/sv_demo.c`,
   `src/sv_demo_misc.c`; constants in `src/bothdefs.h`, `src/server.h`) and
-  `~/dev/reference/qwprot/src/protocol.h` (message types `dem_*`, hidden block ids).
+  `~/dev/qw-group/qwprot/src/protocol.h` (message types `dem_*`, hidden block ids,
+  the protocol constants of `proto.rs`).
   Archive index: `/media/vikpe/qw_storage/demos_storage/all_demos/index.jsonl`.
 
 ## Goal
@@ -82,13 +85,13 @@ A format simple enough to stay unchanged for 10+ years.
 | Models block | Models only here (none in a segment, also for one-segment files); at most 16 MiB | One model path (+0.004 %); largest seen 47,608 bytes |
 | Model over the decision limit (rule M2) | The encoder makes it smaller (own contexts with the fewest symbols join the fallback table) | Otherwise a stream with no model sends every segment to the fallback: one demo grew 3.6 times (measured with the former DEFLATE fallback) |
 | Model step size, levels | One step size (2), one level | Trying 4 as well was worth 77 bytes in 1.68 GB; no options |
-| Encoder self-check | Always on; `Config` is a thread count | Every file written is proven to decode; about a third of compression time |
-| Self-check fallbacks | `Info::self_check_fallbacks` counts segments that failed the self-check and were written as all tail; fuzz targets (with `REQUIRE_TRANSFORM_LOSSLESS`) and round-trip tests require 0 | A transform bug otherwise only costs size |
+| Encoder self-check | Always on | Every file written is proven to decode; about a third of compression time |
+| Self-check fallbacks | `EncodeStats::self_check_fallbacks` counts segments that failed the self-check and were written as all tail; fuzz targets (through `fuzz::encode_any`) (with `REQUIRE_TRANSFORM_LOSSLESS`) and round-trip tests require 0 | A transform bug otherwise only costs size |
 | Checksums | CRC-32 of zlib per segment and for the whole demo, both checked on decode; SHA-256 in the header, never recomputed on decode | CRC-32 is in every standard library that has DEFLATE. The whole-demo check catches segments in the wrong order; the segment check serves subset decodes. SHA-256 on decode cost 9.1 % of a 4-thread decode with SHA instructions and 19.7 % of a batch decode without; a consumer that must authenticate hashes the output |
-| Edge inputs | A demo ending inside a frame: the partial bytes are the `TAIL` of its segment. Input not starting like an MVD: refused (`check_demo`, `NotMvd`); the unchecked entry point and `--allow-non-demo` write it. Unframed bytes are tail; past 1 MiB the rest is cut every 1 MiB and each piece walked afresh | Already round-trips and is tested |
+| Edge inputs | A demo ending inside a frame: the partial bytes are the `TAIL` of its segment. Input not starting like an MVD: refused (`NotMvd`); only the fuzz targets' `fuzz::encode_any` writes it. Unframed bytes are tail; past 1 MiB the rest is cut every 1 MiB and each piece walked afresh | Already round-trips and is tested |
 | Unused models | A models block may list a model no segment uses; readers ignore it. The encoder writes only used models (`assemble` recomputes them after every self-check round). Test: `unused_model_is_ignored` | No decoder rule to implement in every port; a streaming encoder can write the models block before it knows which segments fall back; the cost is bounded by the 16 MiB limit |
 | Flippable bits (open question 9) | Kept as is | See "Bit-flip probe" for the counts and the options if revisited |
-| Thread count | Tool: all logical cores, `-j` overrides. Library: default 1, 0 means all logical cores | A library should not take every core unasked |
+| Thread count | `max_threads: u8`: an argument of `encode`/`decode`, a setter on `Encoder`/`Decoder` (default 0; std builder shape, room for later options); capped at the logical cores; 0 is all logical cores. Tool: `-j` the same, default 0 | Viktor, 2026-11-21; replaces "library default 1" |
 | Threads | Across segments only, encoder and decoder; nothing inside a segment runs in parallel. The streaming reader decodes up to `threads` segments at once | No `unsafe`, one rule. Costs: 1-thread decode +7 %, demos of 1 segment at `-j 4` up to 0.9 ms (decode) and 1.5 ms (encode) slower; the CLI at `-j 4` on a 16 MB demo decodes 30 % faster. Demos are typically 1 MB or more |
 | No `unsafe` | `unsafe_code = "forbid"`; the rANS table search is one safe loop on every target | Viktor: "unsafe is horrible choice". The safe search costs about 6 % of decode against SSE2 |
 | Compression passes (open question 11) | Pass 1 keeps only counts; pass 2 walks and predicts again | Keeping pass 1's results would save up to about 19 % of 1-thread compression CPU for about twice the peak memory |
@@ -96,8 +99,11 @@ A format simple enough to stay unchanged for 10+ years.
 | Output files (tool) | Written directly with `File::create`, removed when the write fails; no temporary file, no fsync | As gzip and zstd; fsync cost 2.9 ms a file (18 % of a batch decompression). Ceiling: a failed `-f` overwrite loses the old file, a killed process leaves a partial one |
 | Crates | A virtual workspace (`mvdz_rust/Cargo.toml`: members, shared dependency pins, lints, profiles) with the library `mvdz` in `mvdz/` and the tool `mvdz_cli` (binary `mvdz`) in `mvdz_cli/` | Not every user needs a CLI: a library user builds no tool code. Directory names match crate names (rust AGENTS rule) |
 | Library scope | No file writing, no JSON: `mvdz info`'s JSON is built in `mvdz_cli/src/main.rs` | Not the codec's job |
-| Public API | Every module is private. Public: `compress`, `compress_info`, `compress_any` (any bytes, for `--allow-non-demo` and fuzzing), `check_demo`, `decompress`, `decompress_with`, `decompress_stream`, `Reader`, `read_info`, `read_info_with`, `is_mvdz`, `Config`, `Info`, `FileInfo`, `Header`, `Index`, `IndexSeg`, `Limits`, `Error`, `Result`, `VERSION`; `Proto` hidden, for the fuzz generator only. Tests that build files by hand are unit tests in `src/tests/` | What a crate exposes is its contract; the tool keeps its own job loop |
+| Public API | `encode`, `decode`, `Encoder` (`Encoder::new(writer)`, `.max_threads(n)`, implements `io::Write`, buffers the demo; `finish` encodes and writes, since the encoder needs the whole demo), `Decoder` (`Decoder::new(reader)?`, `.max_threads(n)`, implements `io::Read`; bounded memory); the pair as gzip libraries have it, Viktor 2026-11-21, `Decoder::header()` (`Header`, the file header's fields, which all describe the demo: getters only, no format version; as gzip's decoder exposes its header). No `info`: the file size is a file-system call, the segment list waits for part-of-file decoding (task 5), `Error`, `Result`. Everything else is `pub(crate)`. The opt-in feature `fuzz` adds a hidden `fuzz` module (`encode_any`, `check_demo`) for the fuzz targets; the fuzz generator tracks the protocol state itself. Tests that build files by hand are unit tests in `src/tests/` | Information hiding: what a crate exposes is its contract |
+| Memory limit | Fixed: 1 GiB on 64-bit (`Limits::default`); no option, no `--max-memory` | Viktor, 2026-11-21 |
+| Non-demo input | Refused; `--allow-non-demo` and `compress_any` removed | Viktor, 2026-11-21 |
 | Tool exit status | `main` returns `ExitCode` (2 bad command line, 1 a failed file, 0 when standard output closes early); no `process::exit` | Errors return to `main` instead of ending the process where they occur |
+| Names | Spelled out (`SegmentHeader`); protocol constants are qwprot's names with words split by `_` (`U_FTE_MODEL_DBL`), no comments. Stream-id constants (`PI_OX`, ...) stay short | Stream-id constants mirror the stream names in FORMAT.md |
 | Dependencies | Library: `sha2`, `crc32fast`, `miniz_oxide`. No rayon (the scoped-thread `par_map` stays), no `mimalloc`, no built-in profiler | rayon: no gain that repeats, 6 more crates. mimalloc: no gain on glibc, 2-4 times the memory |
 
 ## The format as implemented (version 2)
@@ -233,7 +239,7 @@ No flip ever decodes to a different demo. Flips that decode to the same demo:
 | Region | 20 KB prefix (7,364-byte file) | 237 KB demo (65,619-byte file) | Cause |
 |---|---|---|---|
 | Header SHA-256 | 256 of 256 | 256 of 256 | not checked on decode, by decision |
-| Segment `fte` / `fte2` / `mvd1` | 31 / 32 / 31 of 32 each | same | decoding reads only `FTE_FLOAT`, `FTE_TRANS`, `FTE_COLOURMOD`, `fte != 0` and `MVD1_FLOAT`; `fte2` is never read |
+| Segment `fte` / `fte2` / `mvd1` | 31 / 32 / 31 of 32 each | same | decoding reads only `FTE_PEXT_FLOAT_COORDS`, `FTE_PEXT_TRANS`, `FTE_PEXT_COLOR_MOD`, `fte != 0` and `MVD_PEXT_1_FLOAT_COORDS`; `fte2` is never read |
 | Models block | 572 of 7,040 | 587 of 31,664 | per model: the range coder's first byte (always 0, shifted out unchecked) and a few bits of its flush bytes |
 | Numeric rANS bodies | 32 of 21,624 | 31 of 383,544 | padding after the mantissa bits, not checked to be 0 |
 | DEFLATE blob body | 23 of 19,320 | 69 of 30,880 | final padding and bits the inflater ignores |
@@ -293,54 +299,51 @@ Rule: between commits no test may fail that is not on this list.
 
 Code:
 
-1. Naming: mostly done 2026-11-21 (not committed). Local and file-private names in every
-   file, and the shared types, fields, constants and methods (e.g. `Section`,
-   `SegmentHeader`, `ByteReader`, record types and fields, `Group` variants, protocol
-   flags with underscores, `IS_ENCODE`, range-coder `Encoder`/`Decoder`/`Probability`).
-   Left: the C names as comments on the renamed protocol constants (`proto.rs`); the
-   allow `many_single_char_names` in `Cargo.toml` (check whether it can go); stream-id
-   constants (`PI_OX`, ...) kept on purpose, they mirror the stream names in FORMAT.md.
-2. Truncating casts: 86 in the library under one allow; about 37 are positions
+1. Truncating casts: 86 in the library under one allow; about 37 are positions
    narrowed from `usize` to `u32` (a `u32` walker cursor would remove them; hot loop:
    measure).
-3. The work budget (`Limits::work_per_byte`): with segments at 1 MiB and models at
+2. The work budget (`Limits::work_per_byte`, now internal): with segments at 1 MiB and models at
    16 MiB the work a file can demand is bounded by its size; maybe only the memory limit
    is needed. Check what the hostile-file tests rely on first.
-4. `benches/codec.rs`: which demos (set8 is 18.9 MB; 6 of its 8 are in the download).
-5. Streaming input for the encoder (read the demo twice instead of holding it): peak
+3. `benches/codec.rs`: which demos (set8 is 18.9 MB; 6 of its 8 are in the download).
+4. Streaming input for the encoder (read the demo twice instead of holding it): peak
    drops by the raw size; 250 MB works today at about 410 MiB.
 
 API gaps:
 
-6. Part of a file (a time range, the last segment) cannot be decoded from outside the
-    crate. If wanted: one public function, and each segment's starting protocol state.
-7. `Reader::header` has no test.
-8. No regression test for the `Budget::unlimited()` bug (needs a demo whose models
-    take more than 2^20 decisions to build).
+5. Part of a file (a time range, the last segment) cannot be decoded from outside the
+   crate. If wanted: one public function, and each segment's starting protocol state.
+6. No regression test for the `Budget::unlimited()` bug (needs a demo whose models
+   take more than 2^20 decisions to build).
 
 Format and specification:
 
-9. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
-10. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
-    sharing, attachments, streaming (sections 3, 4, 5.3, 10, 11) and the C interface.
-    State: the 1 MiB segment rule (it still gives 4 GiB and "only the last segment may
-    end inside a frame"); `MAX_SEGMENTS` as a 16 GiB demo limit; section 12 rule 1 as
-    the 1 MiB cut with each piece walked afresh, rule 5 as all tail; encoders refuse
-    input not starting like an MVD; "scan back from the last segment" for demoinfo;
-    a model no segment uses is allowed and ignored.
-    Stale: line 668 (decode waves), line 357 (`FileInfo::to_json`, now `info_json` in
-    `mvdz_cli/src/main.rs`).
-11. README: passages pointing at removed sections and features (CLI options, API
-    examples, the fuzz target list).
-12. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
-13. Later: implementations in C, Go and other languages from the settled
+7. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
+8. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
+   sharing, attachments, streaming (sections 3, 4, 5.3, 10, 11) and the C interface.
+   State: the 1 MiB segment rule (it still gives 4 GiB and "only the last segment may
+   end inside a frame"); `MAX_SEGMENTS` as a 16 GiB demo limit; section 12 rule 1 as
+   the 1 MiB cut with each piece walked afresh, rule 5 as all tail; encoders refuse
+   input not starting like an MVD; "scan back from the last segment" for demoinfo;
+   a model no segment uses is allowed and ignored; the protocol constant names of
+   `proto.rs`.
+   Stale: line 382 (`info` JSON: now the header only: `size_bytes`, `duration_ms`,
+   `crc32`, `sha256`), line 668 (decode waves), line 357 (`FileInfo::to_json`, now `header_json` in
+   `mvdz_cli/src/main.rs`).
+9. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
+   list are current (2026-11-21). Still rc.4: the intro (levels, metadata, attachments,
+   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 10's numbers,
+   mentions `--trusted` and the fast level), the FAQ (metadata, attachments) and the
+   Tests paragraph's `MVDZ_WRITE_VECTORS` note (check after task 7).
+10. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
+11. Later: implementations in C, Go and other languages from the settled
     specification, with a shared test suite.
 
 Not measured:
 
-14. Size of a decoder-only wasm build.
-15. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-16. rayon on the final code (optional).
+12. Size of a decoder-only wasm build.
+13. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
+14. rayon on the final code (optional).
 
 ## Verification
 

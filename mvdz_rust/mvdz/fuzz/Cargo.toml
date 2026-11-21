@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-mvdz = { path = ".." }
+mvdz = { path = "..", features = ["fuzz"] }
 
 [workspace]
 members = ["."]
@@ -17,12 +17,6 @@ members = ["."]
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "read_info"
-path = "fuzz_targets/read_info.rs"
 test = false
 doc = false
 

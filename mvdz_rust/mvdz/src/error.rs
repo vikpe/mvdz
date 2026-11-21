@@ -1,24 +1,16 @@
-//! The library error type.
-
-/// Library error. New variants may be added in minor releases, so a
-/// `match` on it needs a `_` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
     /// Not an MVDZ file, or an unsupported version.
     Format(&'static str),
-    /// The file is damaged or breaks a rule of the format (any checksum,
-    /// structure or limit of FORMAT.md).
+    /// Damaged, or breaks a checksum, structure or limit of FORMAT.md.
     Corrupt(&'static str),
     /// Decoding would exceed the caller's memory or work budget.
     Limit(&'static str),
-    /// A bad argument (seek past the end, ...).
     Invalid(&'static str),
-    /// An I/O error from the underlying reader or writer.
     Io(std::io::ErrorKind),
     /// The encoder could not produce a file that decodes to its input.
     Internal(&'static str),
-    /// The input to compress is not an MVD demo.
     NotMvd(&'static str),
 }
 
@@ -61,7 +53,6 @@ impl From<Error> for std::io::Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Shorthand for a corrupt-file error.
 #[inline]
 pub(crate) fn bad<T>(what: &'static str) -> Result<T> {
     Err(Error::Corrupt(what))

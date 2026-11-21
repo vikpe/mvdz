@@ -4,7 +4,7 @@
 
 use super::common::*;
 use crate::Error;
-use crate::Limits;
+use crate::budget::Limits;
 use crate::format::*;
 use crate::util::put_u32;
 use anyhow::Context as _;
@@ -12,8 +12,7 @@ use pretty_assertions::assert_eq;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
-/// A small demo and its file.
-fn base() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+fn small_demo_and_file() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     let file = compress(&demo)?;
     Ok((demo, file))
@@ -24,10 +23,10 @@ fn base() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
 /// exactly).
 #[test]
 fn r_m2_padded_model() {
-    use crate::coder::rc::{Encoder, IntModel};
+    use crate::coder::rc::{IntModel, RangeEncoder};
     const NQC: usize = 17 * 18;
     let table_count = 65535u32;
-    let mut encoder = Encoder::new();
+    let mut encoder = RangeEncoder::new();
     let mut int_model = IntModel::new(NQC + 8);
     int_model.put(&mut encoder, NQC, 256);
     int_model.put(&mut encoder, NQC + 1, table_count);
@@ -81,7 +80,7 @@ fn r_m2_padded_model() {
     segment.extend_from_slice(&body);
     let file = Parts {
         header: Header {
-            size: u64::from(raw_len),
+            size_bytes: u64::from(raw_len),
             ..Default::default()
         },
         models,
@@ -94,7 +93,7 @@ fn r_m2_padded_model() {
         ..Default::default()
     };
     assert_eq!(
-        crate::decompress_with(&file, 1, &limits).err(),
+        crate::decode::decompress(&file, 1, &limits).err(),
         Some(Error::Corrupt("model"))
     );
     assert!(
@@ -122,7 +121,7 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
         segments: vec![one.segments[0].clone(); segment_count],
     }
     .build();
-    assert_eq!(crate::decompress(&file, 1)?, demo);
+    assert_eq!(decompress(&file, 1)?, demo);
     // the demo is 0.4 MB and a sequential reader holds one segment at a
     // time: only the record kept per segment (64 bytes each, 3.8 MB) can
     // exceed this
@@ -131,12 +130,15 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
         ..Default::default()
     };
     assert_eq!(
-        crate::decompress_with(&file, 1, &limits).err(),
+        crate::decode::decompress(&file, 1, &limits).err(),
         Some(Error::Limit("memory"))
     );
-    let mut reader = crate::Reader::new(Cursor::new(&file), 1, &limits)?;
-    let mut out = Vec::new();
-    assert!(std::io::Read::read_to_end(&mut reader, &mut out).is_err());
+    let mut reader = crate::stream::Decoder::with_limits(Cursor::new(&file), 1, &limits)?;
+    let mut read_all = || -> crate::Result<()> {
+        while reader.read_demo(&mut [0; 4096])? > 0 {}
+        Ok(())
+    };
+    assert_eq!(read_all().err(), Some(Error::Limit("memory")));
     Ok(())
 }
 
@@ -144,27 +146,26 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
 /// another one decodes in every reader; a damaged segment does not.
 #[test]
 fn sha256_is_not_checked_on_decode() -> anyhow::Result<()> {
-    let (demo, file) = base()?;
+    let (demo, file) = small_demo_and_file()?;
     let mut file_parts = parts(&file)?;
     file_parts.header.sha256 = [0xff; 32];
     let other = file_parts.build();
-    let decoded = crate::decompress(&other, 1)?;
+    let decoded = decompress(&other, 1)?;
     assert_eq!(decoded, demo);
-    let mut reader = crate::Reader::new(Cursor::new(&other), 1, &Limits::default())?;
     let mut read = Vec::new();
-    std::io::Read::read_to_end(&mut reader, &mut read)?;
+    std::io::Read::read_to_end(&mut crate::Decoder::new(Cursor::new(&other))?, &mut read)?;
     assert_eq!(read, decoded);
     // one byte of a segment changed: decoding refuses it
     let demo = synthetic(&[], false);
     let file = compress(&[demo, vec![0; 5000]].concat())?;
-    let intact = crate::decompress(&file, 1)?;
+    let intact = decompress(&file, 1)?;
     let mut bad = file;
     let at = (0..bad.len())
         .rev()
         .find(|&at| bad[at] != 0 && at > 200)
         .context("a non-zero byte")?;
     bad[at - 100] ^= 0x40;
-    assert!(crate::decompress(&bad, 1).is_err());
+    assert!(decompress(&bad, 1).is_err());
     assert!(!intact.is_empty());
     Ok(())
 }

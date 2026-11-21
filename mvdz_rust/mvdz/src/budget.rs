@@ -1,25 +1,16 @@
-//! Decoder resource budget.
-//!
-//! The format rules (FORMAT.md, "Limits") already bound every declared
-//! size by the bytes actually present: a decoder's memory and work are
-//! linear in its input. The budget is the caller's cap on top of that: one
-//! memory limit for everything a decode holds at once (output, segment
-//! scratch, models, metadata) and one work limit (model
-//! decisions plus output bytes, per input byte). It is checked before an
-//! allocation is made, and running out is an error, never an abort.
+//! The caller's cap on top of the format limits, which already make a decoder's memory and
+//! work linear in its input. Checked before each allocation; running out is an error.
 
 use crate::error::{Error, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Caller limits on the resources one read may use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Bytes a read may hold at once.
-    pub memory: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub(crate) memory: u64,
     /// Work units (model decisions and output bytes) allowed per input
     /// byte, plus a fixed allowance of 2^20.
-    pub work_per_byte: u64,
+    pub(crate) work_per_byte: u64,
 }
 
 impl Default for Limits {
@@ -36,7 +27,7 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// No limits (the encoder checking its own output).
+    /// For the encoder checking its own output.
     pub(crate) fn unlimited() -> Self {
         Self {
             memory: u64::MAX,
@@ -45,6 +36,7 @@ impl Limits {
     }
 }
 
+#[derive(Debug)]
 struct Inner {
     memory: u64,
     used: AtomicU64,
@@ -53,8 +45,8 @@ struct Inner {
     work: AtomicU64,
 }
 
-/// A shared budget; cheap to clone (all clones draw on the same counters).
-#[derive(Clone)]
+/// All clones draw on the same counters.
+#[derive(Debug, Clone)]
 pub(crate) struct Budget(Arc<Inner>);
 
 impl Budget {
@@ -68,21 +60,18 @@ impl Budget {
         }))
     }
 
-    /// No limits, whatever input is recorded.
     pub(crate) fn unlimited() -> Self {
         let budget = Self::new(&Limits::unlimited());
-        // the work limit is per input byte: without any it would be the
-        // fixed allowance alone
+        // the work limit is per input byte: without input it is the fixed allowance alone
         budget.input(1);
         budget
     }
 
-    /// Records `len` more bytes of input (raises the work limit).
+    /// Raises the work limit.
     pub(crate) fn input(&self, len: u64) {
         self.0.input.fetch_add(len, Ordering::Relaxed);
     }
 
-    /// Reserves `len` bytes until the returned charge is dropped.
     pub(crate) fn alloc(&self, len: u64) -> Result<Charge> {
         self.reserve(len)?;
         Ok(Charge {
@@ -111,7 +100,6 @@ impl Budget {
         }
     }
 
-    /// Accounts `units` of work.
     pub(crate) fn work(&self, units: u64) -> Result<()> {
         let inner = &self.0;
         let limit = inner
@@ -130,21 +118,20 @@ impl Budget {
     }
 }
 
-/// A reservation of budget memory, released on drop.
+/// Released on drop.
+#[derive(Debug)]
 pub(crate) struct Charge {
     budget: Budget,
     len: u64,
 }
 
 impl Charge {
-    /// A charge of nothing.
     pub(crate) fn none(budget: &Budget) -> Self {
         Self {
             budget: budget.clone(),
             len: 0,
         }
     }
-    /// Reserves `len` more bytes under this charge.
     pub(crate) fn grow(&mut self, len: u64) -> Result<()> {
         self.budget.reserve(len)?;
         self.len += len;
@@ -158,7 +145,7 @@ impl Drop for Charge {
     }
 }
 
-/// A zeroed buffer of `len` bytes; allocation failure is an error.
+/// Allocation failure is an error.
 pub(crate) fn zeroed(len: usize) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     buffer
@@ -168,8 +155,7 @@ pub(crate) fn zeroed(len: usize) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// An empty buffer with room for `capacity` bytes; allocation failure is an
-/// error.
+/// Allocation failure is an error.
 pub(crate) fn with_capacity<T>(capacity: usize) -> Result<Vec<T>> {
     let mut buffer = Vec::new();
     buffer

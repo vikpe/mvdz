@@ -1,20 +1,14 @@
-//! Tier F: two-pass static rANS with per-context frequency tables.
+//! Static rANS with per-context frequency tables.
 //!
-//! * Symbols: bytes for structural streams (context = the walker's context,
-//!   which fits in 16 bits, the table key), or the sign/bit-length bucket of
-//!   a residual for numeric streams (context from [`numeric_context`]); numeric
-//!   mantissa bits go raw into a separate bit stream (pcodec-style bins +
-//!   offsets).
-//! * Tables: the encoder counts symbols per context and gives a context its
-//!   own table only where that beats the shared fallback table by more than
-//!   the table's cost. Counts are sent log-quantised (two steps per octave)
-//!   with an adaptive binary coder and normalised to 2^SCALE identically on
-//!   both sides (integer arithmetic only).
-//! * Coder: 32-bit rANS, 16-bit renormalisation, interleaved states (after
-//!   Giesen, "Interleaved entropy coders", 2014; written fresh).
-//!   Single-symbol tables cost nothing and are skipped.
+//! * Symbols: bytes for structural streams (16-bit context), or the sign/bit-length bucket
+//!   of a numeric residual; its mantissa bits go raw into a bit stream (pcodec-style).
+//! * Tables: a context gets its own table only where that beats the fallback table by more
+//!   than the table's cost. Counts are sent log-quantized and normalized to 2^SCALE with
+//!   integer arithmetic only, so both sides agree.
+//! * Coder: 32-bit rANS, 16-bit renormalization, interleaved states (after Giesen,
+//!   "Interleaved entropy coders", 2014; written fresh). Single-symbol tables cost nothing.
 
-use super::rc::{Decoder as RangeDecoder, Encoder as RangeEncoder, IntModel};
+use super::rc::{IntModel, RangeDecoder, RangeEncoder};
 use crate::budget::{Budget, Charge, with_capacity};
 use crate::error::{Error, Result};
 use crate::numeric::NumericContext;
@@ -27,14 +21,13 @@ const FREQ_TOTAL: u32 = 1 << SCALE;
 const STATE_MIN: u32 = 1 << 16;
 const STATE_COUNT: usize = 4;
 
-/// Steps per octave of the log-quantised counts.
+/// Per octave of the log-quantized counts.
 const STEPS: u32 = 2;
-/// 2^(k/2) in 16.16 fixed point, k = 0, 1.
-const STEP_POWERS: [u64; STEPS as usize] = [65536, 92682];
-
-/// Reconstructed weight (16.16 fixed point) of a log-quantised count.
+/// 16.16 fixed point.
 #[inline]
 fn quantized_weight(quantized: u32) -> u64 {
+    /// 2^(k/2) in 16.16 fixed point, k = 0, 1.
+    const STEP_POWERS: [u64; STEPS as usize] = [65536, 92682];
     if quantized == 0 {
         return 0;
     }
@@ -48,8 +41,7 @@ fn quantized_weight(quantized: u32) -> u64 {
     }
 }
 
-/// Log-quantised count: the quantized count whose weight is nearest to
-/// `count` in ratio.
+/// The quantized count whose weight is nearest to `count` in ratio.
 fn quantize(count: u32) -> u32 {
     if count == 0 {
         return 0;
@@ -76,8 +68,7 @@ fn quantize(count: u32) -> u32 {
     }
 }
 
-/// Normalises weights to a total of exactly `FREQ_TOTAL`, every present
-/// symbol >= 1.
+/// To a total of exactly `FREQ_TOTAL`, every present symbol >= 1.
 fn normalize(weights: &[u64]) -> Vec<u32> {
     let total: u128 = weights.iter().map(|&weight| u128::from(weight)).sum();
     let mut freqs = vec![0u32; weights.len()];
@@ -117,7 +108,7 @@ fn normalize(weights: &[u64]) -> Vec<u32> {
     freqs
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Table {
     quantized: Vec<u32>,
     freq: Vec<u32>,
@@ -183,6 +174,7 @@ fn cross_bits(counts: &[u32], reference: &[u32]) -> f64 {
     bits
 }
 
+#[derive(Debug)]
 struct Model {
     alphabet_size: usize,
     /// Own contexts, ascending: `own[i]` codes with `tables[i + 1]`.
@@ -191,7 +183,7 @@ struct Model {
     tables: Vec<Table>,
 }
 
-/// A stream's counts and the contexts that get their own table.
+#[derive(Debug)]
 struct Counts {
     alphabet_size: usize,
     own: Vec<u32>,
@@ -199,8 +191,8 @@ struct Counts {
     rest: Vec<u32>,
 }
 
-/// Per-context symbol counts of a stream, summed over any number of symbol
-/// lists (the segments of a file, for its shared model).
+/// Per-context symbol counts of a stream, summed over the segments of a file.
+#[derive(Debug)]
 pub(crate) struct Tally {
     alphabet_size: usize,
     row_of: Vec<u32>,
@@ -220,13 +212,10 @@ impl Tally {
         }
     }
 
-    /// Counts the symbols `symbols` of a stream, each with its context in
-    /// `contexts`.
     pub(crate) fn add(&mut self, symbols: &[u8], contexts: &[u16]) {
         let alphabet_size = self.alphabet_size;
         let max_context = contexts.iter().copied().max().unwrap_or(0) as usize;
-        // row_of, is_own and the model's map are dense arrays sized by the
-        // largest context; contexts are 16-bit by spec (§6.12).
+        // dense arrays sized by the largest context: contexts are 16-bit by spec
         if self.row_of.len() <= max_context {
             self.row_of.resize(max_context + 1, u32::MAX);
         }
@@ -253,17 +242,15 @@ impl Tally {
         }
     }
 
-    /// The model of these counts (a stream's in every segment of a file).
-    /// A model whose header breaks the decision limit (rule M2) is made
-    /// smaller until it holds: the own contexts with the fewest symbols
-    /// join the fallback, an eighth of them at a time. None if even the
-    /// fallback table alone breaks the limit.
-    pub(crate) fn shared(&self) -> Option<Shared> {
+    /// A header over the decision limit (rule M2) is made smaller until it holds: the own
+    /// contexts with the fewest symbols join the fallback, an eighth at a time. `None` if
+    /// the fallback alone breaks the limit.
+    pub(crate) fn file_model(&self) -> Option<FileModel> {
         let mut counts = select(self);
         loop {
             let model = build_model(&counts);
-            if let Some(header) = header_within_limit(&model) {
-                return Some(Shared { model, header });
+            if let Some(bytes) = header_within_limit(&model) {
+                return Some(FileModel { model, bytes });
             }
             if counts.own.is_empty() {
                 return None;
@@ -274,8 +261,7 @@ impl Tally {
 }
 
 impl Counts {
-    /// Moves the `count` own contexts with the fewest symbols (ties: the
-    /// highest context first) into the fallback's counts.
+    /// Ties: the highest context first.
     fn fold_smallest(&mut self, count: usize) {
         let alphabet_size = self.alphabet_size;
         let row = |index: usize| &self.own_rows[index * alphabet_size..(index + 1) * alphabet_size];
@@ -310,8 +296,6 @@ impl Counts {
     }
 }
 
-/// The tables of a model of these counts: own contexts and the fallback's
-/// counts.
 fn select(tally: &Tally) -> Counts {
     const TABLE_BITS_BASE: f64 = 16.0;
     const TABLE_BITS_PER_SYM: f64 = 5.0;
@@ -442,7 +426,7 @@ fn read_table(
     table
 }
 
-/// The serialized model header and the binary decisions it takes.
+/// The header and the binary decisions it takes.
 fn write_model(model: &Model) -> (Vec<u8>, u64) {
     let mut encoder = RangeEncoder::new();
     let mut int_model = IntModel::new(QUANTIZED_CONTEXTS + 8);
@@ -477,24 +461,23 @@ fn write_model(model: &Model) -> (Vec<u8>, u64) {
     (encoder.finish(), decisions)
 }
 
-/// Tables with at most this many symbols are decoded by searching their
-/// cumulative frequencies (2 bytes per symbol); wider ones use a slot LUT.
+/// Wider tables decode with a slot LUT instead of a search.
 const SEARCH_MAX: usize = 64;
 
-// Context-map entries: an offset into `pool` (search table), or a LUT
-// offset with ENTRY_LUT, or a single symbol with ENTRY_SINGLE, or empty.
+// Context-map entry: a `pool` offset (search table), or with these flags a LUT offset, a
+// single symbol, or empty.
 const ENTRY_SINGLE: u32 = 1 << 31;
 const ENTRY_LUT: u32 = 1 << 30;
 const ENTRY_EMPTY: u32 = ENTRY_SINGLE | ENTRY_LUT;
 
-/// Format limit on the binary decisions a model header may take:
-/// `DECISIONS_PER_BYTE * header length + DECISIONS_BASE` (FORMAT.md, rule M2).
+/// Rule M2: a model header takes at most `DECISIONS_PER_BYTE * len + DECISIONS_BASE`
+/// binary decisions.
 pub(crate) const DECISIONS_PER_BYTE: u64 = 128;
 pub(crate) const DECISIONS_BASE: u64 = 1024;
 
-/// Decoder-side model. A search table at pool offset o is
-/// `[0, c1, .., cn = FREQ_TOTAL, pad..]` (16*chunks + 1 entries) followed by
-/// its 16*chunks symbols, so one table is one or two cache lines.
+/// A search table in `pool` is `[0, c1, .., cn = FREQ_TOTAL, pad..]` (16*chunks + 1
+/// entries), then its 16*chunks symbols: one or two cache lines.
+#[derive(Debug)]
 pub(crate) struct DecoderModel {
     map: Vec<u32>,
     fallback: u32,
@@ -504,8 +487,6 @@ pub(crate) struct DecoderModel {
     _charge: Option<Charge>,
 }
 
-/// Number of entries of `table[..16 * chunks]` that are <= `slot` (below
-/// `FREQ_TOTAL`).
 /// ponytail: about 6 % slower decode than the SSE2 search it replaced, which needs
 /// `unsafe`; `std::simd` once stable.
 #[inline(always)]
@@ -521,13 +502,15 @@ fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
     counts.iter().map(|&count| usize::from(count)).sum()
 }
 
-/// A model header's own tables' contexts and quantized counts of every
-/// table (the fallback first), and their budget charge.
-type Header = (Vec<u32>, Vec<u8>, Charge);
+/// Own contexts, quantized counts of every table (the fallback first), budget charge.
+type ModelHeader = (Vec<u32>, Vec<u8>, Charge);
 
-/// Reads a model header (FORMAT.md, "Model header").
-/// `required_alphabet_size` is the alphabet the stream kind requires.
-fn read_header(header: &[u8], required_alphabet_size: usize, budget: &Budget) -> Result<Header> {
+/// FORMAT.md, "Model header".
+fn read_model_header(
+    header: &[u8],
+    required_alphabet_size: usize,
+    budget: &Budget,
+) -> Result<ModelHeader> {
     let corrupt = Error::Corrupt("model");
     let max_decisions = (header.len() as u64)
         .saturating_mul(DECISIONS_PER_BYTE)
@@ -539,7 +522,7 @@ fn read_header(header: &[u8], required_alphabet_size: usize, budget: &Budget) ->
     if alphabet_size != required_alphabet_size || own_count > 65535 {
         return Err(corrupt);
     }
-    // the log-quantised tables (u8: quantized <= 160) until the layout is known
+    // the quantized tables (u8: quantized <= 160) until the layout is known
     let charge = budget.alloc(((own_count + 1) * alphabet_size + 4 * (own_count + 1)) as u64)?;
     let mut quantized_tables: Vec<u8> = with_capacity((own_count + 1) * alphabet_size)?;
     let mut keys: Vec<u32> = with_capacity(own_count)?;
@@ -565,8 +548,7 @@ fn read_header(header: &[u8], required_alphabet_size: usize, budget: &Budget) ->
             return Err(corrupt);
         }
     }
-    // the header is consumed exactly: the decoder reads one byte per
-    // byte the encoder wrote (5 at the start, then one per renormalisation)
+    // consumed exactly: one byte per byte written (5 at the start, then one per renormalization)
     if decoder.pos() != header.len() || decoder.decisions > max_decisions {
         return Err(corrupt);
     }
@@ -574,19 +556,16 @@ fn read_header(header: &[u8], required_alphabet_size: usize, budget: &Budget) ->
     Ok((keys, quantized_tables, charge))
 }
 
-/// Reads a model header and builds its decoder model.
 pub(crate) fn read_model(
     header: &[u8],
     alphabet_size: usize,
     budget: &Budget,
 ) -> Result<DecoderModel> {
-    let (keys, quantized_tables, _charge) = read_header(header, alphabet_size, budget)?;
-    // a symbol is present (frequency >= 1) exactly when its quantized count
-    // is non-zero (`normalize`), so the layout is known before any table is
-    // built; the tables are then built one at a time
+    let (keys, quantized_tables, _charge) = read_model_header(header, alphabet_size, budget)?;
+    // present (frequency >= 1) exactly when the quantized count is non-zero (`normalize`):
+    // the layout is known before any table is built
     let present = |quantized: &[u8]| quantized.iter().filter(|&&count| count > 0).count();
-    // one chunk count for every search table of the model: a fixed trip
-    // count keeps the search loop free of mispredicted exits
+    // one chunk count for every search table: a fixed trip count avoids mispredicted exits
     let chunks = quantized_tables
         .chunks(alphabet_size)
         .map(present)
@@ -686,7 +665,7 @@ impl DecoderModel {
             self.fallback
         }
     }
-    /// Decodes one symbol for map entry `entry`; `None` for an empty table.
+    /// `None` for an empty table.
     #[inline(always)]
     fn decode(&self, decoder: &mut RansDecoder, entry: u32) -> Option<u32> {
         if entry & ENTRY_SINGLE != 0 {
@@ -707,8 +686,7 @@ impl DecoderModel {
             let index = count_le(&table[1..], self.chunks, slot);
             let lo = u32::from(table[index]);
             let hi = u32::from(table[index + 1]);
-            // wrapping: an initial state from a hostile file may overflow
-            // (the result is then garbage that the stream's checks refuse)
+            // wrapping: a hostile initial state may overflow; the stream checks refuse the result
             (
                 u32::from(table[width + 1 + index]),
                 (hi - lo)
@@ -734,6 +712,7 @@ impl DecoderModel {
 
 // --------------------------------------------------------------- rANS core
 
+#[derive(Debug)]
 struct RansEncoder {
     states: [u32; STATE_COUNT],
     words: Vec<u16>,
@@ -771,6 +750,7 @@ impl RansEncoder {
     }
 }
 
+#[derive(Debug)]
 struct RansDecoder<'a> {
     states: [u32; STATE_COUNT],
     input: &'a [u8],
@@ -803,7 +783,7 @@ impl<'a> RansDecoder<'a> {
         self.pos += 2;
         word
     }
-    /// The decoder of an absent stream (no symbol can be decoded).
+    /// No symbol can be decoded.
     fn finished_empty() -> RansDecoder<'static> {
         RansDecoder {
             states: [STATE_MIN; STATE_COUNT],
@@ -847,8 +827,7 @@ fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Vec<u8> {
     encoder.finish()
 }
 
-/// Appends `rans_len u32 | rans | extra`: a stream body after its model
-/// header.
+/// `rans_len u32 | rans | extra`
 fn put_body(out: &mut Vec<u8>, model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) {
     let body = rans_encode(model, symbols, contexts);
     out.reserve(body.len() + extra.len() + 4);
@@ -857,20 +836,20 @@ fn put_body(out: &mut Vec<u8>, model: &Model, symbols: &[u8], contexts: &[u16], 
     out.extend_from_slice(extra);
 }
 
-/// A back end 3 stream body: no model header.
 fn pack_body(model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     put_body(&mut out, model, symbols, contexts, extra);
     out
 }
 
-/// The model header, or None if it breaks the decision limit (rule M2).
+/// `None` if it breaks the decision limit (rule M2).
 fn header_within_limit(model: &Model) -> Option<Vec<u8>> {
     let (header, decisions) = write_model(model);
     (decisions <= (header.len() as u64) * DECISIONS_PER_BYTE + DECISIONS_BASE).then_some(header)
 }
 
 /// A stream body: `rans_len u32 | rans | extra`.
+#[derive(Debug)]
 struct Unpacked<'a> {
     rans: &'a [u8],
     extra: &'a [u8],
@@ -878,7 +857,9 @@ struct Unpacked<'a> {
 
 fn unpack(body: &[u8]) -> Result<Unpacked<'_>> {
     let mut reader = ByteReader::new(body);
-    let rans = reader.bytes().ok_or(Error::Corrupt("rans stream"))?;
+    let rans = reader
+        .length_prefixed()
+        .ok_or(Error::Corrupt("rans stream"))?;
     Ok(Unpacked {
         rans,
         extra: reader.rest(),
@@ -887,36 +868,31 @@ fn unpack(body: &[u8]) -> Result<Unpacked<'_>> {
 
 // --------------------------------------------------------------- file models
 
-/// A model built from one stream's symbols in every segment of a file
-/// ([`Tally::shared`]): its TABLES entry (FORMAT.md §2.6), used by back
-/// end 3.
-pub(crate) struct Shared {
+/// A stream's model in the models block, built from all its segments.
+#[derive(Debug)]
+pub(crate) struct FileModel {
     model: Model,
-    /// the model header
-    pub(crate) header: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
 }
 
-/// The decoder models of a file, by stream id.
+/// By stream id.
 pub(crate) type Models = Vec<Option<Arc<DecoderModel>>>;
 
-/// The models of a file (FORMAT.md §2.6): the models block is read once,
-/// when the file is opened; that checks it and builds its models.
-pub(crate) struct FileTables {
+/// The models block, read and checked once when the file is opened.
+#[derive(Debug)]
+pub(crate) struct ModelsBlock {
     len: u64,
     models: Models,
 }
 
-impl FileTables {
-    /// Reads a models block's body: checks it and builds its models
-    /// (charged to `budget`) on up to `threads` threads.
+impl ModelsBlock {
     pub(crate) fn new(body: &[u8], threads: usize, budget: &Budget) -> Result<Self> {
         Ok(Self {
             len: body.len() as u64,
-            models: read_tables(body, threads, budget)?,
+            models: read_models_block(body, threads, budget)?,
         })
     }
 
-    /// The length of the body the models were read from.
     pub(crate) fn len(&self) -> u64 {
         self.len
     }
@@ -926,17 +902,15 @@ impl FileTables {
     }
 }
 
-/// Reads `n u32 | n x { sid u32 | len u32 | model }`: ids strictly increasing,
-/// each model a structural or numeric stream's (§8.3, M1 without a count).
-/// The models do not depend on each other: they are built in parallel.
-fn read_tables(body: &[u8], threads: usize, budget: &Budget) -> Result<Models> {
+/// `n u32 | n x { id u32 | len u32 | model }`, ids strictly increasing. The models are
+/// independent, so they are built in parallel.
+fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Models> {
     let corrupt = Error::Corrupt("tables");
     let mut reader = ByteReader::new(body);
     let count = reader.u32_len().ok_or(corrupt)?;
     if count == 0 {
         return Err(corrupt);
     }
-    // (stream id, alphabet, model header)
     let mut entries: Vec<(usize, usize, &[u8])> = Vec::new();
     for _ in 0..count {
         let stream = reader.u32_len().ok_or(corrupt)?;
@@ -950,7 +924,11 @@ fn read_tables(body: &[u8], threads: usize, budget: &Budget) -> Result<Models> {
         } else {
             return Err(corrupt);
         };
-        entries.push((stream, alphabet_size, reader.bytes().ok_or(corrupt)?));
+        entries.push((
+            stream,
+            alphabet_size,
+            reader.length_prefixed().ok_or(corrupt)?,
+        ));
     }
     if !reader.is_done() {
         return Err(corrupt);
@@ -972,11 +950,11 @@ fn byte_context(context: u32) -> u32 {
     context & 0xffff
 }
 
-/// A structural stream coded with its model in the file, `file`.
-pub(crate) fn encode_bytes(symbols: &[u8], contexts: &[u16], file: &Shared) -> Vec<u8> {
-    pack_body(&file.model, symbols, contexts, &[])
+pub(crate) fn encode_bytes(symbols: &[u8], contexts: &[u16], file_model: &FileModel) -> Vec<u8> {
+    pack_body(&file_model.model, symbols, contexts, &[])
 }
 
+#[derive(Debug)]
 pub(crate) struct ByteDecoder<'a> {
     model: Arc<DecoderModel>,
     decoder: RansDecoder<'a>,
@@ -993,14 +971,17 @@ impl<'a> ByteDecoder<'a> {
             used: 0,
         }
     }
-    /// `file`: the stream's model in the file.
-    pub(crate) fn new(body: &'a [u8], count: usize, file: &Arc<DecoderModel>) -> Result<Self> {
+    pub(crate) fn new(
+        body: &'a [u8],
+        count: usize,
+        file_model: &Arc<DecoderModel>,
+    ) -> Result<Self> {
         let unpacked = unpack(body)?;
         if !unpacked.extra.is_empty() {
             return Err(Error::Corrupt("rans stream"));
         }
         Ok(ByteDecoder {
-            model: file.clone(),
+            model: file_model.clone(),
             decoder: RansDecoder::new(unpacked.rans),
             count,
             used: 0,
@@ -1014,7 +995,6 @@ impl<'a> ByteDecoder<'a> {
             .decode(&mut self.decoder, entry)
             .map(|symbol| symbol as u8)
     }
-    /// Exactly the declared count read and the coded data consumed.
     pub(crate) fn is_done(&self) -> bool {
         self.used == self.count && self.decoder.is_finished()
     }
@@ -1024,7 +1004,6 @@ impl<'a> ByteDecoder<'a> {
 
 pub(crate) const NUMERIC_ALPHABET: usize = 65;
 
-/// Static-table context of a numeric value, per stream.
 #[inline(always)]
 pub(crate) fn numeric_context(stream: usize, context: &NumericContext) -> u32 {
     let features = &context.features;
@@ -1063,7 +1042,7 @@ fn bucket(value: i32) -> (u16, u32, u32) {
     )
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct BitWriter {
     accumulator: u64,
     bit_count: u32,
@@ -1089,13 +1068,13 @@ impl BitWriter {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct BitReader<'a> {
     input: &'a [u8],
     pos: usize,
     accumulator: u64,
     bit_count: u32,
-    /// bits handed out so far
-    used: u64,
+    bits_used: u64,
 }
 
 impl<'a> BitReader<'a> {
@@ -1105,7 +1084,7 @@ impl<'a> BitReader<'a> {
             pos: 0,
             accumulator: 0,
             bit_count: 0,
-            used: 0,
+            bits_used: 0,
         }
     }
     #[inline(always)]
@@ -1125,8 +1104,7 @@ impl<'a> BitReader<'a> {
             }
         }
     }
-    /// `bit_count` bits (at most 31), least significant first; zeros past
-    /// the end.
+    /// At most 31 bits, least significant first; zeros past the end.
     #[inline(always)]
     pub(crate) fn get(&mut self, bit_count: u32) -> u32 {
         if self.bit_count < bit_count {
@@ -1135,24 +1113,24 @@ impl<'a> BitReader<'a> {
         let value = (self.accumulator & ((1u64 << bit_count) - 1)) as u32;
         self.accumulator >>= bit_count;
         self.bit_count -= bit_count;
-        self.used += u64::from(bit_count);
+        self.bits_used += u64::from(bit_count);
         value
     }
-    /// The bits read end within the last byte (at most 7 padding bits).
+    /// At most 7 padding bits.
     pub(crate) fn is_finished(&self) -> bool {
-        self.used.div_ceil(8) == self.input.len() as u64
+        self.bits_used.div_ceil(8) == self.input.len() as u64
     }
 }
 
-/// The values of a numeric stream as they are coded: the bucket of each
-/// value (its symbol), its context, and the mantissa bits of all of them.
+/// `symbols`: the bucket of each value; `extra`: the mantissa bits of all of them.
+#[derive(Debug)]
 pub(crate) struct NumericSymbols {
     pub(crate) symbols: Vec<u8>,
     pub(crate) contexts: Vec<u16>,
     pub(crate) extra: Vec<u8>,
 }
 
-/// Collects the values of numeric stream `stream` as [`NumericSymbols`].
+#[derive(Debug)]
 pub(crate) struct NumericSymbolWriter {
     stream: usize,
     symbols: Vec<u8>,
@@ -1191,11 +1169,11 @@ impl NumericSymbolWriter {
     }
 }
 
-/// A numeric stream coded with its model in the file, `file`.
-pub(crate) fn encode_num(num: &NumericSymbols, file: &Shared) -> Vec<u8> {
-    pack_body(&file.model, &num.symbols, &num.contexts, &num.extra)
+pub(crate) fn encode_num(num: &NumericSymbols, file_model: &FileModel) -> Vec<u8> {
+    pack_body(&file_model.model, &num.symbols, &num.contexts, &num.extra)
 }
 
+#[derive(Debug)]
 pub(crate) struct NumericDecoder<'a> {
     stream: usize,
     model: Arc<DecoderModel>,
@@ -1216,17 +1194,16 @@ impl<'a> NumericDecoder<'a> {
             used: 0,
         }
     }
-    /// `file`: the stream's model in the file.
     pub(crate) fn new(
         stream: usize,
         body: &'a [u8],
         count: usize,
-        file: &Arc<DecoderModel>,
+        file_model: &Arc<DecoderModel>,
     ) -> Result<Self> {
         let unpacked = unpack(body)?;
         Ok(NumericDecoder {
             stream,
-            model: file.clone(),
+            model: file_model.clone(),
             decoder: RansDecoder::new(unpacked.rans),
             bits: BitReader::new(unpacked.extra),
             count,
@@ -1252,7 +1229,6 @@ impl<'a> NumericDecoder<'a> {
             magnitude
         })
     }
-    /// Exactly the declared count read and every byte consumed.
     pub(crate) fn is_done(&self) -> bool {
         self.used == self.count && self.decoder.is_finished() && self.bits.is_finished()
     }
@@ -1269,12 +1245,12 @@ mod tests {
         symbols: &[u8],
         contexts: &[u16],
         alphabet_size: usize,
-    ) -> anyhow::Result<(Shared, Arc<DecoderModel>)> {
+    ) -> anyhow::Result<(FileModel, Arc<DecoderModel>)> {
         let mut tally = Tally::new(alphabet_size);
         tally.add(symbols, contexts);
-        let shared = tally.shared().context("a model")?;
-        let model = read_model(&shared.header, alphabet_size, &Budget::unlimited())?;
-        Ok((shared, Arc::new(model)))
+        let file_model = tally.file_model().context("a model")?;
+        let model = read_model(&file_model.bytes, alphabet_size, &Budget::unlimited())?;
+        Ok((file_model, Arc::new(model)))
     }
 
     #[test]
@@ -1304,15 +1280,15 @@ mod tests {
                 ][(index % 3) as usize]
             })
             .collect();
-        let (shared, model) = models(&symbols, &contexts, 256)?;
-        let body = encode_bytes(&symbols, &contexts, &shared);
+        let (file_model, model) = models(&symbols, &contexts, 256)?;
+        let body = encode_bytes(&symbols, &contexts, &file_model);
         let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
         for (index, &symbol) in symbols.iter().enumerate() {
             assert_eq!(decoder.get(u32::from(contexts[index])), Some(symbol));
         }
         assert!(decoder.is_done());
         // the model of a byte stream is refused as a numeric stream's
-        assert!(read_model(&shared.header, NUMERIC_ALPHABET, &Budget::unlimited()).is_err());
+        assert!(read_model(&file_model.bytes, NUMERIC_ALPHABET, &Budget::unlimited()).is_err());
         // a body cut short is refused; a symbol short does not finish
         assert!(ByteDecoder::new(&body[..body.len() - 2], symbols.len(), &model).is_err());
         let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
@@ -1341,9 +1317,9 @@ mod tests {
             header_within_limit(&full).is_none(),
             "the full model breaks rule M2"
         );
-        let (shared, model) = models(&symbols, &contexts, 256)?;
-        assert!(shared.model.own.len() < full.own.len());
-        let body = encode_bytes(&symbols, &contexts, &shared);
+        let (file_model, model) = models(&symbols, &contexts, 256)?;
+        assert!(file_model.model.own.len() < full.own.len());
+        let body = encode_bytes(&symbols, &contexts, &file_model);
         let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
         for (index, &symbol) in symbols.iter().enumerate() {
             assert_eq!(decoder.get(u32::from(contexts[index])), Some(symbol));
@@ -1369,8 +1345,8 @@ mod tests {
             writer.push(*context, *value);
         }
         let num = writer.finish();
-        let (shared, model) = models(&num.symbols, &num.contexts, NUMERIC_ALPHABET)?;
-        let body = encode_num(&num, &shared);
+        let (file_model, model) = models(&num.symbols, &num.contexts, NUMERIC_ALPHABET)?;
+        let body = encode_num(&num, &file_model);
         let mut decoder = NumericDecoder::new(PI_OX, &body, values.len(), &model)?;
         for &(context, value) in &values {
             assert_eq!(decoder.get(context), Some(value));

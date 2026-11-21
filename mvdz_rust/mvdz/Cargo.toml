@@ -12,6 +12,10 @@ keywords = ["quakeworld", "mvd", "demo", "compression", "rans"]
 categories = ["compression", "game-development"]
 exclude = ["/fuzz"]
 
+[features]
+# hidden entry points for the fuzz targets (fuzz/)
+fuzz = []
+
 [dependencies]
 sha2 = { workspace = true }
 crc32fast = { workspace = true }

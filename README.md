@@ -65,39 +65,16 @@ build (musl's allocator).
 ## Quickstart
 
 ```
-mvdz compress game.mvd                       # -> game.mvdz (normal level, one segment)
+mvdz compress game.mvd                       # -> game.mvdz
 mvdz compress *.mvd                          # every file, several at once
 gzip -dc game.mvd.gz | mvdz compress - game.mvdz   # from a .mvd.gz
-mvdz compress --fast -s 1M game.mvd          # faster both ways, seekable segments
 mvdz decompress game.mvdz                    # -> game.mvd
-mvdz info game.mvdz | jq .sha256             # metadata, without decoding
+mvdz info game.mvdz | jq .sha256             # the header, without decoding
 ```
 
-### Segments: one, or `-s 1M`
-
-A file holds the demo in one or more independently decodable segments.
-
-* **One segment** (the default of `mvdz compress` and of the one-shot
-  library and C calls): the smallest file. It cannot seek, and a reader
-  gets no demo bytes until the whole demo has been decoded. Right for
-  archives and downloads that are decompressed whole.
-* **`-s 1M`** (about 1 MiB of raw demo per segment): about 1 % larger at
-  the normal level, 2 % at the fast level ([BENCHMARKS.md](BENCHMARKS.md));
-  at the normal level the segments share one set of rANS models, stored
-  once in the file. A reader can seek by demo time to the start of any
-  segment, delivers the first bytes after one segment has decoded, and
-  can decode segments in parallel. Use it for files that will be played,
-  streamed or seeked into.
-
-The streaming writer (Rust `Writer`, C `mvdz_writer_*`), which records a
-demo as it grows, always cuts segments, because it writes each one as it
-fills: its default is 1 MiB. So the two defaults differ on purpose, each
-the best choice for its use: one-shot compression of a finished demo
-optimises size, a recording must cut. Pass a segment size explicitly to
-either to get the other behaviour. A recorded file keeps a model in every
-segment (it cannot know the whole demo's models before its first
-segment), so at the normal level it is about 3 to 5 % larger than
-`mvdz compress -s 1M` of the finished demo.
+A file holds the demo in segments of about 256 KiB of raw demo, each
+decodable on its own: a reader gets demo bytes after the first segment, and
+segments decode in parallel.
 
 ## Ratios and speeds
 
@@ -140,52 +117,31 @@ settings and what they give up are in
 ## Command line
 
 ```
-mvdz compress   [--fast] [-s size] [-j threads] [--ext key=value]... [--allow-non-demo]
-                [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
-mvdz decompress [-j threads] [--max-memory size] [--trusted]
-                [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
-mvdz info       file.mvdz...                 metadata, index, attachments as JSON
-mvdz census     [--tsv] files-or-dirs...     census of .mvdz / .mvd / .mvd.gz files
-mvdz attach add file.mvdz name path [--mime type] [--meta key=value]...
-mvdz attach ls  file.mvdz [name-prefix]
-mvdz attach extract file.mvdz name out
-mvdz attach rm  file.mvdz name...
-mvdz attach export in.mvdz out.mvdz [--keep name]... [--keep-prefix p]... [--drop name]... [--drop-prefix p]...
+mvdz compress   [-j threads] [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
+mvdz decompress [-j threads] [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
+mvdz info       file.mvdz...                 header as JSON
 ```
 
 `compress` and `decompress` work like zstd: each output is named after its
 input and written beside it (`game.mvd` gives `game.mvdz`; `game.mvdz`
-gives `game.mvd`). Inputs are
-kept; `--rm` deletes each one after its output is written. An existing
-output is not overwritten without `-f`. With several files, `-j` of them
-run at once (one thread each), a file that fails is reported and the rest
-go on, and the exit status is 1 if any failed. Two names where the second
-is an output (for `compress` a `*.mvdz` or `-`, for `decompress` anything
-but `*.mvdz`) are an input and its output, and `-o` names the output of a
-single input. `-` is standard input or output (`mvdz decompress game.mvdz
-- | ...`). Sizes take K, M, G suffixes (binary). `-s 1M` cuts the demo into
-independently decodable segments: seek points and parallel decoding, at a
-small cost in size; the default is one segment (a file holds at most 65536
-segments). Compression decodes its own output and compares before writing
-anything. `--trusted` skips the SHA-256 identity check (see above); use it
-only for files whose identity you verified before. `attach add` stores the
-file as given; `--mime` defaults to `application/octet-stream`; `--meta`
-adds a key/value, whose key needs a prefix (`x-...` or `vendor.`):
-unprefixed keys are reserved for future versions (FORMAT.md §10.1).
-`attach export` writes a copy that keeps the attachments matching a
-`--keep` name or `--keep-prefix` (all, if none is given) and no `--drop`
-name or `--drop-prefix`, e.g. a demo download without large recordings;
-the source is not changed, and the output's bundle hash goes to standard
-error. `info` prints the JSON described in FORMAT.md §3.2, including
-`bundle_sha256` (§10.2).
+gives `game.mvd`). Inputs are kept; `--rm` deletes each one after its
+output is written. An existing output is not overwritten without `-f`.
+`-j` is 0 to 255, at most the logical cores; 0 (the default) is all of them. With several files, `-j` of them run
+at once (one thread each), a file that fails is reported and the rest go
+on, and the exit status is 1 if any failed; one file uses `-j` threads.
+Two names where the second is an output (for `compress` a `*.mvdz` or `-`,
+for `decompress` anything but `*.mvdz`) are an input and its output, and
+`-o` names the output of a single input. `-` is standard input or output
+(`mvdz decompress game.mvdz - | ...`). Compression has no settings, and it
+decodes its own output and compares before writing anything. `info` prints
+the header as one JSON object per file: `size_bytes`, `duration_ms`,
+`crc32` and `sha256`; the checksums are what the file claims, not verified.
 
 ```
 mvdz compress game.mvd
-mvdz compress --fast -s 1M -o game.fast.mvdz game.mvd
+mvdz compress -o game.mvdz - < game.mvd
 mvdz decompress demos/*.mvdz
-mvdz info game.mvdz | jq .map
-mvdz attach add game.mvdz analysis/result.json result.json --mime application/json --meta x-tool=mvda
-mvdz attach export game.mvdz - --drop-prefix rec/ > download.mvdz
+mvdz info game.mvdz | jq .duration_ms
 ```
 
 **gzip.** mvdz reads and writes raw demos only. A `.mvd.gz`, as most
@@ -206,28 +162,21 @@ message saying so.
 first frame is not a whole MVD frame carrying messages that parse (or, if
 that frame is damaged, followed by 16 more whole frames). Nothing is
 written. Truncated demos and demos damaged after their start compress as
-before, with what does not parse stored raw. A few archive files that
-carry a demo after a non-MVD header are refused too; `--allow-non-demo`
-stores any input (it still round-trips, mostly stored raw). When standard output
-closes early (`mvdz census demos/ | head`), the tool stops quietly.
+before, with what does not parse stored raw. When standard output closes
+early (`mvdz info *.mvdz | head`), the tool stops quietly.
 
 ## Hashes and trust
 
-* **Identity**: the SHA-256 of the original `.mvd` (the hub's
-  `demo_sha256`), stored in the metadata. The same for every level,
-  segment size and set of attachments. Reading the metadata does not
-  verify it; a full decode does (by default).
-* **Integrity**: CRC-32C per segment and over the whole demo, always
-  checked, also when seeking. `--trusted` decodes with these alone.
-* **Bundle**: `bundle_sha256`, a SHA-256 over the identity and the
-  attachments' names, MIME types, SHA-256s and keys; the same however the
-  file was compressed. A download ETag, and what a signature would sign.
+* **Identity**: the SHA-256 of the original `.mvd`, in the file's 64-byte
+  header. Decoding does not recompute it: a consumer that must
+  authenticate a demo hashes the decoded bytes.
+* **Integrity**: CRC-32 (as in zlib) per segment and over the whole demo,
+  and the demo's size and duration, checked on every decode.
 
-Files from elsewhere are untrusted input: decoders bound memory and work
-(`Limits`, `max_memory`), demos can carry console commands
-(`svc_stufftext`) that players must filter, and attachments are untrusted
-content of any type, not access-controlled: anyone holding a file can read
-all of them. FORMAT.md §14 covers this.
+Files from elsewhere are untrusted input: decoders bound their memory
+(1 GiB on 64-bit targets, 256 MiB on 32-bit ones such as wasm32) and
+work, and demos can carry console commands (`svc_stufftext`) that players
+must filter.
 
 ## Rust
 
@@ -236,66 +185,42 @@ user builds no command-line code. Not on crates.io yet: depend on it by git
 (`mvdz = { git = "https://github.com/galfthan/mvdz" }`) or by path.
 
 ```rust
-use mvdz::{Attachment, Config, Level, Limits, ReadOptions};
+// whole buffers; `max_threads` (u8) is capped at the logical cores, 0: one per core
+let file = mvdz::encode(&demo, 0)?;
+let demo2 = mvdz::decode(&file, 4)?;
 
-// whole buffers
-let packed = mvdz::compress(&demo, &Config::default())?;                   // normal level
-let fast = mvdz::compress(&demo, &Config { level: Level::Fast, ..Default::default() })?;
-let demo2 = mvdz::decompress(&packed, 4)?;                                  // 4 threads
-// under a memory cap, or trusted (no SHA-256, CRC checks only)
-let demo3 = mvdz::decompress_with(&packed, 1, &Limits { memory: 256 << 20, ..Default::default() }.into())?;
-let demo4 = mvdz::decompress_with(&packed, 1, &ReadOptions { trusted: true, ..Default::default() })?;
+// streaming, as gzip libraries do; the encoder needs the whole demo, so it writes the
+// file in finish()
+let mut encoder = mvdz::Encoder::new(std::fs::File::create("game.mvdz")?).max_threads(4);
+std::io::copy(&mut std::fs::File::open("game.mvd")?, &mut encoder)?;
+encoder.finish()?;
 
-// decoding in order from any io::Read, `threads` segments at a time
-let mut r = mvdz::Reader::new(std::fs::File::open("game.mvdz")?, 2, &Default::default())?;
-std::io::copy(&mut r, &mut out)?;
-mvdz::decompress_stream(std::io::stdin(), std::io::stdout(), 1, &ReadOptions::default())?;
-
-// streaming compression of a demo that is still being recorded
-let mut w = mvdz::Writer::new(file, &Config { segment: 1 << 20, ..Default::default() })?;
-w.write_demo(&chunk)?;                    // segments are written as they fill
-w.finish()?;                              // metadata, index, trailer (or w.abort())
-
-// metadata without decoding (identity not verified); attachments
-let info = mvdz::read_metadata(std::fs::File::open("game.mvdz")?)?;
-println!("{} {}", info.to_json(), mvdz::api::hex(&info.bundle_hash()));
-for a in mvdz::list_attachments(std::fs::File::open("game.mvdz")?, "analysis/")? { println!("{} {}", a.name, a.size); }
-let result = mvdz::read_attachment(std::fs::File::open("game.mvdz")?, "analysis/result.json")?;
-let a = Attachment { name: "analysis/result.json".into(), mime: "application/json".into(),
-                     kv: vec![("x-tool".into(), "mvda".into())], data: json_bytes };
-mvdz::update_attachments(std::path::Path::new("game.mvdz"), &["old"], &[a])?;
-// a copy without some attachments, e.g. for a download
-let sel = mvdz::Selection { drop_prefix: vec!["rec/".into()], ..Default::default() };
-let etag = mvdz::export_attachments(std::fs::File::open("game.mvdz")?, std::fs::File::create("dl.mvdz")?, |e| sel.matches(e))?;
+// in order from any io::Read, up to `max_threads` segments decoded at once
+let mut decoder = mvdz::Decoder::new(std::fs::File::open("game.mvdz")?)?;
+eprintln!("{} ms", decoder.header().duration_ms());       // before decoding, as gzip
+std::io::copy(&mut decoder, &mut std::io::stdout())?;
 ```
 
-`ReadOptions` (for decoding) holds `limits` and `trusted`; `Limits` has
-`memory` (bytes, default 1 GiB on 64-bit) and `work_per_byte`, and is all
-that metadata and attachment reading take. Errors (`mvdz::Error`) are `Format` (not MVDZ or an
-unsupported version), `Corrupt` (any rule of FORMAT.md), `Limit` (the
-budget), `Invalid` (a bad argument, a configuration a reader would
-refuse), `NotFound`, `Io` and `Internal`. Decoders never panic on corrupt
-input; they return an error. Every size a file declares is bounded by the
-bytes actually present (FORMAT.md §9), and `Limits` caps the memory one
-decode may use. A decode works on up to `threads` segments at once, each with
-memory of its own: a tight memory limit may need fewer threads.
+Errors (`mvdz::Error`) are `Format` (not MVDZ or an unsupported version),
+`Corrupt` (any rule of FORMAT.md), `Limit` (the memory or work bound),
+`Invalid`, `Io`, `Internal` and `NotMvd` (`encode` given input that is not
+an MVD demo). Decoders never panic on corrupt input; they return an error.
+`Decoder` yields only checked bytes: each segment's CRC-32 is checked
+before its bytes are returned, the whole demo's before the end.
 
 ## WebAssembly
 
-The library builds for `wasm32-unknown-unknown` and `wasm32-wasip1`
-(`cargo build --lib --target wasm32-unknown-unknown`). There, decoding is
+The library builds for `wasm32-unknown-unknown` (`cargo build --lib -p mvdz
+--target wasm32-unknown-unknown`). There, encoding and decoding are
 single-threaded; every dependency is pure Rust, so nothing changes between
-targets. The format's resource rules bound memory by the input, and
-`ReadOptions::limits` caps it further, which matters in a browser.
+targets.
 
 ## Tests
 
 `cargo nextest run --release` (in `mvdz_rust/`; `cargo install
 cargo-nextest` once) runs the unit tests, the golden vectors (valid and
-hostile files through every reader), round trips at both
-levels, segmented and streamed, corrupt-input and hostile-file tests,
-metadata and attachment tests, and the regressions of the pre-release
-reviews. `cargo test --doc` runs the documentation examples, which
+hostile files through every reader), round trips, corrupt-input and
+hostile-file tests, and the regressions of the pre-release reviews. `cargo test --doc` runs the documentation examples, which
 nextest leaves out. Everything runs on synthetic demos; tests that can also use
 real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `sample/` with demos named `<sha256>.mvd`, `gen/` with constructed demos,
@@ -304,8 +229,8 @@ real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 development sample there (`MVDZ_TEST_DATA=$PWD/testdata`).
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors (it needs the sample
 demos they were made from, which the download lacks). Fuzz targets are in `mvdz_rust/mvdz/fuzz/` (`cargo +nightly
-fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
-`stream_writer`, `compress_rt` and the structure-aware `gen_rt`).
+fuzz run decode`; also `stream_reader`, `compress_rt` and the
+structure-aware `gen_rt`); they build the library with its `fuzz` feature.
 
 Speed: `MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path
 mvdz_rust/Cargo.toml --bench codec` times compress and decompress of every `*.mvd` in that

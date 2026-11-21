@@ -1,16 +1,12 @@
-//! Binary range coder with 12-bit probabilities.
-//!
-//! LZMA-style: 32-bit range, byte-wise normalisation, carry propagation
-//! through a cache byte.
-//! `probability` is always P(bit = 1) in 1..=4095. Written from the published LZMA
-//! range-coder description; no code copied.
+//! LZMA-style binary range coder: 32-bit range, byte-wise normalization, carry through a
+//! cache byte. `probability` is P(bit = 1) in 1..=4095. From the LZMA description, no code copied.
 
 pub(crate) const PROBABILITY_BITS: u32 = 12;
 const TOP: u32 = 1 << 24;
 
-pub(crate) struct Encoder {
-    /// binary decisions coded so far
-    pub decisions: u64,
+#[derive(Debug)]
+pub(crate) struct RangeEncoder {
+    pub(crate) decisions: u64,
     low: u64,
     range: u32,
     cache: u8,
@@ -18,13 +14,13 @@ pub(crate) struct Encoder {
     pub(crate) out: Vec<u8>,
 }
 
-impl Default for Encoder {
+impl Default for RangeEncoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Encoder {
+impl RangeEncoder {
     pub(crate) fn new() -> Self {
         Self {
             decisions: 0,
@@ -79,8 +75,8 @@ impl Encoder {
     }
 }
 
-pub(crate) struct Decoder<'a> {
-    /// binary decisions decoded so far
+#[derive(Debug)]
+pub(crate) struct RangeDecoder<'a> {
     pub(crate) decisions: u64,
     code: u32,
     range: u32,
@@ -88,9 +84,9 @@ pub(crate) struct Decoder<'a> {
     pos: usize,
 }
 
-impl<'a> Decoder<'a> {
+impl<'a> RangeDecoder<'a> {
     pub(crate) fn new(input: &'a [u8]) -> Self {
-        let mut decoder = Decoder {
+        let mut decoder = RangeDecoder {
             decisions: 0,
             code: 0,
             range: u32::MAX,
@@ -110,12 +106,12 @@ impl<'a> Decoder<'a> {
         byte
     }
 
-    /// Bytes read so far (including the zeros past the end).
+    /// Including the zeros read past the end.
     pub(crate) fn pos(&self) -> usize {
         self.pos
     }
 
-    /// Bytes consumed beyond the input (a sign of corruption if large).
+    /// Read past the end by more than the 5 flush bytes: corrupt.
     pub(crate) fn is_overrun(&self) -> bool {
         self.pos > self.input.len() + 5
     }
@@ -136,8 +132,7 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// Adaptive probability with a fixed shift (used for side information).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Probability(pub(crate) u16);
 
 impl Default for Probability {
@@ -161,8 +156,8 @@ impl Probability {
     }
 }
 
-/// Small adaptive integer coder for headers: Elias-gamma style binarisation
-/// with adaptive bits per (context, position).
+/// Elias-gamma binarization, an adaptive bit per (context, position).
+#[derive(Debug)]
 pub(crate) struct IntModel {
     probabilities: Vec<Probability>,
 }
@@ -173,9 +168,9 @@ impl IntModel {
             probabilities: vec![Probability::default(); context_count * 64],
         }
     }
-    pub(crate) fn put(&mut self, encoder: &mut Encoder, context: usize, value: u32) {
+    pub(crate) fn put(&mut self, encoder: &mut RangeEncoder, context: usize, value: u32) {
         let value_plus_one = u64::from(value) + 1;
-        let bit_count = value_plus_one.ilog2(); // bits below the leading one
+        let bit_count = value_plus_one.ilog2();
         let base = context * 64;
         for position in 0..bit_count {
             let probability = &mut self.probabilities[base + position as usize];
@@ -194,7 +189,7 @@ impl IntModel {
             probability.update(bit, 5);
         }
     }
-    pub(crate) fn get(&mut self, decoder: &mut Decoder, context: usize) -> u32 {
+    pub(crate) fn get(&mut self, decoder: &mut RangeDecoder, context: usize) -> u32 {
         let base = context * 64;
         let mut bit_count: usize = 0;
         while bit_count < 32 {

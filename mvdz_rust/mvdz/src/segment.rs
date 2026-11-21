@@ -11,17 +11,12 @@
 //!          id u32, count u32              blob
 //! ```
 //!
-//! Every integer is little-endian.
-//!
-//! A structural or numeric stream is rANS with its model in the file's
-//! models block; a segment with such a stream that has no model there is
-//! not transform-coded (the encoder writes it as all tail).
-//! The blob streams have no bodies of their own: their bytes, concatenated
-//! in table order, are one raw DEFLATE stream, the blob body. Without blob
-//! streams `blob_len` is 0 and there is no blob body.
+//! Integers are little-endian. Structural and numeric streams are rANS with a model from the
+//! models block (a stream without one: the encoder writes the segment as all tail). The blob
+//! streams, concatenated in table order, are one raw DEFLATE stream; none: `blob_len` 0.
 
 use crate::budget::Budget;
-use crate::coder::rans::FileTables;
+use crate::coder::rans::ModelsBlock;
 use crate::coder::{self, rans};
 use crate::error::{Error, Result, bad};
 use crate::format::{MAX_MODELS_LEN, MAX_SEGMENT_RAW};
@@ -34,18 +29,14 @@ use crate::streams::{
 use crate::util::{ByteReader, par_map, put_u32};
 use crate::walk::{Records, SymbolIo, Walker};
 
-/// Raw bytes per segment: a segment is cut at the first frame boundary at
-/// or after this many bytes.
-pub(crate) const SEGMENT: usize = 256 * 1024;
-
-/// DEFLATE level of the blob body.
-pub(crate) const DEFLATE_LEVEL: u32 = 9;
+/// A segment is cut at the first frame boundary at or after this many raw bytes.
+pub(crate) const SEGMENT_TARGET_RAW: usize = 256 * 1024;
 
 // ---------------------------------------------------------------- encode side I/O
 
+#[derive(Debug)]
 pub(crate) struct EncodeIo {
     pub(crate) symbols: Vec<Vec<u8>>,
-    /// the context of each symbol (contexts fit 16 bits)
     pub(crate) contexts: Vec<Vec<u16>>,
     pub(crate) blobs: Vec<Vec<u8>>,
 }
@@ -82,6 +73,7 @@ impl SymbolIo for EncodeIo {
     }
 }
 
+#[derive(Debug)]
 struct NumericEncodeIo<'a> {
     values: Vec<rans::NumericSymbolWriter>,
     src: &'a [u8],
@@ -93,20 +85,21 @@ impl NumericIo for NumericEncodeIo<'_> {
         self.values[stream_index].push(context, value);
         value
     }
-    fn bytes(&self) -> &[u8] {
+    fn segment(&self) -> &[u8] {
         self.src
     }
-    fn bytes_mut(&mut self) -> &mut [u8] {
+    fn segment_mut(&mut self) -> &mut [u8] {
         &mut []
     }
 }
 
 // ---------------------------------------------------------------- decode side I/O
 
+#[derive(Debug)]
 pub(crate) struct DecodeIo<'a> {
     lazy: [rans::ByteDecoder<'a>; LAZY_STREAM_COUNT],
     blobs: Vec<(&'a [u8], usize)>,
-    pub(crate) over: bool,
+    pub(crate) is_over: bool,
 }
 
 impl SymbolIo for DecodeIo<'_> {
@@ -119,7 +112,7 @@ impl SymbolIo for DecodeIo<'_> {
         if let Some(value) = self.lazy[stream].get(context) {
             value
         } else {
-            self.over = true;
+            self.is_over = true;
             // an exhausted stream reads as end tokens so every loop stops
             255
         }
@@ -137,9 +130,9 @@ impl SymbolIo for DecodeIo<'_> {
     }
 }
 
-/// Most streams of one numeric group.
 const MAX_GROUP_STREAMS: usize = 2;
 
+#[derive(Debug)]
 struct NumericDecodeIo<'a> {
     decoders: [rans::NumericDecoder<'a>; MAX_GROUP_STREAMS],
     dst: &'a mut [u8],
@@ -156,10 +149,10 @@ impl NumericIo for NumericDecodeIo<'_> {
             0
         }
     }
-    fn bytes(&self) -> &[u8] {
+    fn segment(&self) -> &[u8] {
         self.dst
     }
-    fn bytes_mut(&mut self) -> &mut [u8] {
+    fn segment_mut(&mut self) -> &mut [u8] {
         self.dst
     }
 }
@@ -178,11 +171,11 @@ fn walk_decode<'a>(
     let io = DecodeIo {
         lazy,
         blobs,
-        over: false,
+        is_over: false,
     };
     let mut walker: Walker<false, DecodeIo> = Walker::new(&[], dst, records, io, proto);
     walker.run(tail);
-    if walker.has_error || walker.io.over {
+    if walker.has_error || walker.io.is_over {
         return bad("structure");
     }
     if !walker
@@ -239,7 +232,7 @@ fn run_group(
 
 // ---------------------------------------------------------------- segment encode
 
-/// The encode-direction walk of one segment.
+#[derive(Debug)]
 pub(crate) struct Walked {
     io: EncodeIo,
     records: Records,
@@ -248,15 +241,13 @@ pub(crate) struct Walked {
 }
 
 impl Walked {
-    /// Raw bytes the transform could not structure (escapes and tail).
-    pub(crate) fn escaped(&self) -> usize {
+    pub(crate) fn unstructured_len(&self) -> usize {
         self.io.blobs[RAW].len() + self.io.blobs[TAIL].len()
     }
 }
 
-/// Walks one segment starting in protocol state `proto`; returns the walk
-/// and the protocol state at its end, or None if the transform cannot
-/// represent the segment.
+/// Also returns the protocol state at the end; `None` if the transform cannot represent the
+/// segment.
 pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
     let mut records = Records::growable(src.len());
     let (io, tail, end_proto, has_error) = {
@@ -279,9 +270,7 @@ pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
     ))
 }
 
-/// One segment as all tail, starting in protocol state `proto`: no frame
-/// is walked and every byte goes to the [`TAIL`] blob stream. Any bytes
-/// can be coded this way; the protocol state after it is `proto`.
+/// Every byte to the [`TAIL`] blob stream: codes any bytes, and leaves `proto` unchanged.
 pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked {
     let mut io = EncodeIo::new();
     io.blobs[TAIL] = src.to_vec();
@@ -294,29 +283,28 @@ pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Kind {
     Lazy,
     Numeric,
-    /// every blob stream of the segment, as one DEFLATE stream
+    /// All blob streams as one DEFLATE stream.
     Blobs,
 }
 
-/// The blob streams of a walked segment, in id order.
+/// The non-empty ones, in id order.
 fn blob_ids(walked: &Walked) -> Vec<usize> {
     (0..STREAM_COUNT)
         .filter(|&stream| is_blob(stream) && !walked.io.blobs[stream].is_empty())
         .collect()
 }
 
-/// The body of one stream; None for a structural or numeric stream
-/// without a model in the file.
+/// `None` for a structural or numeric stream without a model in the file.
 fn pack_one(
     kind: Kind,
     stream: usize,
     walked: &Walked,
     numeric: Option<&rans::NumericSymbols>,
-    file: Option<&rans::Shared>,
+    file: Option<&rans::FileModel>,
 ) -> Option<Vec<u8>> {
     match kind {
         Kind::Lazy => Some(rans::encode_bytes(
@@ -331,18 +319,16 @@ fn pack_one(
             for id in ids {
                 all.extend_from_slice(&walked.io.blobs[id]);
             }
-            Some(crate::deflate::compress(&all, DEFLATE_LEVEL))
+            Some(crate::deflate::compress(&all))
         }
     }
 }
 
-/// The numeric values of a walked segment as they are coded, per group
-/// (in [`GROUPS`] order) and stream of the group.
+/// Per group (in [`GROUPS`] order) and stream of the group.
 pub(crate) type Numerics = Vec<Vec<rans::NumericSymbols>>;
 
-/// Runs the numeric predictors over a walked segment `src`. The encoder
-/// does this once: the models are trained on the values and the segment is
-/// coded from them.
+/// Run once by the encoder: the models are trained on these values and the segment is coded
+/// from them.
 pub(crate) fn numerics(src: &[u8], walked: &Walked) -> Numerics {
     GROUPS
         .iter()
@@ -364,38 +350,33 @@ pub(crate) fn numerics(src: &[u8], walked: &Walked) -> Numerics {
         .collect()
 }
 
-/// Builds the shared models of a file (FORMAT.md §12 rule 11).
-///
-/// One per structural and numeric stream, from its per-context counts summed over
-/// every walked segment, in segment order. The segments are added a few
-/// at a time: only their counts are kept.
+/// One model per structural and numeric stream from its per-context counts over every segment
+/// (FORMAT.md section 12 rule 11). Segments are added a few at a time; only counts are kept.
+#[derive(Debug)]
 pub(crate) struct Trainer {
-    /// the counts of each stream
     tallies: Vec<std::sync::Mutex<Option<rans::Tally>>>,
-    /// where a numeric stream's values are: (group, index in the group)
-    at: Vec<Option<(usize, usize)>>,
+    /// (group, index in the group)
+    numeric_positions: Vec<Option<(usize, usize)>>,
 }
 
 impl Default for Trainer {
     fn default() -> Self {
-        let mut at = vec![None; STREAM_COUNT];
+        let mut numeric_positions = vec![None; STREAM_COUNT];
         for (group_index, group) in GROUPS.iter().enumerate() {
             for (stream_index, &stream) in group.streams().iter().enumerate() {
-                at[stream] = Some((group_index, stream_index));
+                numeric_positions[stream] = Some((group_index, stream_index));
             }
         }
         Self {
             tallies: Vec::from_fn(STREAM_COUNT, |_| std::sync::Mutex::default()),
-            at,
+            numeric_positions,
         }
     }
 }
 
 impl Trainer {
-    /// Counts the symbols of the next segments `(walk, numeric values)`.
     pub(crate) fn add(&self, segments: &[(&Walked, &Numerics)], threads: usize) {
-        // a stream's counts do not depend on another stream's: streams in
-        // parallel, each over the segments in order
+        // streams are independent: in parallel, each over the segments in order
         par_map(threads, STREAM_COUNT, |stream| {
             let mut tally = self.tallies[stream]
                 .lock()
@@ -411,7 +392,7 @@ impl Trainer {
                 if stream < LAZY_STREAM_COUNT {
                     add(256, &walked.io.symbols[stream], &walked.io.contexts[stream]);
                 }
-                if let Some((group_index, stream_index)) = self.at[stream] {
+                if let Some((group_index, stream_index)) = self.numeric_positions[stream] {
                     add(
                         rans::NUMERIC_ALPHABET,
                         &numerics[group_index][stream_index].symbols,
@@ -422,62 +403,59 @@ impl Trainer {
         });
     }
 
-    /// The models, by stream id.
-    pub(crate) fn models(self, threads: usize) -> Vec<Option<rans::Shared>> {
-        let mut models: Vec<Option<rans::Shared>> = par_map(threads, STREAM_COUNT, |stream| {
+    /// By stream id.
+    pub(crate) fn models(self, threads: usize) -> Vec<Option<rans::FileModel>> {
+        let mut models: Vec<Option<rans::FileModel>> = par_map(threads, STREAM_COUNT, |stream| {
             let tally = self.tallies[stream]
                 .lock()
                 .expect("no panic while counting");
-            tally.as_ref().and_then(super::coder::rans::Tally::shared)
+            tally
+                .as_ref()
+                .and_then(super::coder::rans::Tally::file_model)
         });
-        fit_tables(&mut models, MAX_MODELS_LEN);
+        fit_models_block(&mut models, MAX_MODELS_LEN);
         models
     }
 }
 
-/// The TABLES body (FORMAT.md §2.6) of the models of streams `ids`
-/// (ascending, each with a model).
-pub(crate) fn tables_body(models: &[Option<rans::Shared>], ids: &[usize]) -> Vec<u8> {
+/// The TABLES body (FORMAT.md section 2.6); `ids` ascending, each with a model.
+pub(crate) fn models_body(models: &[Option<rans::FileModel>], ids: &[usize]) -> Vec<u8> {
     let mut body = Vec::new();
     put_u32(&mut body, ids.len());
     for &stream in ids {
-        let header = &models[stream].as_ref().expect("a model").header;
+        let bytes = &models[stream].as_ref().expect("a model").bytes;
         put_u32(&mut body, stream);
-        put_u32(&mut body, header.len());
-        body.extend_from_slice(header);
+        put_u32(&mut body, bytes.len());
+        body.extend_from_slice(bytes);
     }
     body
 }
 
-/// Drops the models with the largest headers until the models block is at
-/// most `max` bytes (its limit, FORMAT.md §9); a segment with one of those
-/// streams is then not transform-coded.
-fn fit_tables(models: &mut [Option<rans::Shared>], max: u64) {
+/// Drops the largest headers until the models block is at most `max` bytes (FORMAT.md section
+/// 9); a segment with a dropped stream is then not transform-coded.
+fn fit_models_block(models: &mut [Option<rans::FileModel>], max: u64) {
     loop {
         let ids: Vec<usize> = (0..models.len())
             .filter(|&stream| models[stream].is_some())
             .collect();
-        if ids.is_empty() || tables_body(models, &ids).len() as u64 <= max {
+        if ids.is_empty() || models_body(models, &ids).len() as u64 <= max {
             return;
         }
         let largest = ids.into_iter().max_by_key(|&stream| {
-            let header_len = models[stream]
-                .as_ref()
-                .map_or(0, |model| model.header.len());
+            let header_len = models[stream].as_ref().map_or(0, |model| model.bytes.len());
             (header_len, stream)
         });
         models[largest.expect("a model")] = None;
     }
 }
 
-/// The transform body of a walked segment with numeric values `numerics`, or
-/// None if one of its structural or numeric streams has no model in
-/// `shared` (by stream id). `model_ids` gets the streams coded with a model.
+/// `None` if a structural or numeric stream has no model in `file_models` (by stream id).
+/// `model_ids` gets the streams coded with a model.
 pub(crate) fn encode(
     walked: &Walked,
     numerics: &Numerics,
     model_ids: &mut Vec<usize>,
-    shared: &[Option<rans::Shared>],
+    file_models: &[Option<rans::FileModel>],
 ) -> Option<Vec<u8>> {
     // every non-empty stream is a job: (stream, kind, group, index in group)
     let mut jobs: Vec<(usize, Kind, usize, usize)> = Vec::new();
@@ -505,7 +483,7 @@ pub(crate) fn encode(
     let mut packed: Vec<Vec<u8>> = Vec::with_capacity(jobs.len());
     for &(stream, kind, group_index, stream_index) in &jobs {
         let numeric = matches!(kind, Kind::Numeric).then(|| &numerics[group_index][stream_index]);
-        let file = shared.get(stream).and_then(|model| model.as_ref());
+        let file = file_models.get(stream).and_then(|model| model.as_ref());
         packed.push(pack_one(kind, stream, walked, numeric, file)?);
     }
     // table order: stream id; the blob streams follow (their ids are the
@@ -553,10 +531,8 @@ pub(crate) fn encode(
     Some(out)
 }
 
-/// Cut points: the first frame boundary at least [`SEGMENT`] bytes into
-/// each segment. Where a frame, or data that does not frame, runs past
-/// [`MAX_SEGMENT_RAW`], the rest of the demo is cut at that length: every
-/// segment but the last is whole frames or exactly that long.
+/// The first frame boundary at least [`SEGMENT_TARGET_RAW`] bytes in. Past a frame or unframed data
+/// longer than [`MAX_SEGMENT_RAW`] the rest is cut at that length.
 pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     let max_segment = MAX_SEGMENT_RAW as usize;
     let mut cuts = vec![0];
@@ -572,7 +548,7 @@ pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
             }
             break;
         }
-        let is_segment_full = frame_end - segment_start >= SEGMENT;
+        let is_segment_full = frame_end - segment_start >= SEGMENT_TARGET_RAW;
         if is_segment_full && frame_end < src.len() {
             segment_start = frame_end;
             cuts.push(segment_start);
@@ -583,34 +559,36 @@ pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     cuts
 }
 
-/// Frames, summed frame time (ms) and the length of the whole frames at
-/// the start of `demo` (the rest is the unframeable tail).
-pub(crate) fn frame_scan(demo: &[u8]) -> (u64, u64, usize) {
-    let (mut frames, mut ms, mut whole_len) = (0u64, 0u64, 0usize);
-    while let Some(len) = frame_len(demo, whole_len) {
-        frames += 1;
-        ms += u64::from(demo[whole_len]);
-        whole_len += len;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct FrameScan {
+    pub(crate) duration_ms: u64,
+    /// Whole frames only; the rest is tail.
+    pub(crate) framed_len: usize,
+}
+
+pub(crate) fn frame_scan(demo: &[u8]) -> FrameScan {
+    let mut scan = FrameScan::default();
+    while let Some(len) = frame_len(demo, scan.framed_len) {
+        scan.duration_ms += u64::from(demo[scan.framed_len]);
+        scan.framed_len += len;
     }
-    (frames, ms, whole_len)
+    scan
 }
 
 // ---------------------------------------------------------------- decode
 
-/// The parsed header of a transform body.
-pub(crate) struct Header {
+#[derive(Debug)]
+pub(crate) struct TransformHeader {
     proto: Proto,
     tail: usize,
-    /// (id, count, body length); a blob stream has no body of its own: 0
+    /// (id, count, body length); body length 0 for a blob stream
     entries: Vec<(usize, usize, usize)>,
-    /// length of the blob body, after the stream bodies
     blob_len: usize,
     body_offset: usize,
 }
 
-/// Parses the header and stream table of a transform body that decodes to
-/// `raw_len` bytes.
-pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
+/// Header and stream table; `raw_len` is the decoded length.
+pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<TransformHeader> {
     let header_error = Error::Corrupt("segment header");
     let mut reader = ByteReader::new(body);
     let fte = reader.u32le().ok_or(header_error)?;
@@ -634,7 +612,6 @@ pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         if id >= STREAM_COUNT || !(is_lazy(id) || is_numeric(id) || is_blob(id)) {
             return bad("stream id");
         }
-        // a blob stream has no body of its own
         let count = reader.u32_len().ok_or(table_error)?;
         let len = if is_blob(id) {
             0
@@ -656,7 +633,6 @@ pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
         entries.push((id, count, len));
     }
     let blob_len = reader.u32_len().ok_or(table_error)?;
-    // a blob body exactly when there are blob bytes
     if (blob_total == 0) != (blob_len == 0) {
         return bad("blob body");
     }
@@ -664,7 +640,7 @@ pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
     if total != body.len() - reader.offset {
         return bad("stream bodies");
     }
-    Ok(Header {
+    Ok(TransformHeader {
         proto: Proto::new(fte, fte2, mvd1),
         tail,
         entries,
@@ -673,30 +649,29 @@ pub(crate) fn parse_header(body: &[u8], raw_len: usize) -> Result<Header> {
     })
 }
 
-/// Decodes a transform body into `dst` (its exact raw length). The CRC is
-/// checked by the caller.
+/// `dst` is the exact raw length; the caller checks the CRC.
 pub(crate) fn decode(
     body: &[u8],
-    header: &Header,
+    transform_header: &TransformHeader,
     dst: &mut [u8],
-    tables: Option<&FileTables>,
+    models_block: Option<&ModelsBlock>,
     budget: &Budget,
 ) -> Result<()> {
-    let stream_count = header.entries.len();
-    let file_models = tables.map(super::coder::rans::FileTables::models);
+    let stream_count = transform_header.entries.len();
+    let file_models = models_block.map(super::coder::rans::ModelsBlock::models);
     let mut bodies: Vec<&[u8]> = Vec::with_capacity(stream_count);
     let mut reader = ByteReader {
         bytes: body,
-        offset: header.body_offset,
+        offset: transform_header.body_offset,
     };
-    for &(_, _, len) in &header.entries {
+    for &(_, _, len) in &transform_header.entries {
         bodies.push(reader.take(len).ok_or(Error::Corrupt("stream body"))?);
     }
     let blob_body = reader
-        .take(header.blob_len)
+        .take(transform_header.blob_len)
         .ok_or(Error::Corrupt("stream body"))?;
     let count_of = |stream: usize| {
-        header
+        transform_header
             .entries
             .iter()
             .find(|entry| entry.0 == stream)
@@ -709,7 +684,7 @@ pub(crate) fn decode(
         + 20 * count_of(TE_TYPE)
         + 8 * (count_of(UC) / UC_MIN_SYMBOLS);
     let mut scratch = records_bytes as u64;
-    for &(id, count, _) in &header.entries {
+    for &(id, count, _) in &transform_header.entries {
         if is_blob(id) {
             scratch += count as u64;
         }
@@ -717,8 +692,8 @@ pub(crate) fn decode(
     let _charge = budget.alloc(scratch)?;
     // the blob streams first: one DEFLATE stream, cut by their counts
     let blob_total: usize = (0..stream_count)
-        .filter(|&index| is_blob(header.entries[index].0))
-        .map(|index| header.entries[index].1)
+        .filter(|&index| is_blob(transform_header.entries[index].0))
+        .map(|index| transform_header.entries[index].1)
         .sum();
     let blob_bytes = if blob_total > 0 {
         crate::deflate::decompress(blob_body, blob_total)?
@@ -727,14 +702,18 @@ pub(crate) fn decode(
     };
     let mut blob_bufs: Vec<(&[u8], usize)> = vec![(&[][..], 0); STREAM_COUNT];
     let mut at = 0;
-    for &(id, count, _) in header.entries.iter().filter(|entry| is_blob(entry.0)) {
+    for &(id, count, _) in transform_header
+        .entries
+        .iter()
+        .filter(|entry| is_blob(entry.0))
+    {
         blob_bufs[id].0 = &blob_bytes[at..at + count];
         at += count;
     }
     let mut numeric_entries: Vec<StreamEntry> = vec![None; STREAM_COUNT];
     let mut lazy_entries: Vec<StreamEntry> = vec![None; LAZY_STREAM_COUNT];
     for index in 0..stream_count {
-        let (id, count, _) = header.entries[index];
+        let (id, count, _) = transform_header.entries[index];
         if is_lazy(id) {
             lazy_entries[id] = Some((bodies[index], count));
         } else if is_numeric(id) {
@@ -761,8 +740,8 @@ pub(crate) fn decode(
         blob_bufs,
         dst,
         &mut records,
-        header.proto,
-        header.tail,
+        transform_header.proto,
+        transform_header.tail,
     )?;
     for group in GROUPS {
         run_group(group, &records, dst, &numeric_entries, file_models)?;
@@ -778,38 +757,41 @@ mod tests {
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
-    /// The models of the segments `segments`.
-    fn train(segments: &[(&Walked, &Numerics)]) -> Vec<Option<rans::Shared>> {
+    fn train(segments: &[(&Walked, &Numerics)]) -> Vec<Option<rans::FileModel>> {
         let trainer = Trainer::default();
         trainer.add(segments, 1);
         trainer.models(1)
     }
 
-    /// The segment `body` decoded.
     fn decoded(
         body: &[u8],
-        header: &Header,
+        transform_header: &TransformHeader,
         len: usize,
-        tables: Option<&FileTables>,
+        models_block: Option<&ModelsBlock>,
     ) -> anyhow::Result<Vec<u8>> {
         let mut dst = vec![0u8; len];
-        decode(body, header, &mut dst, tables, &Budget::unlimited())?;
+        decode(
+            body,
+            transform_header,
+            &mut dst,
+            models_block,
+            &Budget::unlimited(),
+        )?;
         Ok(dst)
     }
 
-    /// The transform body of `src` with the models trained on it, and those
-    /// models as a reader has them.
-    fn coded(src: &[u8]) -> anyhow::Result<(Vec<u8>, FileTables)> {
+    /// Models trained on `src`, as a reader has them.
+    fn coded(src: &[u8]) -> anyhow::Result<(Vec<u8>, ModelsBlock)> {
         let (walked, _) = walk(src, Proto::default()).context("the demo walks")?;
         let numerics = numerics(src, &walked);
         let models = train(&[(&walked, &numerics)]);
         let ids: Vec<usize> = (0..models.len())
             .filter(|&stream| models[stream].is_some())
             .collect();
-        let file_tables = FileTables::new(&tables_body(&models, &ids), 1, &Budget::unlimited())?;
+        let models_block = ModelsBlock::new(&models_body(&models, &ids), 1, &Budget::unlimited())?;
         let body =
             encode(&walked, &numerics, &mut Vec::new(), &models).context("a transform body")?;
-        Ok((body, file_tables))
+        Ok((body, models_block))
     }
 
     /// A tiny demo: playerinfo, packet entities, sounds, stats, a print.
@@ -841,14 +823,14 @@ mod tests {
     #[test]
     fn segment_round_trip() -> anyhow::Result<()> {
         let src = demo();
-        let (body, file_tables) = coded(&src)?;
-        let header = parse_header(&body, src.len())?;
-        let dst = decoded(&body, &header, src.len(), Some(&file_tables))?;
+        let (body, models_block) = coded(&src)?;
+        let transform_header = parse_transform_header(&body, src.len())?;
+        let dst = decoded(&body, &transform_header, src.len(), Some(&models_block))?;
         assert!(dst == src);
         Ok(())
     }
-    /// usercmd hidden blocks (type 1): on and off the grid, other lengths,
-    /// two in one payload; streams UC and `UC_A` only where a segment has one.
+    /// usercmd blocks on and off the grid, other lengths, two in one payload; streams `UC` and
+    /// `UC_A` only where a segment has one.
     #[test]
     fn usercmd_round_trip() -> anyhow::Result<()> {
         let mut src = demo();
@@ -886,23 +868,23 @@ mod tests {
             src.extend_from_slice(&payload);
         }
         src.extend(demo());
-        let (body, file_tables) = coded(&src)?;
-        let header = parse_header(&body, src.len())?;
-        let uc_count = header
+        let (body, models_block) = coded(&src)?;
+        let transform_header = parse_transform_header(&body, src.len())?;
+        let uc_count = transform_header
             .entries
             .iter()
             .find(|entry| entry.0 == UC)
             .context("a uc stream")?
             .1;
         assert!(uc_count >= (300 + 9) * UC_MIN_SYMBOLS, "{uc_count}");
-        let dst = decoded(&body, &header, src.len(), Some(&file_tables))?;
+        let dst = decoded(&body, &transform_header, src.len(), Some(&models_block))?;
         assert!(dst == src);
         // without usercmd blocks neither stream is in the table
         let plain = demo();
         let (body, _) = coded(&plain)?;
-        let header = parse_header(&body, plain.len())?;
+        let transform_header = parse_transform_header(&body, plain.len())?;
         assert!(
-            header
+            transform_header
                 .entries
                 .iter()
                 .all(|entry| entry.0 != UC && entry.0 != UC_A)
@@ -910,16 +892,14 @@ mod tests {
         Ok(())
     }
 
-    /// Models a models block over its limit would hold are dropped,
-    /// largest header first; a segment with one of their streams is then
-    /// not transform-coded.
+    /// Over the limit, the largest headers go first; their segments are not transform-coded.
     #[test]
-    fn tables_limit() -> anyhow::Result<()> {
+    fn models_block_limit() -> anyhow::Result<()> {
         let src = demo();
         let (walked, _) = walk(&src, Proto::default()).context("the demo walks")?;
         let numerics = numerics(&src, &walked);
         let mut models = train(&[(&walked, &numerics), (&walked, &numerics)]);
-        let ids = |candidates: &[Option<rans::Shared>]| -> Vec<usize> {
+        let ids = |candidates: &[Option<rans::FileModel>]| -> Vec<usize> {
             (0..candidates.len())
                 .filter(|&stream| candidates[stream].is_some())
                 .collect()
@@ -929,19 +909,16 @@ mod tests {
             all.iter().any(|&stream| is_numeric(stream))
                 && all.iter().any(|&stream| is_lazy(stream))
         );
-        let len = tables_body(&models, &all).len() as u64;
-        let header_len = |stream: usize| {
-            models[stream]
-                .as_ref()
-                .map_or(0, |model| model.header.len())
-        };
+        let len = models_body(&models, &all).len() as u64;
+        let header_len =
+            |stream: usize| models[stream].as_ref().map_or(0, |model| model.bytes.len());
         let largest = *all
             .iter()
             .max_by_key(|&&stream| (header_len(stream), stream))
             .context("a model")?;
-        fit_tables(&mut models, len);
+        fit_models_block(&mut models, len);
         assert_eq!(ids(&models), all);
-        fit_tables(&mut models, len - 1);
+        fit_models_block(&mut models, len - 1);
         let kept = ids(&models);
         assert_eq!(
             kept,
@@ -955,7 +932,7 @@ mod tests {
             "a stream without a model: no transform body"
         );
         // nothing fits: no model is kept
-        fit_tables(&mut models, 0);
+        fit_models_block(&mut models, 0);
         assert!(ids(&models).is_empty());
         Ok(())
     }

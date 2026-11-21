@@ -1,22 +1,24 @@
-//! The structural walker: one routine that runs in both directions.
+//! The structural walker, one routine for both directions: encode moves each structural
+//! byte of the demo to its stream, decode moves it back.
 //!
-//! On encode it reads the demo and appends every structural byte to its
-//! stream (with a side context); on decode it pulls the same bytes from the
-//! streams and writes them to the output. Numeric fields (origins, angles,
-//! sound/TE coordinates, long stats) are not touched: the walker only
-//! reserves their bytes and records where they are ([`Records`]); the numeric
-//! groups (`numeric.rs`) fill them in after the walk. The structure of a
-//! demo never depends on a numeric value, so the walk and the numeric
-//! groups are independent.
+//! Numeric fields (origins, angles, sound and temp entity coords) are only reserved and
+//! listed in [`Records`]; `numeric.rs` fills them in after the walk. The structure never
+//! depends on a numeric value, so the two are independent.
 //!
-//! Every read and write is bounds-checked and sets a sticky `err` instead of
-//! panicking, so corrupt input ends the walk early and fails the checksum.
+//! A failed bounds check sets the sticky `has_error` instead of panicking.
 
 use crate::proto::{
-    DF_EFFECTS, DF_MODEL, DF_SKIN, DF_WEAPON_FRAME, FTE_COLOR_MOD, FTE_TRANS, Proto, U_ANGLE_1,
-    U_ANGLE_2, U_ANGLE_3, U_COLORMAP, U_EFFECTS, U_EVEN_MORE, U_FRAME, U_MODEL, U_MORE_BITS,
-    U_ORIGIN_1, U_ORIGIN_2, U_ORIGIN_3, U_SKIN, X_COLOR_MOD, X_ENTITY_DBL, X_ENTITY_DBL_2,
-    X_FATNESS, X_MODEL_DBL, X_SCALE, X_TRANS, X_YET_MORE, frame_len, le32,
+    DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
+    DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS, Proto,
+    SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT, SVC_DAMAGE, SVC_DELTA_PACKET_ENTITIES,
+    SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES, SVC_PLAYER_INFO, SVC_PRINT, SVC_SERVER_DATA,
+    SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT, SVC_TEMP_ENTITY, SVC_UPDATE_ENTER_TIME,
+    SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_PL, SVC_UPDATE_STAT, SVC_UPDATE_STAT_LONG,
+    TE_BLOOD, TE_GUNSHOT, TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3, U_ANGLE_1, U_ANGLE_2,
+    U_ANGLE_3, U_COLOR_MAP, U_EFFECTS, U_FRAME, U_FTE_COLOR_MOD, U_FTE_ENTITY_DBL,
+    U_FTE_ENTITY_DBL_2, U_FTE_EVEN_MORE, U_FTE_FATNESS, U_FTE_MODEL_DBL, U_FTE_SCALE, U_FTE_TRANS,
+    U_FTE_YET_MORE, U_MODEL, U_MORE_BITS, U_ORIGIN_1, U_ORIGIN_2, U_ORIGIN_3, U_SKIN, frame_len,
+    le32,
 };
 use crate::streams::{
     CMD, ESCLEN, FRAGS, GEN_BASE, HIDDMG, HIDLEN, HIDMISC, HIDTAG, HIDTYPE, MASK, NAILS, PE_A,
@@ -27,11 +29,8 @@ use crate::streams::{
 
 pub(crate) const NO_OFFSET: u32 = u32::MAX;
 
-/// Structural symbol I/O.
-///
-/// Encode: record and return `value`. Decode: return the
-/// decoded symbol (`value` is ignored). Every `context` fits in 16 bits, the rans
-/// table key (FORMAT.md §8.3); both implementations debug-assert it.
+/// `byte`: encode records and returns `value`, decode returns the decoded symbol. Every
+/// `context` fits in 16 bits, the rANS table key (FORMAT.md 8.3).
 pub(crate) trait SymbolIo {
     fn byte(&mut self, stream: usize, context: u32, value: u8) -> u8;
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);
@@ -39,21 +38,21 @@ pub(crate) trait SymbolIo {
     fn blob_rest(&self, stream: usize) -> &[u8];
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub(crate) struct PlayerInfoRecord {
     pub(crate) offset: u32,
     pub(crate) time: u32,
     pub(crate) flags: u16,
     pub(crate) number: u8,
-    pub(crate) float_flags: u8, // bit0: float coords
+    pub(crate) has_float_coords: bool,
 }
 
 pub(crate) const PE_IN_PREVIOUS: u16 = 64;
 pub(crate) const PE_FLOAT: u16 = 128;
 pub(crate) const PE_WIDE: u16 = 256;
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub(crate) struct PacketEntityRecord {
     pub(crate) offset: u32,
@@ -85,7 +84,7 @@ impl PacketEntityRecord {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct SoundRecord {
     pub(crate) offset: u32,
     pub(crate) refs: [u32; 3],
@@ -93,46 +92,42 @@ pub(crate) struct SoundRecord {
     pub(crate) number: u8,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct TempEntityRecord {
     pub(crate) offset: u32,
     pub(crate) refs: [u32; 3],
     pub(crate) kind: u8,
 }
 
-/// A usercmd block with angles on the grid: `off` is the pitch's offset
-/// (yaw and roll follow), `grid` bit a set for each axis a on the grid.
-#[derive(Clone, Copy, Debug)]
+/// `offset`: the pitch (yaw and roll follow); `grid`: bit `axis` set for each axis on the
+/// grid.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct UsercmdRecord {
     pub(crate) offset: u32,
     pub(crate) number: u8,
     pub(crate) grid: u8,
 }
 
-/// A record list: the walker appends, the numeric groups read it after the walk.
 #[derive(Debug, Clone)]
 pub(crate) struct RecordList<T> {
     records: Vec<T>,
-    /// decode: the count from the stream table
     capacity: usize,
 }
 
 impl<T> RecordList<T> {
-    /// At most `capacity` records, allocated up front.
     pub(crate) fn fixed(capacity: usize) -> crate::error::Result<Self> {
         Ok(Self {
             records: crate::budget::with_capacity(capacity)?,
             capacity,
         })
     }
-    /// No limit; `reserve` records allocated up front.
     pub(crate) fn growable(reserve: usize) -> Self {
         Self {
             records: Vec::with_capacity(reserve),
             capacity: usize::MAX,
         }
     }
-    /// Appends `record`; false if the list is full.
+    /// `false` if the list is full.
     #[inline(always)]
     pub(crate) fn push(&mut self, record: T) -> bool {
         if self.records.len() == self.capacity {
@@ -156,7 +151,7 @@ pub(crate) struct Records {
 }
 
 impl Records {
-    /// Encode side: growable, sized by typical densities.
+    /// Encode: capacities from typical record densities.
     pub(crate) fn growable(len: usize) -> Self {
         Self {
             player_infos: RecordList::growable(len / 18),
@@ -166,7 +161,7 @@ impl Records {
             usercmds: RecordList::growable(0),
         }
     }
-    /// Decode side: exact capacities from the stream table.
+    /// Decode: the counts from the stream table.
     pub(crate) fn fixed(
         pi: usize,
         pe: usize,
@@ -184,15 +179,15 @@ impl Records {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct PlayerState {
     flags: u16,
     frame: u8,
     weapon_frame: u8,
 }
 
-/// The previous usercmd fields of one player (§6.11).
-#[derive(Clone, Copy, Default)]
+/// The previous usercmd fields of one player (FORMAT.md 6.11).
+#[derive(Debug, Clone, Copy, Default)]
 struct UsercmdState {
     drop: u8,
     msec: u8,
@@ -202,7 +197,7 @@ struct UsercmdState {
     moves: [u16; 3],
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct EntityState {
     angles: [u8; 3],
     angle_residuals: [u8; 3],
@@ -212,15 +207,16 @@ struct EntityState {
     last_packet: u32,
 }
 
+#[derive(Debug)]
 pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     pub(crate) src: &'a [u8],
-    /// the output segment (decode; empty on encode)
+    /// Empty on encode.
     dst: &'a mut [u8],
     pub(crate) offset: usize,
     pub(crate) has_error: bool,
     pub(crate) io: IO,
     pub(crate) proto: Proto,
-    pub(crate) recs: &'a mut Records,
+    pub(crate) records: &'a mut Records,
     players: Box<[PlayerState; 256]>,
     entities: Box<[EntityState; 2048]>,
     stats: Box<[[u8; 256]; 32]>,
@@ -244,13 +240,10 @@ pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     previous_entity_gap: u8,
     usercmd_previous_players: [u8; 2],
     usercmds: Box<[UsercmdState; 256]>,
-    /// demo time at the end of the walk (ms)
-    pub(crate) end_time: u32,
+    pub(crate) end_time_ms: u32,
 }
 
 impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
-    /// `dst`: the output segment (decode; empty on encode). The walker writes the
-    /// structural bytes; the numeric groups fill in the rest after the walk.
     #[expect(
         clippy::large_stack_arrays,
         reason = "fixed-size tables keep byte-indexed lookups free of bounds checks"
@@ -258,7 +251,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     pub(crate) fn new(
         src: &'a [u8],
         dst: &'a mut [u8],
-        recs: &'a mut Records,
+        records: &'a mut Records,
         io: IO,
         proto: Proto,
     ) -> Self {
@@ -269,7 +262,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             has_error: false,
             io,
             proto,
-            recs,
+            records,
             players: Box::new([PlayerState::default(); 256]),
             entities: Box::new([EntityState::default(); 2048]),
             stats: Box::new([[0u8; 256]; 32]),
@@ -293,7 +286,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             previous_entity_gap: 0,
             usercmd_previous_players: [0; 2],
             usercmds: Box::new([UsercmdState::default(); 256]),
-            end_time: 0,
+            end_time_ms: 0,
         }
     }
 
@@ -327,7 +320,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         self.offset += 1;
     }
 
-    /// A plain byte.
     #[inline(always)]
     fn coded_byte(&mut self, stream: usize, context: u32) -> u8 {
         if IS_ENCODE {
@@ -340,7 +332,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// A byte coded as (byte - prediction) mod 256.
     #[inline(always)]
     fn coded_residual(&mut self, stream: usize, context: u32, prediction: u8) -> u8 {
         if IS_ENCODE {
@@ -354,7 +345,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// A byte of the demo kept in blob stream `stream`.
     #[inline(always)]
     fn blob_byte(&mut self, stream: usize) -> u8 {
         if IS_ENCODE {
@@ -368,7 +358,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// A byte of the demo kept in blob stream `stream` as (byte - prediction) mod 256.
     #[inline(always)]
     fn blob_residual(&mut self, stream: usize, prediction: u8) -> u8 {
         if IS_ENCODE {
@@ -382,7 +371,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// `count` little-endian bytes of the demo kept in blob stream `stream`.
     #[inline]
     fn blob_le(&mut self, stream: usize, count: usize) -> u32 {
         let mut value = 0u32;
@@ -392,8 +380,8 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         value
     }
 
-    /// A byte that is not part of the demo (a tag, a length byte), kept in
-    /// blob stream `stream`: encode stores `value`, decode returns the stored byte.
+    /// A byte not in the demo (a tag, a length byte): encode stores `value`, decode returns
+    /// the stored byte.
     #[inline(always)]
     fn tag(&mut self, stream: usize, value: u8) -> u8 {
         if IS_ENCODE {
@@ -407,7 +395,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// `count` little-endian bytes, the byte index in context bits 14-15.
+    /// The byte index goes in context bits 14-15.
     #[inline]
     fn coded_le(&mut self, stream: usize, context: u32, count: usize) -> u32 {
         let mut value = 0u32;
@@ -442,7 +430,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// Reserve `len` bytes for a numeric field; returns their offset.
+    /// Bytes of a numeric field, filled in after the walk.
     #[inline(always)]
     fn reserve(&mut self, len: usize) -> u32 {
         let offset = self.offset;
@@ -453,8 +441,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         offset as u32
     }
 
-    /// Walks the whole segment. Encode: returns the tail length. Decode:
-    /// `tail` is the stored tail length.
+    /// Encode returns the tail length; decode takes it.
     pub(crate) fn run(&mut self, tail: usize) -> usize {
         if IS_ENCODE {
             while !self.has_error && frame_len(self.src, self.offset).is_some() {
@@ -465,7 +452,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
             let tail_len = self.src.len() - self.offset;
             self.copy_blob(TAIL, tail_len);
-            self.end_time = self.time;
+            self.end_time_ms = self.time;
             tail_len
         } else {
             let stop = self.dst.len().saturating_sub(tail);
@@ -476,7 +463,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 self.has_error = true;
             }
             self.copy_blob(TAIL, tail);
-            self.end_time = self.time;
+            self.end_time_ms = self.time;
             tail
         }
     }
@@ -490,12 +477,12 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         self.last_type = frame_type;
         self.target = frame_type >> 3;
         match frame_type & 7 {
-            2 => self.copy_blob(SET, 8),
-            3 => {
+            DEM_SET => self.copy_blob(SET, 8),
+            DEM_MULTIPLE => {
                 let mask = self.blob_le(MASK, 4);
                 self.length_prefixed(frame_type, mask == 0);
             }
-            1 | 4 | 5 | 6 => self.length_prefixed(frame_type, false),
+            DEM_READ | DEM_SINGLE | DEM_STATS | DEM_ALL => self.length_prefixed(frame_type, false),
             _ => self.has_error = true,
         }
     }
@@ -662,9 +649,11 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
 
     fn command(&mut self, command: u8) {
         match command {
-            42 => self.playerinfo(),
-            47 | 48 => self.packet_entities(command == 48),
-            3 => {
+            SVC_PLAYER_INFO => self.playerinfo(),
+            SVC_PACKET_ENTITIES | SVC_DELTA_PACKET_ENTITIES => {
+                self.packet_entities(command == SVC_DELTA_PACKET_ENTITIES);
+            }
+            SVC_UPDATE_STAT => {
                 let player = (self.target & 31) as usize;
                 let stat = self.coded_byte(
                     ST_IDX,
@@ -680,33 +669,32 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 self.stat_previous_residual = value.wrapping_sub(previous);
                 self.stats[player][stat as usize] = value;
             }
-            38 => {
+            SVC_UPDATE_STAT_LONG => {
                 self.blob_byte(STL_IDX);
                 self.copy_blob(STL_VAL, 4);
             }
-            6 => self.sound(),
-            23 => self.temp_entity(),
-            8 => {
+            SVC_SOUND => self.sound(),
+            SVC_TEMP_ENTITY => self.temp_entity(),
+            SVC_PRINT => {
                 self.blob_byte(PR_LEVEL);
-                self.generic(TEXT, 9);
+                self.generic(TEXT, SVC_STUFF_TEXT);
             }
-            9 | 26 => {
-                self.generic(TEXT, 9);
+            SVC_STUFF_TEXT | SVC_CENTER_PRINT => {
+                self.generic(TEXT, SVC_STUFF_TEXT);
             }
-            14 => {
+            SVC_UPDATE_FRAGS => {
                 self.copy_blob(FRAGS, 3);
             }
-            36 | 37 | 53 => {
+            SVC_UPDATE_PING | SVC_UPDATE_ENTER_TIME | SVC_UPDATE_PL => {
                 self.generic(PING, command);
             }
-            43 | 54 => {
+            SVC_NAILS | SVC_NAILS_2 => {
                 self.generic(NAILS, command);
             }
-            11 => {
-                let start = self.generic(GEN_BASE + 11, 11);
+            SVC_SERVER_DATA => {
+                let start = self.generic(GEN_BASE + usize::from(SVC_SERVER_DATA), SVC_SERVER_DATA);
                 if !self.has_error {
                     let end = self.offset;
-                    // decode: the serverdata body the walker just wrote
                     let body: &[u8] = if IS_ENCODE {
                         &self.src[start..end]
                     } else {
@@ -723,13 +711,11 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// The DF_* flags as one symbol in the common case: changed = flags ^ previous;
-    /// the often-toggling bits (sent axes 0-5, weaponframe 10) plus an
-    /// escape bit for "a rare bit changed" form one byte; only on escape do
-    /// bits 6-9, 11-14 and then bit 15 follow.
+    /// `changed = flags ^ previous`. The main byte: the often-toggling bits (axes 0-5,
+    /// weapon frame 10) and an escape bit; only on escape do bits 6-9, 11-14, then 15 follow.
     fn playerinfo_flags(&mut self, previous: u16) -> u16 {
-        // Bit 15 keeps the main symbol's contexts clear of rare_byte's (0x100-0x1ff)
-        // and bit15_byte's (0x200); previous's own bit 15 is left out.
+        // Bit 15 keeps the main contexts clear of rare_byte's (0x100-0x1ff) and bit15_byte's
+        // (0x200).
         let context = 0x8000 | u32::from(previous & 0x7fff);
         let changed = if IS_ENCODE {
             let low = u16::from(self.read_byte());
@@ -771,31 +757,35 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     }
 
     fn playerinfo(&mut self) {
+        const DF_DEAD: u16 = 1 << 8;
+        const DF_GIB: u16 = 1 << 9;
+        const ORIGIN_FLAGS: u16 = DF_ORIGIN | DF_ORIGIN << 1 | DF_ORIGIN << 2;
+        const ANGLE_FLAGS: u16 = DF_ANGLES | DF_ANGLES << 1 | DF_ANGLES << 2;
         let number = self.blob_byte(PI_NUM);
         self.playerinfo_previous_number = number;
         let previous = self.players[number as usize];
         let flags = self.playerinfo_flags(previous.flags);
         let frame = self.coded_residual(
             PI_FRAME,
-            u32::from(previous.frame) | u32::from(flags & 0x300),
+            u32::from(previous.frame) | u32::from(flags & (DF_DEAD | DF_GIB)),
             previous.frame,
         );
         let coord_width = self.proto.coord();
-        let origin_count = (flags & 7).count_ones() as usize;
-        let angle_count = (flags & 0x38).count_ones() as usize;
+        let origin_count = (flags & ORIGIN_FLAGS).count_ones() as usize;
+        let angle_count = (flags & ANGLE_FLAGS).count_ones() as usize;
         let offset = self.reserve(origin_count * coord_width + angle_count * 2);
-        if !self.recs.player_infos.push(PlayerInfoRecord {
+        if !self.records.player_infos.push(PlayerInfoRecord {
             offset,
             time: self.time,
             flags,
             number,
-            float_flags: u8::from(self.proto.has_float_coords),
+            has_float_coords: self.proto.has_float_coords,
         }) {
             self.has_error = true;
         }
         let mut origin_offset = offset;
         for axis in 0..3 {
-            if flags & (1 << axis) != 0 {
+            if flags & DF_ORIGIN << axis != 0 {
                 self.player_origin_offsets[number as usize][axis] = origin_offset;
                 origin_offset += coord_width as u32;
             }
@@ -803,7 +793,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         if flags & DF_MODEL != 0 {
             self.blob_byte(PI_MODEL);
         }
-        if flags & DF_SKIN != 0 {
+        if flags & DF_SKIN_NUM != 0 {
             self.blob_byte(PI_SKIN);
         }
         if flags & DF_EFFECTS != 0 {
@@ -825,8 +815,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         };
     }
 
-    /// Next entity number in this packet as predicted from the previous
-    /// packet's list.
     fn predict_entity(&mut self, previous: i32) -> i32 {
         while self.previous_packet_index < self.previous_packet.len()
             && i32::from(self.previous_packet[self.previous_packet_index]) <= previous
@@ -935,16 +923,16 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         if bits & U_MORE_BITS != 0 {
             bits |= u32::from(self.coded_byte(PE_MORE, (bits >> 9) | previous_model << 8));
         }
-        if bits & U_EVEN_MORE != 0 && self.proto.fte != 0 {
+        if bits & U_FTE_EVEN_MORE != 0 && self.proto.fte != 0 {
             more = u32::from(self.coded_byte(PE_MORE, 0x8000));
-            if more & X_YET_MORE != 0 {
+            if more & U_FTE_YET_MORE != 0 {
                 more |= u32::from(self.coded_byte(PE_MORE, 0x8001)) << 8;
             }
         }
-        if more & X_ENTITY_DBL != 0 {
+        if more & U_FTE_ENTITY_DBL != 0 {
             number += 512;
         }
-        if more & X_ENTITY_DBL_2 != 0 {
+        if more & U_FTE_ENTITY_DBL_2 != 0 {
             number += 1024;
         }
         let was_in_previous_packet =
@@ -953,14 +941,14 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         let mut state = self.entities[number];
         if bits & U_MODEL != 0 {
             state.model = self.blob_byte(PE_MODEL);
-        } else if more & X_MODEL_DBL != 0 {
+        } else if more & U_FTE_MODEL_DBL != 0 {
             self.blob_le(PE_MODEL, 2);
         }
         let model = u32::from(state.model);
         if bits & U_FRAME != 0 {
             state.frame = self.blob_residual(PE_FRAME, state.frame);
         }
-        if bits & U_COLORMAP != 0 {
+        if bits & U_COLOR_MAP != 0 {
             self.blob_byte(PE_MISC);
         }
         if bits & U_SKIN != 0 {
@@ -991,7 +979,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         if self.proto.has_float_coords {
             record_bits |= PE_FLOAT;
         }
-        if self.proto.has_wide_messages {
+        if self.proto.has_fte_float_coords {
             record_bits |= PE_WIDE;
         }
         let record = PacketEntityRecord {
@@ -1016,10 +1004,11 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 self.entity_origin_offsets[number][axis] = offset;
             }
             if bits & angle_flag != 0 {
-                if self.proto.has_wide_messages {
+                if self.proto.has_fte_float_coords {
                     self.coded_le(PE_A, 3 | model << 6, 2);
                 } else {
-                    let residual_bucket = u32::from(qb(state.angle_residuals[axis]).min(15));
+                    let residual_bucket =
+                        u32::from(byte_residual_bucket(state.angle_residuals[axis]).min(15));
                     let angle = self.coded_residual(
                         PE_A,
                         axis as u32 | residual_bucket << 2 | model << 6,
@@ -1030,19 +1019,19 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 }
             }
         }
-        if !self.recs.packet_entities.push(record) {
+        if !self.records.packet_entities.push(record) {
             self.has_error = true;
         }
-        if more & X_TRANS != 0 && self.proto.fte & FTE_TRANS != 0 {
+        if more & U_FTE_TRANS != 0 && self.proto.fte & FTE_PEXT_TRANS != 0 {
             self.blob_byte(PE_MISC);
         }
-        if more & X_SCALE != 0 {
+        if more & U_FTE_SCALE != 0 {
             self.blob_byte(PE_MISC);
         }
-        if more & X_FATNESS != 0 {
+        if more & U_FTE_FATNESS != 0 {
             self.blob_byte(PE_MISC);
         }
-        if more & X_COLOR_MOD != 0 && self.proto.fte & FTE_COLOR_MOD != 0 {
+        if more & U_FTE_COLOR_MOD != 0 && self.proto.fte & FTE_PEXT_COLOR_MOD != 0 {
             self.blob_le(PE_MISC, 3);
         }
         self.entities[number] = state;
@@ -1051,10 +1040,10 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     fn sound(&mut self) {
         let low = u32::from(self.coded_byte(SND_CH, u32::from(self.previous_command)));
         let channel = low | u32::from(self.coded_byte(SND_CH, 1 << 8 | low)) << 8;
-        if channel & 0x8000 != 0 {
+        if channel & u32::from(SND_VOLUME) != 0 {
             self.blob_byte(SND_MISC);
         }
-        if channel & 0x4000 != 0 {
+        if channel & u32::from(SND_ATTENUATION) != 0 {
             self.blob_byte(SND_MISC);
         }
         let entity = ((channel >> 3) & 1023) as usize;
@@ -1071,7 +1060,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             ([NO_OFFSET; 3], 0)
         };
         let offset = self.reserve(6);
-        if !self.recs.sounds.push(SoundRecord {
+        if !self.records.sounds.push(SoundRecord {
             offset,
             refs,
             kind,
@@ -1084,17 +1073,18 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     fn temp_entity(&mut self) {
         let kind = self.coded_byte(
             TE_TYPE,
-            u32::from(self.previous_temp_entity) | u32::from(self.previous_command == 23) << 8,
+            u32::from(self.previous_temp_entity)
+                | u32::from(self.previous_command == SVC_TEMP_ENTITY) << 8,
         );
         self.previous_temp_entity = kind;
         let coord_width = self.proto.coord();
         if coord_width != 2 {
             match kind {
-                5 | 6 | 9 => {
+                TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
                     self.blob_le(TE_MISC, 2);
                     self.copy_blob(TEF, 6 * coord_width);
                 }
-                2 | 12 => {
+                TE_GUNSHOT | TE_BLOOD => {
                     self.blob_byte(TE_MISC);
                     self.copy_blob(TEF, 3 * coord_width);
                 }
@@ -1103,7 +1093,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             return;
         }
         match kind {
-            5 | 6 | 9 => {
+            TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
                 let entity = self.blob_le(TE_MISC, 2) as usize;
                 let refs = if (1..=32).contains(&entity) {
                     self.player_origin_offsets[entity - 1]
@@ -1112,17 +1102,17 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 };
                 let offset = self.reserve(12);
                 if !self
-                    .recs
+                    .records
                     .temp_entities
                     .push(TempEntityRecord { offset, refs, kind })
                 {
                     self.has_error = true;
                 }
             }
-            2 | 12 => {
+            TE_GUNSHOT | TE_BLOOD => {
                 self.blob_byte(TE_MISC);
                 let offset = self.reserve(6);
-                if !self.recs.temp_entities.push(TempEntityRecord {
+                if !self.records.temp_entities.push(TempEntityRecord {
                     offset,
                     refs: [NO_OFFSET; 3],
                     kind,
@@ -1132,7 +1122,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
             _ => {
                 let offset = self.reserve(6);
-                if !self.recs.temp_entities.push(TempEntityRecord {
+                if !self.records.temp_entities.push(TempEntityRecord {
                     offset,
                     refs: [NO_OFFSET; 3],
                     kind,
@@ -1146,6 +1136,8 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     /// `dem_multiple` with mask 0: blocks of [u32 len][u16 type][len bytes].
     /// Tags: 1 block, 2 end, 0 escape (rest raw).
     fn hidden(&mut self, end: usize) {
+        const MVD_HIDDEN_DMG_DONE: u32 = 7;
+        const MVD_HIDDEN_USERCMD: u32 = 1;
         loop {
             if self.has_error {
                 return;
@@ -1183,9 +1175,9 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
             let block_len = self.blob_le(HIDLEN, 4);
             let block_type = self.blob_le(HIDTYPE, 2);
-            if block_type == 7 && block_len == 8 {
+            if block_type == MVD_HIDDEN_DMG_DONE && block_len == 8 {
                 self.copy_blob(HIDDMG, 8);
-            } else if block_type == 1 && block_len == 23 {
+            } else if block_type == MVD_HIDDEN_USERCMD && block_len == 23 {
                 self.usercmd();
             } else {
                 self.copy_blob(HIDMISC, block_len as usize);
@@ -1193,10 +1185,8 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// One usercmd block (mvdsv `SV_DebugClientCommand`): player, dropnum,
-    /// msec, pitch/yaw/roll as f32, forward/side/up as i16, buttons,
-    /// impulse. Angles on the 360/65536 grid are left to the numeric group
-    /// (`UsercmdRecord`); the rest goes to UC, context kind in bits 12-15.
+    /// mvdsv `SV_DebugClientCommand`: player, drop, msec, 3 x f32 angles, 3 x i16 moves,
+    /// buttons, impulse. Angles on the grid go to `UsercmdRecord`; context kind in bits 12-15.
     fn usercmd(&mut self) {
         let [last_player, second_last_player] = self.usercmd_previous_players;
         let player = self.coded_byte(
@@ -1207,7 +1197,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         let mut state = self.usercmds[player as usize];
         state.drop = self.coded_byte(UC, 1 << 12 | u32::from(state.drop));
         state.msec = self.coded_byte(UC, 2 << 12 | u32::from(state.msec));
-        // hidden() saw all 23 bytes inside the payload: the angles follow
+        // `hidden` checked that all 23 bytes are in the payload
         let mut grid = 0u8;
         if IS_ENCODE {
             for axis in 0..3 {
@@ -1233,7 +1223,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
         }
         if grid != 0
-            && !self.recs.usercmds.push(UsercmdRecord {
+            && !self.records.usercmds.push(UsercmdRecord {
                 offset,
                 number: player,
                 grid,
@@ -1255,42 +1245,39 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     }
 }
 
-/// Small class of an svc number for the command context.
 #[inline(always)]
 fn command_class(command: u8) -> u8 {
+    const SVC_BAD: u8 = 0;
     match command {
-        0 => 0,
-        42 => 1,
-        48 => 2,
-        47 => 3,
-        6 => 4,
-        23 => 5,
-        3 => 6,
-        38 => 7,
-        8 => 8,
-        51 => 9,
-        14 => 10,
-        36 => 11,
-        9 => 12,
-        43 | 54 => 13,
-        19 => 14,
+        SVC_BAD => 0,
+        SVC_PLAYER_INFO => 1,
+        SVC_DELTA_PACKET_ENTITIES => 2,
+        SVC_PACKET_ENTITIES => 3,
+        SVC_SOUND => 4,
+        SVC_TEMP_ENTITY => 5,
+        SVC_UPDATE_STAT => 6,
+        SVC_UPDATE_STAT_LONG => 7,
+        SVC_PRINT => 8,
+        SVC_SET_INFO => 9,
+        SVC_UPDATE_FRAGS => 10,
+        SVC_UPDATE_PING => 11,
+        SVC_STUFF_TEXT => 12,
+        SVC_NAILS | SVC_NAILS_2 => 13,
+        SVC_DAMAGE => 14,
         _ => 15,
     }
 }
 
-/// Sign/magnitude bucket of a byte residual (as i8).
 #[inline(always)]
-pub(crate) fn qb(residual: u8) -> u8 {
+fn byte_residual_bucket(residual: u8) -> u8 {
     crate::numeric::residual_bucket(i32::from(residual.cast_signed()))
 }
 
-/// The grid value of a usercmd angle: the `grid` in -32768..=32767 whose
-/// f32(grid * 45/8192) has exactly these bits (grid * 45/8192 is exact in f32),
-/// or None (-0.0, NaN, +180 and anything else off the grid).
+/// The `grid` in -32768..=32767 whose f32 `grid * 45/8192` has exactly these bits; `None` for
+/// -0.0, NaN, +180 and anything else off the grid.
 #[inline]
 pub(crate) fn on_grid(bits: u32) -> Option<u16> {
-    // f * 8192 is exact and the division correctly rounded: an integer
-    // quotient comes out exactly
+    // `f * 8192` is exact and the division correctly rounded, so an integer quotient is exact
     let scaled = f64::from(f32::from_bits(bits)) * 8192.0 / 45.0;
     if scaled.fract() != 0.0 || !(-32768.0..=32767.0).contains(&scaled) {
         return None;
@@ -1299,7 +1286,7 @@ pub(crate) fn on_grid(bits: u32) -> Option<u16> {
     (grid_f32(grid.cast_unsigned()) == bits).then_some(grid.cast_unsigned())
 }
 
-/// The f32 bits of grid value `grid` (as i16): grid * 45/8192, exact.
+/// Exact: `grid * 45/8192` as f32 bits.
 #[inline]
 pub(crate) fn grid_f32(grid: u16) -> u32 {
     (f32::from(grid.cast_signed()) * (45.0 / 8192.0)).to_bits()

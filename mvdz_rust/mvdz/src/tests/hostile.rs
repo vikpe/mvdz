@@ -12,9 +12,8 @@ use std::assert_matches;
 use std::io::Cursor;
 use std::time::Instant;
 
-/// A small demo and its file; `is_long`: the demo repeated to several
-/// segments.
-fn base(is_long: bool) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+/// `is_long`: the demo repeated to several segments.
+fn small_demo_and_file(is_long: bool) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let mut demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     if is_long {
         demo = several_segments(&demo);
@@ -27,7 +26,7 @@ fn base(is_long: bool) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
 fn refused(file: &[u8], what: &str, want: impl Fn(&Error) -> bool) {
     let start = Instant::now();
     assert!(readers_agree(file, what).is_none(), "{what}: accepted");
-    let refusal = crate::decompress(file, 2).err();
+    let refusal = decompress(file, 2).err();
     assert!(
         refusal.as_ref().is_some_and(&want),
         "{what}: unexpected result {refusal:?}"
@@ -45,7 +44,7 @@ fn is_corrupt(error: &Error) -> bool {
 
 #[test]
 fn structure_rules() -> anyhow::Result<()> {
-    let (demo, file) = base(true)?;
+    let (demo, file) = small_demo_and_file(true)?;
     assert_eq!(
         readers_agree(&file, "base").context("every reader refuses")?,
         demo
@@ -64,7 +63,9 @@ fn structure_rules() -> anyhow::Result<()> {
         demo
     );
     assert_eq!(
-        crate::read_info(Cursor::new(&other_sha256))?.header.sha256,
+        *crate::Decoder::new(Cursor::new(&other_sha256))?
+            .header()
+            .sha256(),
         [0xff; 32]
     );
     // a segment dropped
@@ -125,7 +126,7 @@ fn structure_rules() -> anyhow::Result<()> {
 /// 12; correctness F4): each is refused by a format rule or the budget.
 #[test]
 fn declared_sizes() -> anyhow::Result<()> {
-    let (_, file) = base(false)?;
+    let (_, file) = small_demo_and_file(false)?;
     let file_parts = parts(&file)?;
     // a segment that claims the largest raw length in 9 bytes that are
     // not a transform body: its output buffer is within the budget, and
@@ -133,7 +134,7 @@ fn declared_sizes() -> anyhow::Result<()> {
     let mut edited = file_parts.clone();
     let mut segment = segment_header_bytes(u32::try_from(MAX_SEGMENT_RAW)?, 0, 0);
     segment.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
-    edited.header.size = MAX_SEGMENT_RAW;
+    edited.header.size_bytes = MAX_SEGMENT_RAW;
     edited.segments = vec![segment];
     refused(&edited.build(), "1 MiB segment in 9 bytes", is_corrupt);
     // a segment one byte over the largest coded length: refused at its
@@ -148,7 +149,7 @@ fn declared_sizes() -> anyhow::Result<()> {
     });
     // a header claiming 60 GB
     let mut edited = file_parts.clone();
-    edited.header.size = 60 << 30;
+    edited.header.size_bytes = 60 << 30;
     refused(&edited.build(), "60 GB header", is_corrupt);
     // a models block of 256 MiB declared in a few bytes
     let mut huge_models = file[..HEADER_LEN].to_vec();
@@ -164,17 +165,17 @@ fn declared_sizes() -> anyhow::Result<()> {
     past_end.extend_from_slice(&file_parts.segments[0]);
     refused(&past_end, "segment length", is_corrupt);
     // the caller's memory budget
-    let (demo, file) = base(false)?;
-    let small = crate::Limits {
+    let (demo, file) = small_demo_and_file(false)?;
+    let small = crate::budget::Limits {
         memory: demo.len() as u64 / 2,
         ..Default::default()
     };
     assert_matches!(
-        crate::decompress_with(&file, 1, &small),
+        crate::decode::decompress(&file, 1, &small),
         Err(Error::Limit(_))
     );
     assert!(
-        crate::Reader::new(Cursor::new(&file), 1, &small)
+        crate::stream::Decoder::with_limits(Cursor::new(&file), 1, &small)
             .and_then(|mut reader| reader.read_demo(&mut [0; 10]))
             .is_err()
     );
@@ -250,7 +251,7 @@ fn model_amplification() -> anyhow::Result<()> {
 fn mutations_agree() -> anyhow::Result<()> {
     let mut rng = Rng(0x5eed);
     for is_long in [false, true] {
-        let (_, file) = base(is_long)?;
+        let (_, file) = small_demo_and_file(is_long)?;
         for _ in 0..150 {
             let mut mutated = file.clone();
             match rng.below(3) {
@@ -272,13 +273,13 @@ fn mutations_agree() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A model header (FORMAT.md §8.3) of `table_count` own tables and the
+/// A model header (FORMAT.md 8.3) of `table_count` own tables and the
 /// fallback, each with all 256 symbols present and pseudo-random q values:
 /// legal (rule M2 holds), and every table takes a 16 KiB slot LUT once built.
 fn wide_model(table_count: u32) -> Vec<u8> {
-    use crate::coder::rc::{Encoder, IntModel};
+    use crate::coder::rc::{IntModel, RangeEncoder};
     const NQC: usize = 306;
-    let mut encoder = Encoder::new();
+    let mut encoder = RangeEncoder::new();
     let mut int_model = IntModel::new(NQC + 8);
     let mut state = 1u32;
     let mut next_q = || {
@@ -313,7 +314,7 @@ fn wide_model(table_count: u32) -> Vec<u8> {
 /// opened, under the reader's budget, which refuses them, for the file
 /// information as for a decode. With room for them the file opens, quickly.
 #[test]
-fn large_tables() -> anyhow::Result<()> {
+fn large_models_block() -> anyhow::Result<()> {
     let demo = usercmd_demo();
     let file = compress(&several_segments(&demo))?;
     let mut file_parts = parts(&file)?;
@@ -333,16 +334,16 @@ fn large_tables() -> anyhow::Result<()> {
     file_parts.models = models;
     let wide = file_parts.build();
     // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
-    let limits = crate::Limits {
+    let limits = crate::budget::Limits {
         memory: 128 << 20,
         ..Default::default()
     };
-    let error = crate::read_info_with(Cursor::new(&wide), &limits).err();
+    let error = scan(&wide, &limits).err();
     assert_eq!(error, Some(Error::Limit("memory")));
-    let error = crate::decompress_with(&wide, 1, &limits).err();
+    let error = crate::decode::decompress(&wide, 1, &limits).err();
     assert_eq!(error, Some(Error::Limit("memory")));
     let start = Instant::now();
-    crate::read_info_with(Cursor::new(&wide), &crate::Limits::default())?;
+    scan(&wide, &crate::budget::Limits::default())?;
     assert!(
         start.elapsed().as_secs_f64() < 10.0,
         "reading the models took {:?}",

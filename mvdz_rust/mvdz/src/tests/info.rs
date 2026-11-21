@@ -3,7 +3,7 @@
 //! run without the demo cache.
 
 use super::common::*;
-use crate::format::{HEADER_LEN, Header};
+use crate::format::{HEADER_LEN, Header, header_bytes, parse_header};
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
@@ -16,38 +16,38 @@ use std::io::Cursor;
 fn header_describes_the_demo() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{\"x\":1}")], false);
     for demo in [small.clone(), several_segments(&small)] {
-        let (_, ms, whole) = crate::segment::frame_scan(&demo);
-        assert_eq!(whole, demo.len());
+        let frames = crate::segment::frame_scan(&demo);
+        assert_eq!(frames.framed_len, demo.len());
         let file = compress(&demo)?;
-        let header = Header::parse(&file)?;
+        let header = parse_header(&file)?;
         assert_eq!(&file[..4], b"MVDZ");
-        assert_eq!(header.size, demo.len() as u64);
-        assert_eq!(header.duration_ms, ms);
-        assert_eq!(header.crc, crate::util::crc32(&demo));
+        assert_eq!(header.size_bytes, demo.len() as u64);
+        assert_eq!(header.duration_ms, frames.duration_ms);
+        assert_eq!(header.crc32, crate::util::crc32(&demo));
         assert_eq!(header.sha256, <[u8; 32]>::from(Sha256::digest(&demo)));
-        assert_eq!(header.bytes(), file[..HEADER_LEN]);
-        let file_info = crate::read_info(Cursor::new(&file))?;
-        assert_eq!(file_info.header, header);
-        assert_eq!(file_info.file_size, file.len() as u64);
+        assert_eq!(header_bytes(&header), file[..HEADER_LEN]);
+        let decoder = crate::Decoder::new(Cursor::new(&file))?;
+        assert_eq!(*decoder.header(), header);
+        let layout = scan(&file, &crate::budget::Limits::default())?;
+        assert_eq!(layout.header, header);
         assert_eq!(
-            file_info.index.segments.len() > 1,
-            demo.len() > crate::segment::SEGMENT
+            layout.segments.len() > 1,
+            demo.len() > crate::segment::SEGMENT_TARGET_RAW
         );
         let (mut raw, mut previous_start) = (0, 0);
-        for (index, segment) in file_info.index.segments.iter().enumerate() {
+        for (index, (_, segment)) in layout.segments.iter().enumerate() {
+            let size = u64::from(segment.raw_len);
             assert_eq!(segment.raw_offset, raw, "segment {index}");
-            assert!(segment.start_ms >= previous_start, "segment {index}");
-            assert!(segment.raw_len > 0, "segment {index}");
-            let part = &demo[raw as usize..(raw + segment.raw_len) as usize];
+            assert!(segment.offset_ms >= previous_start, "segment {index}");
+            assert!(size > 0, "segment {index}");
             assert_eq!(
-                segment.start_ms,
-                crate::segment::frame_scan(&demo[..raw as usize]).1
+                segment.offset_ms,
+                crate::segment::frame_scan(&demo[..raw as usize]).duration_ms
             );
-            raw += segment.raw_len;
-            previous_start = segment.start_ms;
-            assert!(!part.is_empty());
+            raw += size;
+            previous_start = segment.offset_ms;
         }
-        assert_eq!(raw, header.size);
+        assert_eq!(raw, header.size_bytes);
         assert_eq!(
             readers_agree(&file, "header").context("every reader refuses")?,
             demo
@@ -66,11 +66,11 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     assert_eq!(file_parts.build(), file);
     #[expect(clippy::type_complexity, reason = "a table of named edits")]
     let cases: [(&str, fn(&mut Header)); 5] = [
-        ("size + 1", |header| header.size += 1),
-        ("size - 1", |header| header.size -= 1),
+        ("size + 1", |header| header.size_bytes += 1),
+        ("size - 1", |header| header.size_bytes -= 1),
         ("duration + 1", |header| header.duration_ms += 1),
         ("duration - 1", |header| header.duration_ms -= 1),
-        ("crc", |header| header.crc ^= 1),
+        ("crc", |header| header.crc32 ^= 1),
     ];
     for (what, edit) in cases {
         let mut edited = file_parts.clone();
@@ -98,17 +98,11 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     // an unknown version, another magic
     let mut other_version = file.clone();
     other_version[4] = 3;
-    assert_matches!(
-        crate::decompress(&other_version, 1),
-        Err(crate::Error::Format(_))
-    );
+    assert_matches!(decompress(&other_version, 1), Err(crate::Error::Format(_)));
     assert!(readers_agree(&other_version, "version").is_none());
     let mut other_magic = file.clone();
     other_magic[0] = b'N';
-    assert_matches!(
-        crate::decompress(&other_magic, 1),
-        Err(crate::Error::Format(_))
-    );
+    assert_matches!(decompress(&other_magic, 1), Err(crate::Error::Format(_)));
     // every cut of the file
     for cut in [
         0,
@@ -169,7 +163,7 @@ fn truncated_demo_round_trips() -> anyhow::Result<()> {
         assert_matches!(result, Err(crate::Error::NotMvd(_)), "{result:?}");
         for cut in [1000, 123_457, duel.len() / 2 + 3, duel.len() - 1] {
             let file = compress(&duel[..cut])?;
-            assert_eq!(crate::decompress(&file, 2)?, &duel[..cut], "cut {cut}");
+            assert_eq!(decompress(&file, 2)?, &duel[..cut], "cut {cut}");
         }
     }
     Ok(())

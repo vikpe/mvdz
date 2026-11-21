@@ -1,53 +1,58 @@
-//! Decompression in order.
-//!
-//! [`Reader`] decodes a file as it arrives from any `io::Read` (file,
-//! pipe, socket, VFS callback), as many segments at a time as it has
-//! threads.
+//! In-order decompression: [`Decoder`] decodes a file as it arrives from any `io::Read`,
+//! as many segments at a time as it has threads.
 
 use crate::budget::{Budget, Charge, Limits, zeroed};
-use crate::coder::rans::FileTables;
+use crate::coder::rans::ModelsBlock;
 use crate::decode::{DemoCheck, decode_segment};
 use crate::error::{Error, Result, bad};
 use crate::format::{
-    HEADER_LEN, Header, LEN, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_LEN, Section, SegmentHeader,
-    check_coded_len, len_field, parse_segment_header,
+    HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_LEN, SegmentHeader,
+    SegmentSpan, check_coded_len, len_field, parse_segment_header,
 };
-use crate::util::par_map;
+use crate::util::{par_map, thread_count};
 use std::collections::VecDeque;
 use std::io::{self, Read};
 
-// ---------------------------------------------------------------- reader
-
-/// Decoder of a file read in order.
-///
-/// Yields the original demo bytes
-/// through `io::Read`, checked as they arrive: every segment's CRC-32
-/// before its bytes are returned, and the whole demo's size, duration and
-/// CRC-32 before the end is reported. The first error is sticky.
-pub struct Reader<R: Read> {
+/// Yields the decoded bytes through `io::Read`, checked as they arrive: each segment's
+/// CRC-32 before its bytes, the whole CRC-32 before the end. The first error is sticky.
+#[derive(Debug)]
+pub struct Decoder<R: Read> {
     input: R,
     layout: Layout,
-    /// the file offset of what is read next
-    offset: u64,
+    next_offset: u64,
     current: Vec<u8>,
-    /// held so the current segment stays charged to the budget
     current_charge: Option<Charge>,
     at: usize,
-    /// decoded and checked segments after the current one
+    /// Decoded and checked, after `current`.
     ready: VecDeque<(Vec<u8>, Charge)>,
-    /// an error met after the segments in `ready`, reported once they are read
+    /// Met after the segments in `ready`; reported once they are read.
     deferred_error: Option<Error>,
     is_done: bool,
     failure: Option<Error>,
     threads: usize,
     budget: Budget,
-    /// the whole-demo checks, until the end has passed them
     check: Option<DemoCheck>,
 }
 
-impl<R: Read> Reader<R> {
-    /// Decoding from any reader; reads the file's header.
-    pub fn new(mut input: R, threads: usize, limits: &Limits) -> Result<Self> {
+impl<R: Read> Decoder<R> {
+    /// Reads the header; decodes on all logical cores until `max_threads` says otherwise.
+    pub fn new(input: R) -> Result<Self> {
+        Self::with_limits(input, thread_count(0), &Limits::default())
+    }
+
+    /// Up to this many segments are decoded at once, nothing more is buffered; capped at the
+    /// logical cores, 0 is all of them.
+    #[must_use]
+    pub fn max_threads(mut self, max_threads: u8) -> Self {
+        self.threads = thread_count(max_threads);
+        self
+    }
+
+    pub fn header(&self) -> &Header {
+        &self.layout.header
+    }
+
+    pub(crate) fn with_limits(mut input: R, threads: usize, limits: &Limits) -> Result<Self> {
         let mut header = [0u8; HEADER_LEN];
         let mut filled = 0;
         while filled < HEADER_LEN {
@@ -65,7 +70,7 @@ impl<R: Read> Reader<R> {
         Ok(Self {
             input,
             layout,
-            offset: HEADER_LEN as u64,
+            next_offset: HEADER_LEN as u64,
             current: Vec::new(),
             current_charge: None,
             at: 0,
@@ -73,20 +78,14 @@ impl<R: Read> Reader<R> {
             deferred_error: None,
             is_done: false,
             failure: None,
-            threads: crate::util::threads(threads),
+            threads,
             budget,
             check,
         })
     }
 
-    /// The file's header: the demo's size, duration and hashes.
-    pub fn header(&self) -> &Header {
-        &self.layout.header
-    }
-
-    /// Reads demo bytes; returns 0 at the end. The first error is returned
-    /// again by every later call.
-    pub fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
+    /// Returns 0 at the end. The first error is returned again by every later call.
+    pub(crate) fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.check_failed()?;
         while self.at == self.current.len() && !self.is_done {
             if let Err(error) = self.advance() {
@@ -111,16 +110,15 @@ impl<R: Read> Reader<R> {
         }
     }
 
-    /// The next length field of the stream (None: the stream ends before
-    /// its first byte).
+    /// `None`: the stream ends before its first byte.
     fn read_len(&mut self) -> Result<Option<u64>> {
-        let mut field = [0u8; LEN];
+        let mut field = [0u8; LEN_FIELD_LEN];
         let mut filled = 0;
-        while filled < LEN {
+        while filled < LEN_FIELD_LEN {
             match self.input.read(&mut field[filled..]) {
                 Ok(0) if filled == 0 => return Ok(None),
                 Ok(0) => return bad("incomplete file"),
-                Ok(read) => filled += read.min(LEN - filled),
+                Ok(read) => filled += read.min(LEN_FIELD_LEN - filled),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.into()),
             }
@@ -128,8 +126,7 @@ impl<R: Read> Reader<R> {
         Ok(len_field(&field))
     }
 
-    /// The `len` bytes of a block, charged to the budget while the charge
-    /// lives.
+    /// Charged to the budget while the returned charge lives.
     fn read_body(&mut self, len: u64) -> Result<(Vec<u8>, Charge)> {
         let charge = self.budget.alloc(len)?;
         // the data arrives before the buffer grows: a lying length on a
@@ -143,8 +140,6 @@ impl<R: Read> Reader<R> {
         Ok((body, charge))
     }
 
-    /// The next segment of the stream: its header and its bytes, charged to the
-    /// budget while the charge lives.
     fn read_segment(&mut self) -> Result<(SegmentHeader, Vec<u8>, Charge)> {
         // the stream may end here, short of the demo: `decode_batch` delivers the
         // complete segments before it first
@@ -152,19 +147,18 @@ impl<R: Read> Reader<R> {
             return bad("incomplete file");
         };
         check_coded_len(coded)?;
-        let section = Section {
-            offset: self.offset,
-            len: coded + SEGMENT_FIELDS_LEN as u64,
+        let span = SegmentSpan {
+            len_field_offset: self.next_offset,
+            body_len: coded + SEGMENT_FIELDS_LEN as u64,
         };
-        let (body, charge) = self.read_body(section.len)?;
+        let (body, charge) = self.read_body(span.body_len)?;
         let header = parse_segment_header(&body[..SEGMENT_FIELDS_LEN])?;
-        let header = self.layout.segment(&section, header)?;
-        self.offset = section.end();
+        let header = self.layout.segment(&span, header)?;
+        self.next_offset = span.end();
         Ok((header, body, charge))
     }
 
-    /// Reads up to `threads` segments, decodes them in parallel and queues them
-    /// in order, each checked.
+    /// Up to `threads` segments, decoded in parallel, queued in order.
     /// ponytail: reading and decoding take turns and a batch waits for its
     /// slowest segment; a rolling window would overlap them.
     fn decode_batch(&mut self) -> Result<()> {
@@ -185,13 +179,13 @@ impl<R: Read> Reader<R> {
             let charge = budget.alloc(u64::from(header.raw_len))?;
             budget.work(u64::from(header.raw_len))?;
             let mut out = zeroed(header.raw_len as usize)?;
-            let timing = decode_segment(layout, body, header, &mut out, budget)?;
-            Ok((out, charge, timing))
+            let scan = decode_segment(layout, body, header, &mut out, budget)?;
+            Ok((out, charge, scan))
         });
         for result in decoded {
-            let checked = result.and_then(|(out, charge, timing)| {
+            let checked = result.and_then(|(out, charge, scan)| {
                 if let Some(check) = self.check.as_mut() {
-                    check.segment(&out, timing)?;
+                    check.segment(&out, scan)?;
                 }
                 Ok((out, charge))
             });
@@ -207,7 +201,7 @@ impl<R: Read> Reader<R> {
         Ok(())
     }
 
-    /// Reads on until a segment's bytes are available or the file ends.
+    /// Until a segment's bytes are available or the file ends.
     fn advance(&mut self) -> Result<()> {
         while !self.is_done && self.at == self.current.len() {
             if let Some((out, charge)) = self.ready.pop_front() {
@@ -229,18 +223,18 @@ impl<R: Read> Reader<R> {
                 if len > MAX_MODELS_LEN {
                     return bad("models too large");
                 }
-                let tables = if len > 0 {
+                let models_block = if len > 0 {
                     let (body, _charge) = self.read_body(len)?;
-                    Some(FileTables::new(&body, self.threads, &self.budget)?)
+                    Some(ModelsBlock::new(&body, self.threads, &self.budget)?)
                 } else {
                     None
                 };
-                self.layout.models(tables)?;
-                self.offset += LEN as u64 + len;
+                self.layout.models(models_block)?;
+                self.next_offset += LEN_FIELD_LEN as u64 + len;
                 continue;
             }
             if self.layout.is_complete() {
-                // the segments hold the whole demo: the file ends here
+                // the file ends here
                 let mut one = [0u8; 1];
                 loop {
                     match self.input.read(&mut one) {
@@ -263,7 +257,7 @@ impl<R: Read> Reader<R> {
     }
 }
 
-impl<R: Read> Read for Reader<R> {
+impl<R: Read> Read for Decoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         Ok(self.read_demo(buf)?)
     }

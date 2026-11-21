@@ -1,13 +1,5 @@
-//! Stream ids.
-//!
-//! Every byte of the input lands in exactly one
-//! stream: a lazy structural byte stream (coded with a side context, decoded
-//! one symbol at a time by the walker), a blob stream (plain bytes, decoded
-//! up front), or a numeric stream (residuals coded by the numeric groups
-//! after the walk).
-//!
-//! Ids below 80 were all structural or numeric streams once; the ones in
-//! [`PLAIN`] have no model and are blob streams.
+//! Stream ids. Every input byte lands in one stream: lazy (structural, decoded symbol by
+//! symbol by the walker), blob (plain bytes, DEFLATE) or numeric (residuals, after the walk).
 
 pub(crate) const TIME: usize = 0;
 pub(crate) const TYPE: usize = 1;
@@ -43,16 +35,14 @@ pub(crate) const TE_TYPE: usize = 30;
 pub(crate) const TE_MISC: usize = 31;
 pub(crate) const PR_LEVEL: usize = 32;
 pub(crate) const FRAGS: usize = 33;
-/// usercmd hidden blocks: every field but the angles on the grid
+/// usercmd blocks: every field but the angles on the grid
 pub(crate) const UC: usize = 34;
-/// The fewest UC symbols one usercmd block codes (its angles all on the
-/// grid): player, dropnum, msec, grid, three moves of two bytes, buttons,
-/// impulse. Bounds the usercmd record list (FORMAT.md §6.3).
+/// Player, dropnum, msec, grid, three 2-byte moves, buttons, impulse. Bounds the usercmd
+/// record list (FORMAT.md section 6.3).
 pub(crate) const UC_MIN_SYMBOLS: usize = 12;
 pub(crate) const LAZY_STREAM_COUNT: usize = 35;
 
 // numeric streams
-pub(crate) const NUMERIC_BASE: usize = 48;
 pub(crate) const PI_OX: usize = 48;
 pub(crate) const PI_AP: usize = 51;
 pub(crate) const PE_OX: usize = 54;
@@ -63,7 +53,6 @@ pub(crate) const PI_F0: usize = 60;
 pub(crate) const PE_F0: usize = 63;
 /// usercmd angles on the 360/65536 grid
 pub(crate) const UC_A: usize = 66;
-pub(crate) const NUMERIC_END: usize = 67;
 
 // blob streams
 pub(crate) const RAW: usize = 80;
@@ -75,29 +64,26 @@ pub(crate) const NAILS: usize = 85;
 pub(crate) const HIDMISC: usize = 86;
 pub(crate) const SNDF: usize = 87;
 pub(crate) const TEF: usize = 88;
-/// Not a stored stream: the id under which the blob body of a segment (the
-/// DEFLATE stream of all its blob streams) is reported in statistics.
+/// Not stored: the id under which statistics report a segment's DEFLATE blob body.
 pub(crate) const BLOB_BODY: usize = 78;
 pub(crate) const GEN_BASE: usize = 128;
 pub(crate) const STREAM_COUNT: usize = GEN_BASE + 256;
 
-/// Blob streams with an id below 80: fields whose model saved too little to
-/// be worth specifying (SIMPLIFY.md).
+/// Blob streams below id 80: their models saved too little to specify (SIMPLIFY.md).
 pub(crate) const PLAIN: [usize; 20] = [
     MASK, ESCLEN, HIDTAG, HIDLEN, HIDTYPE, HIDDMG, PI_NUM, PI_MODEL, PI_SKIN, PI_EFF, PE_HDR,
     PE_MODEL, PE_FRAME, PE_MISC, STL_IDX, SND_MISC, TE_MISC, PR_LEVEL, FRAGS, STL_VAL,
 ];
-/// Bit `id` set: `id` is in [`PLAIN`].
-const PLAIN_MASK: u64 = {
-    let (mut mask, mut index) = (0u64, 0);
-    while index < PLAIN.len() {
-        mask |= 1 << PLAIN[index];
-        index += 1;
-    }
-    mask
-};
 #[inline]
 fn is_plain(id: usize) -> bool {
+    const PLAIN_MASK: u64 = {
+        let (mut mask, mut index) = (0u64, 0);
+        while index < PLAIN.len() {
+            mask |= 1 << PLAIN[index];
+            index += 1;
+        }
+        mask
+    };
     id < 64 && PLAIN_MASK >> id & 1 != 0
 }
 #[inline]
@@ -106,7 +92,7 @@ pub(crate) fn is_lazy(id: usize) -> bool {
 }
 #[inline]
 pub(crate) fn is_numeric(id: usize) -> bool {
-    (NUMERIC_BASE..NUMERIC_END).contains(&id) && !is_plain(id)
+    (PI_OX..=UC_A).contains(&id) && !is_plain(id)
 }
 #[inline]
 pub(crate) fn is_blob(id: usize) -> bool {

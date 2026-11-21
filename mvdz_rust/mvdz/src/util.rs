@@ -1,13 +1,10 @@
-//! Shared helpers: little-endian u32 fields, checked integer conversions,
-//! CRC-32, a scoped parallel map.
-
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ----------------------------------------------------------------- fields
 
-/// Appends `value` as a little-endian u32, the one integer type inside a
-/// segment and the models block. Every caller's value is bounded by the
-/// 1 MiB segment, the 2 MiB coded segment or the 16 MiB models block.
+/// Every caller's value is bounded by the 1 MiB segment, the 2 MiB coded segment or the
+/// 16 MiB models block.
 pub(crate) fn put_u32(out: &mut Vec<u8>, value: usize) {
     debug_assert!(
         u32::try_from(value).is_ok(),
@@ -16,7 +13,7 @@ pub(crate) fn put_u32(out: &mut Vec<u8>, value: usize) {
     out.extend_from_slice(&(value as u32).to_le_bytes());
 }
 
-/// Byte cursor over a buffer. Every read is bounds-checked.
+#[derive(Debug)]
 pub(crate) struct ByteReader<'a> {
     pub(crate) bytes: &'a [u8],
     pub(crate) offset: usize,
@@ -29,8 +26,7 @@ impl<'a> ByteReader<'a> {
     pub(crate) fn u32le(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(*self.take(4)?.first_chunk()?))
     }
-    /// A little-endian u32 as a count or length; `None` where it does not
-    /// fit in a `usize` (a 16-bit target).
+    /// `None` where it does not fit in a `usize` (a 16-bit target).
     pub(crate) fn u32_len(&mut self) -> Option<usize> {
         usize::try_from(self.u32le()?).ok()
     }
@@ -39,8 +35,8 @@ impl<'a> ByteReader<'a> {
         self.offset += len;
         Some(taken)
     }
-    /// A length-prefixed byte string (u32 length, bytes).
-    pub(crate) fn bytes(&mut self) -> Option<&'a [u8]> {
+    /// u32 length, then the bytes.
+    pub(crate) fn length_prefixed(&mut self) -> Option<&'a [u8]> {
         let len = self.u32_len()?;
         self.take(len)
     }
@@ -52,7 +48,6 @@ impl<'a> ByteReader<'a> {
     }
 }
 
-/// A count or size as a float, for ratios and estimates.
 #[expect(clippy::cast_precision_loss, reason = "exact below 2^53")]
 pub(crate) fn approx_f64(count: u64) -> f64 {
     count as f64
@@ -64,14 +59,12 @@ pub(crate) fn to_usize(value: u64) -> Option<usize> {
 
 // ---------------------------------------------------------------- crc32
 
-/// CRC-32 as in zlib, gzip and PNG (ISO 3309; polynomial 0xEDB88320
-/// reflected): the checksum every platform with DEFLATE already has.
+/// As in zlib, gzip and PNG: every platform with DEFLATE has it.
 pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     crc32fast::hash(bytes)
 }
 
-/// Running CRC-32 over consecutive chunks.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Crc(crc32fast::Hasher);
 
 impl Crc {
@@ -85,23 +78,23 @@ impl Crc {
 
 // ---------------------------------------------------------------- parallel helper
 
-/// The thread count a caller asked for: 0 means one per logical core (1
-/// where that is unknown or threads cannot be spawned).
-pub(crate) fn threads(requested: usize) -> usize {
-    if requested > 0 {
-        return requested;
+/// At most `max_threads` and the logical cores (1 where unknown or threads cannot be
+/// spawned); 0 is one per logical core.
+pub(crate) fn thread_count(max_threads: u8) -> usize {
+    let available = if HAS_THREADS {
+        std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+    } else {
+        1
+    };
+    match max_threads {
+        0 => available,
+        max_threads => usize::from(max_threads).min(available),
     }
-    if !HAS_THREADS {
-        return 1;
-    }
-    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
-/// True where the standard library can spawn threads.
 pub(crate) const HAS_THREADS: bool = !cfg!(target_family = "wasm");
 
-/// Runs `job(index)` for index in 0..count on up to `threads` threads; results
-/// in order.
+/// Results in index order.
 pub(crate) fn par_map<T: Send, F: Fn(usize) -> T + Sync>(
     threads: usize,
     count: usize,
@@ -111,8 +104,6 @@ pub(crate) fn par_map<T: Send, F: Fn(usize) -> T + Sync>(
         return (0..count).map(job).collect();
     }
     let next = AtomicUsize::new(0);
-    // each thread claims the next index and keeps its results; they are put in
-    // order once every thread has finished
     let done: Vec<Vec<(usize, T)>> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads.min(count))
             .map(|_| {
@@ -161,9 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn threads_zero_is_automatic() {
-        assert_eq!(super::threads(3), 3);
-        assert!(super::threads(0) >= 1);
+    fn thread_count_is_capped_at_the_cores() {
+        let cores = super::thread_count(0);
+        assert!(cores >= 1);
+        assert_eq!(super::thread_count(1), 1);
+        assert_eq!(super::thread_count(u8::MAX), cores.min(255));
     }
 
     #[test]

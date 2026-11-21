@@ -38,14 +38,11 @@ fn vectors_decode() -> anyhow::Result<()> {
         let got = readers_agree(&bytes, file);
         if let Some(expected_error) = expected.strip_prefix("error: ") {
             assert!(got.is_none(), "{file}: accepted");
-            let refusal = crate::decompress(&bytes, 1)
-                .err()
-                .map(|error| error.to_string());
+            let refusal = decompress(&bytes, 1).err().map(|error| error.to_string());
             assert_eq!(refusal.as_deref(), Some(expected_error), "{file}: error");
         } else {
-            let decoded = got.with_context(|| {
-                format!("{file}: refused: {:?}", crate::decompress(&bytes, 1).err())
-            })?;
+            let decoded =
+                got.with_context(|| format!("{file}: refused: {:?}", decompress(&bytes, 1).err()))?;
             assert_eq!(
                 &hex(&Sha256::digest(&decoded)),
                 expected,
@@ -103,9 +100,9 @@ fn multi_demoinfo() -> Vec<u8> {
 /// A model header of `table_count` tables with every symbol present: amplifies
 /// cheaply under an adaptive coder (robustness review 1 and 5).
 fn amplifying_model(table_count: u32) -> Vec<u8> {
-    use crate::coder::rc::{Encoder, IntModel};
+    use crate::coder::rc::{IntModel, RangeEncoder};
     const NQC: usize = 306;
-    let mut encoder = Encoder::new();
+    let mut encoder = RangeEncoder::new();
     let mut int_model = IntModel::new(NQC + 8);
     int_model.put(&mut encoder, NQC, 256);
     int_model.put(&mut encoder, NQC + 1, table_count);
@@ -142,14 +139,14 @@ fn transform_body(
     blobs: &[(usize, &[u8])],
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     use crate::coder::rans;
-    let mut models: Vec<Option<rans::Shared>> = Vec::new();
+    let mut models: Vec<Option<rans::FileModel>> = Vec::new();
     let mut ids = Vec::new();
     let mut bodies = Vec::new();
     for (id, symbols) in lazy {
         let contexts = vec![0u16; symbols.len()];
         let mut tally = rans::Tally::new(256);
         tally.add(symbols, &contexts);
-        let model = tally.shared().context("a model")?;
+        let model = tally.file_model().context("a model")?;
         bodies.push(rans::encode_bytes(symbols, &contexts, &model));
         models.resize_with(models.len().max(id + 1), || None);
         models[*id] = Some(model);
@@ -180,27 +177,27 @@ fn transform_body(
     let deflated = if blob_bytes.is_empty() {
         Vec::new()
     } else {
-        crate::deflate::compress(&blob_bytes, 9)
+        crate::deflate::compress(&blob_bytes)
     };
     put_u32(&mut body, deflated.len());
     for (_, _, stream_body) in lazy {
         body.extend_from_slice(stream_body);
     }
     body.extend_from_slice(&deflated);
-    Ok((crate::segment::tables_body(&models, &ids), body))
+    Ok((crate::segment::models_body(&models, &ids), body))
 }
 
 /// The file of `demo` as one transform segment with these models and body.
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
-    let (_, ms, _) = crate::segment::frame_scan(demo);
+    let ms = crate::segment::frame_scan(demo).duration_ms;
     let crc = crate::util::crc32(demo);
     let mut segment = segment_header_bytes(u32::try_from(demo.len())?, u32::try_from(ms)?, crc);
     segment.extend_from_slice(body);
     Ok(Parts {
         header: Header {
-            size: demo.len() as u64,
+            size_bytes: demo.len() as u64,
             duration_ms: ms,
-            crc,
+            crc32: crc,
             sha256: Sha256::digest(demo).into(),
         },
         models: models.clone(),
@@ -231,7 +228,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         "one byte after the last segment",
     );
     let mut edited = file_parts.clone();
-    edited.header.size += 1;
+    edited.header.size_bytes += 1;
     add("header-size", edited.build(), "the header's size + 1");
     let mut edited = file_parts.clone();
     edited.header.duration_ms += 1;
@@ -241,7 +238,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         "the header's duration_ms + 1",
     );
     let mut edited = file_parts.clone();
-    edited.header.crc ^= 1;
+    edited.header.crc32 ^= 1;
     add(
         "header-crc",
         edited.build(),
@@ -365,12 +362,12 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         usercmd_segment(None, Some(&misc))?,
         "a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream",
     );
-    tables(&mut add)
+    models_block(&mut add)
 }
 
-/// Hostile models blocks (FORMAT.md §2.6, §8.4), from the usercmd demo
+/// Hostile models blocks (FORMAT.md 2.6, 8.4), from the usercmd demo
 /// repeated to several segments.
-fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
+fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let usercmd = usercmd_demo();
     let file = compress(&several_segments(&usercmd))?;
     let file_parts = parts(&file)?;
@@ -378,10 +375,10 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
         !file_parts.models.is_empty(),
         "a segmented normal file has models"
     );
-    let entries = tables_entries(&file_parts.models)?;
+    let entries = models_entries(&file_parts.models)?;
     let with_entries = |entries: &[(usize, Vec<u8>)]| {
         let mut edited = file_parts.clone();
-        edited.models = tables_body(entries);
+        edited.models = models_body(entries);
         edited.build()
     };
     let mut edited = entries.clone();
@@ -473,9 +470,9 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     );
     let mut edited = entries.clone();
     edited[0].1 = {
-        use crate::coder::rc::{Encoder, IntModel};
+        use crate::coder::rc::{IntModel, RangeEncoder};
         const NQC: usize = 306;
-        let mut encoder = Encoder::new();
+        let mut encoder = RangeEncoder::new();
         let mut int_model = IntModel::new(NQC + 8);
         for (context, value) in [(NQC, 256), (NQC + 1, 65536)] {
             int_model.put(&mut encoder, context, value);
@@ -490,7 +487,7 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let amplifying = amplifying_model(2000);
     let mut edited = entries.clone();
     edited[0].1 = crate::util::ByteReader::new(&amplifying)
-        .bytes()
+        .length_prefixed()
         .context("the model's header")?
         .to_vec();
     add(
@@ -635,7 +632,7 @@ fn vectors_reproduce() -> anyhow::Result<()> {
                     demo.len()
                 )?;
             } else {
-                let refusal = crate::decompress(file, 1)
+                let refusal = decompress(file, 1)
                     .err()
                     .context("a hostile vector decodes")?;
                 writeln!(manifest_text, "{name}\terror: {refusal}\t-\t{how}")?;

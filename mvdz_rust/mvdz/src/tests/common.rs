@@ -1,39 +1,47 @@
-//! Shared helpers of the integration tests: synthetic demos, a small RNG,
-//! the sample demos (skipped when absent) and the every-reader check.
+//! Test helpers: synthetic demos, a small RNG, the sample demos (skipped when absent) and
+//! the every-reader check.
 #![allow(dead_code)]
 
-use crate::Config;
+use crate::encode::EncodeStats;
 use crate::format::*;
 use anyhow::Context as _;
 use std::io::{Cursor, Read};
 
-/// Compresses a demo as the library does (input that is not a demo is
-/// refused), on one thread.
+/// The public encoder on one thread: input that is not a demo is refused.
 pub(crate) fn compress(src: &[u8]) -> crate::Result<Vec<u8>> {
-    compress_info(src).map(|(file, _)| file)
+    crate::encode(src, 1)
 }
 
-pub(crate) fn compress_info(src: &[u8]) -> crate::Result<(Vec<u8>, crate::Info)> {
-    crate::compress_info(src, &Config::default())
+/// Header, models and every segment header, without decoding a segment.
+pub(crate) fn scan(file: &[u8], limits: &crate::budget::Limits) -> crate::Result<Layout> {
+    let budget = crate::budget::Budget::new(limits);
+    budget.input(file.len() as u64);
+    crate::decode::scan_layout(file, 1, &budget)
+}
+
+/// Decodes the whole file on `threads` threads (0: one per logical core).
+pub(crate) fn decompress(file: &[u8], max_threads: u8) -> crate::Result<Vec<u8>> {
+    crate::decode(file, max_threads)
 }
 
 /// The encoder without the input check (any bytes round-trip).
-pub(crate) fn unchecked(src: &[u8]) -> crate::Result<(Vec<u8>, crate::Info)> {
-    crate::encode::compress(src, &Config::default())
+pub(crate) fn unchecked(src: &[u8]) -> crate::Result<(Vec<u8>, EncodeStats)> {
+    crate::encode::compress(src, 1)
 }
 
 /// Every segment coded as all tail: no frames, every byte in the tail.
-pub(crate) fn all_tail(src: &[u8]) -> crate::Result<(Vec<u8>, crate::Info)> {
-    crate::encode::compress_all_tail(src, &Config::default())
+pub(crate) fn all_tail(src: &[u8]) -> crate::Result<(Vec<u8>, EncodeStats)> {
+    crate::encode::compress_all_tail(src, 1)
 }
 
-/// `demo` repeated past four times [`crate::segment::SEGMENT`]: the encoder
+/// `demo` repeated past four times [`crate::segment::SEGMENT_TARGET_RAW`]: the encoder
 /// cuts only at that size, so a small demo of whole frames gets at least
 /// four segments this way.
 pub(crate) fn several_segments(demo: &[u8]) -> Vec<u8> {
-    demo.repeat(4 * crate::segment::SEGMENT / demo.len().max(1) + 1)
+    demo.repeat(4 * crate::segment::SEGMENT_TARGET_RAW / demo.len().max(1) + 1)
 }
 
+#[derive(Debug)]
 pub(crate) struct Rng(pub u64);
 impl Rng {
     pub(crate) fn next(&mut self) -> u64 {
@@ -49,6 +57,7 @@ impl Rng {
 
 // ---------------------------------------------------------------- synthetic demos
 
+#[derive(Debug)]
 pub(crate) struct Demo(pub Vec<u8>);
 
 impl Demo {
@@ -310,6 +319,7 @@ pub(crate) fn duel() -> Option<Vec<u8>> {
 // ---------------------------------------------------------------- every reader
 
 /// A reader that hands out at most 7 bytes per call.
+#[derive(Debug)]
 pub(crate) struct Dribble<'a>(pub &'a [u8], pub usize);
 impl Read for Dribble<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -332,40 +342,26 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 pub(crate) fn all_readers(file: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     let message = |error: crate::Error| error.to_string();
     let mut results = Vec::new();
-    results.push(("whole 1t", crate::decompress(file, 1).map_err(message)));
-    results.push(("whole 3t", crate::decompress(file, 3).map_err(message)));
-    let read_all = |reader: Result<crate::Reader<_>, crate::Error>| -> Result<Vec<u8>, String> {
-        let mut reader = reader.map_err(message)?;
+    results.push(("whole 1t", decompress(file, 1).map_err(message)));
+    results.push(("whole 3t", decompress(file, 3).map_err(message)));
+    let read_all = |reader: &mut dyn Read, max_threads| -> Result<Vec<u8>, String> {
+        let mut decoder = crate::Decoder::new(reader)
+            .map_err(message)?
+            .max_threads(max_threads);
         let mut out = Vec::new();
-        reader
+        decoder
             .read_to_end(&mut out)
             .map_err(|error| error.to_string())?;
         Ok(out)
     };
-    results.push((
-        "sequential",
-        read_all(crate::Reader::new(
-            Cursor::new(file),
-            1,
-            &crate::Limits::default(),
-        )),
-    ));
-    let mut out = Vec::new();
-    let dribbled = crate::Reader::new(Dribble(file, 0), 2, &crate::Limits::default())
-        .map_err(message)
-        .and_then(|mut reader| {
-            reader
-                .read_to_end(&mut out)
-                .map_err(|error| error.to_string())?;
-            Ok(std::mem::take(&mut out))
-        });
-    results.push(("sequential dribble", dribbled));
+    results.push(("sequential", read_all(&mut Cursor::new(file), 1)));
+    results.push(("sequential dribble", read_all(&mut Dribble(file, 0), 2)));
     results
 }
 
 /// Every reader accepts `file` with the same bytes, or every reader refuses
 /// it. Returns the bytes if accepted. Structural refusals are also
-/// required of `read_info`.
+/// required of `scan`.
 pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
     let results = all_readers(file);
     let first = &results[0].1;
@@ -386,18 +382,18 @@ pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
             ),
         }
     }
-    let info = crate::read_info(Cursor::new(file));
+    let scanned = scan(file, &crate::budget::Limits::default());
     if first.is_ok() {
         assert!(
-            info.is_ok(),
-            "{what}: read_info refuses a file the decoders accept: {:?}",
-            info.err()
+            scanned.is_ok(),
+            "{what}: scan refuses a file the decoders accept: {:?}",
+            scanned.err()
         );
     }
-    if let Err(error) = &info {
+    if let Err(error) = &scanned {
         assert!(
             first.is_err(),
-            "{what}: decoders accept a file read_info refuses ({error})"
+            "{what}: decoders accept a file scan refuses ({error})"
         );
     }
     first.as_ref().ok().cloned()
@@ -406,17 +402,17 @@ pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------- file surgery
 
 /// The entries (stream id, model) of a models block.
-pub(crate) fn tables_entries(body: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
+pub(crate) fn models_entries(body: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
     let mut reader = crate::util::ByteReader::new(body);
     let count = reader.u32_len().context("the entry count")?;
     (0..count)
-        .map(|_| Some((reader.u32_len()?, reader.bytes()?.to_vec())))
+        .map(|_| Some((reader.u32_len()?, reader.length_prefixed()?.to_vec())))
         .collect::<Option<_>>()
         .context("a models entry")
 }
 
 /// A models block from its entries.
-pub(crate) fn tables_body(entries: &[(usize, Vec<u8>)]) -> Vec<u8> {
+pub(crate) fn models_body(entries: &[(usize, Vec<u8>)]) -> Vec<u8> {
     let mut body = Vec::new();
     crate::util::put_u32(&mut body, entries.len());
     for (stream, model) in entries {
@@ -430,7 +426,7 @@ pub(crate) fn tables_body(entries: &[(usize, Vec<u8>)]) -> Vec<u8> {
 /// A file taken apart: its header, the body of its models block and the
 /// body of every segment (its header fields after the length, then its
 /// coded data).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Parts {
     pub header: Header,
     pub models: Vec<u8>,
@@ -439,20 +435,20 @@ pub(crate) struct Parts {
 
 /// The parts of a well-formed file.
 pub(crate) fn parts(file: &[u8]) -> anyhow::Result<Parts> {
-    let header = Header::parse(file)?;
+    let header = parse_header(file)?;
     let mut offset = HEADER_LEN;
     // the next block: `extra` bytes of fields, then as many as its length
     // field says
     let mut next = |file: &[u8], extra: usize| -> anyhow::Result<Vec<u8>> {
         let len = len_field(&file[offset..]).context("a length field")? as usize + extra;
-        let block = file[offset + LEN..offset + LEN + len].to_vec();
-        offset += LEN + len;
+        let block = file[offset + LEN_FIELD_LEN..offset + LEN_FIELD_LEN + len].to_vec();
+        offset += LEN_FIELD_LEN + len;
         Ok(block)
     };
     let models = next(file, 0)?;
     let mut segments = Vec::new();
     let mut raw = 0;
-    while raw < header.size {
+    while raw < header.size_bytes {
         let segment = next(file, SEGMENT_FIELDS_LEN)?;
         raw += u64::from(parse_segment_header(&segment[..SEGMENT_FIELDS_LEN])?.raw_len);
         segments.push(segment);
@@ -467,7 +463,7 @@ pub(crate) fn parts(file: &[u8]) -> anyhow::Result<Parts> {
 impl Parts {
     /// The file these parts make (whatever they hold).
     pub(crate) fn build(&self) -> Vec<u8> {
-        let mut out = self.header.bytes().to_vec();
+        let mut out = header_bytes(&self.header).to_vec();
         models_block(&mut out, &self.models);
         for segment in &self.segments {
             segment_block(&mut out, segment);

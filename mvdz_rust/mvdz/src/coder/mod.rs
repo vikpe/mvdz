@@ -1,9 +1,5 @@
-//! Coders.
-//!
-//! A structural or numeric stream is static rANS with the stream's
-//! model in the file's models block: the stream's kind decides its coder,
-//! and no stream carries a model or a coder id of its own. The blob streams
-//! of a segment are one DEFLATE stream (`segment.rs`).
+//! Structural and numeric streams: static rANS with the model from the file's models block.
+//! The stream's kind decides its coder; no stream carries a model or coder id of its own.
 
 pub(crate) mod rans;
 pub(crate) mod rc;
@@ -11,7 +7,6 @@ pub(crate) mod rc;
 use crate::error::{Error, Result};
 use std::sync::Arc;
 
-/// The file's model of stream `stream` (an error without one).
 pub(crate) fn file_model(
     models: Option<&rans::Models>,
     stream: usize,

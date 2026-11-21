@@ -4,22 +4,52 @@
 //! deep paths), with occasional garbage, lies and escapes.
 #![allow(dead_code)]
 
-use mvdz::Proto;
+const PROTOCOL_VERSION_FTE: u32 = u32::from_le_bytes(*b"FTEX");
+const PROTOCOL_VERSION_MVD_1: u32 = u32::from_le_bytes(*b"MVD1");
+const FTE_PEXT_FLOAT_COORDS: u32 = 1 << 15;
+const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
+
+/// The protocol state that changes command widths, tracked from the serverdata the
+/// generator writes: independent of the library's own tracking.
+#[derive(Debug, Default)]
+pub struct Proto {
+    pub fte: u32,
+    mvd1: u32,
+}
+
+impl Proto {
+    fn has_fte_float_coords(&self) -> bool {
+        self.fte & FTE_PEXT_FLOAT_COORDS != 0
+    }
+    pub fn coord(&self) -> usize {
+        if self.has_fte_float_coords() || self.mvd1 & MVD_PEXT_1_FLOAT_COORDS != 0 {
+            4
+        } else {
+            2
+        }
+    }
+    pub fn wide_coord(&self) -> usize {
+        if self.has_fte_float_coords() { 4 } else { 2 }
+    }
+    pub fn angle(&self) -> usize {
+        if self.has_fte_float_coords() { 2 } else { 1 }
+    }
+}
 
 pub struct Chooser<'a> {
-    data: &'a [u8],
+    bytes: &'a [u8],
     position: usize,
 }
 
 impl<'a> Chooser<'a> {
-    pub fn new(data: &'a [u8]) -> Self {
-        Chooser { data, position: 0 }
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Chooser { bytes, position: 0 }
     }
     pub fn is_done(&self) -> bool {
-        self.position >= self.data.len()
+        self.position >= self.bytes.len()
     }
     pub fn u8(&mut self) -> u8 {
-        let value = self.data.get(self.position).copied().unwrap_or(0);
+        let value = self.bytes.get(self.position).copied().unwrap_or(0);
         self.position += 1;
         value
     }
@@ -257,6 +287,11 @@ fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
                 };
                 server_data.extend_from_slice(&tag.to_le_bytes());
                 server_data.extend_from_slice(&value.to_le_bytes());
+                match tag {
+                    PROTOCOL_VERSION_FTE => proto.fte = value,
+                    PROTOCOL_VERSION_MVD_1 => proto.mvd1 = value,
+                    _ => {}
+                }
             }
             server_data.extend_from_slice(&28u32.to_le_bytes());
             server_data.extend(chooser.bytes(4));
@@ -266,7 +301,6 @@ fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
             let text = chooser.text(len);
             push_string(&mut server_data, &text);
             server_data.extend(chooser.bytes(40));
-            proto.observe_server_data(&server_data);
             out.extend(server_data);
         }
         26 => {
@@ -427,8 +461,8 @@ fn hidden(chooser: &mut Chooser, out: &mut Vec<u8>) {
 }
 
 /// A demo from the choice stream.
-pub fn demo(data: &[u8]) -> Vec<u8> {
-    let mut chooser = Chooser::new(data);
+pub fn demo(bytes: &[u8]) -> Vec<u8> {
+    let mut chooser = Chooser::new(bytes);
     let mut proto = Proto::default();
     let mut out = Vec::new();
     while !chooser.is_done() {

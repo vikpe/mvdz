@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Thread counts measured; 4 is the headline figure.
-const THREADS: [usize; 2] = [4, 1];
+const THREADS: [u8; 2] = [4, 1];
 
 /// The demos, sorted by file name, or none when `MVDZ_BENCH_DEMOS` is unset.
 fn demos() -> Vec<Vec<u8>> {
@@ -50,10 +50,6 @@ fn demos() -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn config(threads: usize) -> mvdz::Config {
-    mvdz::Config { threads }
-}
-
 fn codec(criterion: &mut Criterion) {
     let raw = demos();
     if raw.is_empty() {
@@ -62,10 +58,10 @@ fn codec(criterion: &mut Criterion) {
     let raw_bytes: usize = raw.iter().map(Vec::len).sum();
     let packed: Vec<Vec<u8>> = raw
         .iter()
-        .map(|demo| mvdz::compress(demo, &config(4)).expect("the demo compresses"))
+        .map(|demo| mvdz::encode(demo, 4).expect("the demo compresses"))
         .collect();
     for (demo, file) in raw.iter().zip(&packed) {
-        let back = mvdz::decompress(file, 4).expect("the file decompresses");
+        let back = mvdz::decode(file, 4).expect("the file decompresses");
         assert!(back == *demo, "a demo does not round-trip");
     }
     let packed_bytes: usize = packed.iter().map(Vec::len).sum();
@@ -75,20 +71,19 @@ fn codec(criterion: &mut Criterion) {
     );
 
     measure(criterion, "compress", raw_bytes, |threads| {
-        let config = config(threads);
         for demo in &raw {
-            black_box(mvdz::compress(black_box(demo), &config).expect("compress"));
+            black_box(mvdz::encode(black_box(demo), threads).expect("compress"));
         }
     });
     measure(criterion, "decompress", raw_bytes, |threads| {
         for file in &packed {
-            black_box(mvdz::decompress(black_box(file), threads).expect("decompress"));
+            black_box(mvdz::decode(black_box(file), threads).expect("decompress"));
         }
     });
 }
 
 /// One group, `name/4t` and `name/1t`: `run(threads)` codes every demo once.
-fn measure(criterion: &mut Criterion, name: &str, raw_bytes: usize, run: impl Fn(usize)) {
+fn measure(criterion: &mut Criterion, name: &str, raw_bytes: usize, run: impl Fn(u8)) {
     let mut group = criterion.benchmark_group(name);
     group
         .throughput(Throughput::BytesDecimal(raw_bytes as u64))

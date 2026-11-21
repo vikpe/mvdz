@@ -71,9 +71,6 @@ cast_possible_truncation = "allow"
 needless_range_loop = "allow"
 inline_always = "allow"
 
-# Not followed yet: each is removed with the step that fixes its findings
-many_single_char_names = "allow"       # 21, naming
-
 # No panics
 exit = "deny"
 todo = "deny"

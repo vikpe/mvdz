@@ -47,13 +47,12 @@ fn main() -> anyhow::Result<()> {
 fn check(path: &str) -> anyhow::Result<(usize, Vec<&'static str>)> {
     let src = std::fs::read(path).with_context(|| path.to_owned())?;
     let want = Sha256::digest(&src);
-    let file = mvdz::compress(&src, &mvdz::Config::default())?;
-    let is_whole_ok = mvdz::decompress(&file, 1).is_ok_and(|demo| Sha256::digest(&demo) == want);
+    let file = mvdz::encode(&src, 1)?;
+    let is_whole_ok = mvdz::decode(&file, 1).is_ok_and(|demo| Sha256::digest(&demo) == want);
     let mut demo = Vec::new();
-    let is_sequential_ok =
-        mvdz::Reader::new(std::io::Cursor::new(&file), 1, &mvdz::Limits::default()).is_ok_and(
-            |mut reader| reader.read_to_end(&mut demo).is_ok() && Sha256::digest(&demo) == want,
-        );
+    let is_sequential_ok = mvdz::Decoder::new(std::io::Cursor::new(&file))
+        .and_then(|mut decoder| Ok(decoder.read_to_end(&mut demo)?))
+        .is_ok_and(|_| Sha256::digest(&demo) == want);
     let mut fails = Vec::new();
     if !is_whole_ok {
         fails.push("whole-file reader");

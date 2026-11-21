@@ -18,7 +18,7 @@ fn vector(name: &str) -> anyhow::Result<Vec<u8>> {
 
 /// The raw demo of a valid vector.
 fn demo(name: &str) -> anyhow::Result<Vec<u8>> {
-    Ok(mvdz::decompress(&vector(name)?, 1)?)
+    Ok(mvdz::decode(&vector(name)?, 0)?)
 }
 
 /// Data that starts like a gzip file (RFC 1952: magic, DEFLATE, no flags).
@@ -52,7 +52,7 @@ fn non_demos_are_refused() -> anyhow::Result<()> {
             b"# not a demo\njust some text\n".repeat(100),
             "not an MVD demo",
         ),
-        ("tiff.mvd", tiff.clone(), "not an MVD demo"),
+        ("tiff.mvd", tiff, "not an MVD demo"),
         ("duel.mvd.gz", gzip(&raw), "decompress it first"),
     ];
     for (name, bytes, message) in &cases {
@@ -66,17 +66,6 @@ fn non_demos_are_refused() -> anyhow::Result<()> {
     }
     let left: Vec<_> = std::fs::read_dir(&dir)?.collect();
     assert_eq!(left.len(), cases.len(), "temporary files left");
-    // --allow-non-demo stores a non-demo anyway, and it round-trips
-    let (input, output) = (dir.join("tiff.mvd"), dir.join("forced.mvdz"));
-    let outcome = run(&[
-        Path::new("compress"),
-        Path::new("--allow-non-demo"),
-        &input,
-        &output,
-    ])?;
-    assert!(outcome.status.success(), "{outcome:?}");
-    assert_eq!(mvdz::decompress(&std::fs::read(&output)?, 1)?, tiff);
-    std::fs::remove_file(&output)?;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
