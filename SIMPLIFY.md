@@ -8,7 +8,7 @@ Earlier versions of this file (plans of done steps, superseded results) are in g
 Branch `feature/simplify` on `master` (rc.4, a9ac8fc). Every open question is decided
 (see Decisions). Code is in `mvdz_rust/`, a virtual workspace: the library in `mvdz/`, the tool in `mvdz_cli/`.
 Paths below are relative to `mvdz_rust/mvdz/` unless they start with `mvdz_cli/`.
-Tests (`cargo nextest run --release`): 44 pass, 4 fail (see "Known failing tests").
+Tests (`cargo nextest run --release`): 49 pass, none fail.
 `cargo clippy --all-targets -- -D warnings` is clean, with no lint allowed for naming. Next: "Open tasks".
 
 ## Working rules
@@ -103,6 +103,7 @@ A format simple enough to stay unchanged for 10+ years.
 | Library scope | No file writing, no JSON: `mvdz info`'s JSON is built in `mvdz_cli/src/main.rs` | Not the codec's job |
 | Public API | `encode`, `decode`, `Encoder` (`Encoder::new(writer)`, `.max_threads(n)`, implements `io::Write`, buffers the demo; `finish` encodes and writes, since the encoder needs the whole demo), `Decoder` (`Decoder::new(reader)?`, `.max_threads(n)`, implements `io::Read`; bounded memory); the pair as gzip libraries have it, Viktor 2026-11-21, `Decoder::header()` (`Header`, the file header's fields, which all describe the demo: getters only, no format version; as gzip's decoder exposes its header). No `info`: the file size is a file-system call, the segment list waits for part-of-file decoding (task 4), `Error`, `Result`. Everything else is `pub(crate)`. The opt-in feature `fuzz` adds a hidden `fuzz` module (`encode_any`, `check_demo`) for the fuzz targets; the fuzz generator tracks the protocol state itself. Tests that build files by hand are unit tests in `src/tests/` | Information hiding: what a crate exposes is its contract |
 | Memory limit | Fixed: 1 GiB on 64-bit, 256 MiB on 32-bit (`DEFAULT_MAX_MEMORY`); no option, no `--max-memory` | Viktor, 2026-11-21 |
+| Test vectors | Regenerated 2026-11-21 (`MVDZ_WRITE_VECTORS=1`, `MVDZ_TEST_DATA` with `sample/`): duel = set8 `3fe477dc`; FTE float = the first 300,000 bytes of stratified `03fc8ec2` (4 of 379 stratified demos use FTE float, none of set8 or sample40); MVD1 float = a synthetic demo in `vectors.rs` (no real one among 411 demos), checked by `mvd1_float_demo_is_walked` | The old sources (`3ff1f82b`, `3fdd8018`, `gen/float_mvd1.mvd`) could not be found again |
 | Truncating casts | One workspace `allow` (`cast_possible_truncation`), reason in `Cargo.toml` | 83 casts: 30 positions bounded by the 1 MiB segment, 2 MiB coded segment and 16 MiB models block; 53 intended bit and byte extraction. Every alternative adds code or error paths that cannot fail (Viktor, 2026-11-21) |
 | Work limit | Removed (2026-11-21); only the memory limit stays | Rule M2 and at most 34 models bound model decoding far below the old 4096 units per input byte; output is at most 1 MiB per segment (about 10^4 times the input, estimated), and whole-file `decode` is capped by memory. The most compressible demos measured encode at 1,471:1. gzip and zstd have no work limit either |
 | Non-demo input | Refused; `--allow-non-demo` and `compress_any` removed | Viktor, 2026-11-21 |
@@ -297,7 +298,7 @@ Rule: between commits no test may fail that is not on this list.
 
 | Tests | Why they fail | Resolved by |
 |---|---|---|
-| `closed_stdout_is_quiet`, `non_demos_are_refused`, `outputs_named_after_inputs` (`mvdz_cli`), `tests::vectors::vectors_decode` (`mvdz`) | read the vectors in `tests/vectors/`, written by rc.4 in the old format | regenerating the vectors |
+| (none) | | |
 
 ## Open tasks
 
@@ -313,11 +314,7 @@ API gaps:
 
 Format and specification:
 
-3. Regenerate the vectors in `tests/vectors/` (clears the known failing tests). Their
-   source demos `3ff1f82b…` (duel) and `3fdd8018…` (FTE float) are in neither the sample40
-   tarball nor `d.quake.world`, and `gen/float_mvd1.mvd` is not on this machine: pick new
-   sources from the 32 present demos.
-4. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
+3. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
    sharing, attachments, streaming (sections 3, 4, 5.3, 10, 11) and the C interface.
    State: the 1 MiB segment rule (it still gives 4 GiB and "only the last segment may
    end inside a frame"); `MAX_SEGMENTS` as a 16 GiB demo limit; section 12 rule 1 as
@@ -329,21 +326,21 @@ Format and specification:
    `decode.rs:Decoder`), line 382 (`info` JSON: now the header only: `size_bytes`, `duration_ms`,
    `crc32`, `sha256`), line 668 (decode waves), line 357 (`FileInfo::to_json`, now `header_json` in
    `mvdz_cli/src/main.rs`).
-5. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
+4. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
    list are current (2026-11-21). Still rc.4: the intro (levels, metadata, attachments,
-   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 6's numbers,
+   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 5's numbers,
    mentions `--trusted` and the fast level), the FAQ (metadata, attachments) and the
-   Tests paragraph's `MVDZ_WRITE_VECTORS` note (check after task 3).
-6. BENCHMARKS.md from the final measurements, on the new set8 (18.4 MB; README and
+   Tests paragraph's `MVDZ_WRITE_VECTORS` note (updated 2026-11-21).
+5. BENCHMARKS.md from the final measurements, on the new set8 (18.4 MB; README and
    BENCHMARKS.md still say 18.9 MB); drop Miri (no `unsafe` left).
-7. Later: implementations in C, Go and other languages from the settled
+6. Later: implementations in C, Go and other languages from the settled
    specification, with a shared test suite.
 
 Not measured:
 
-8. Size of a decoder-only wasm build.
-9. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-10. rayon on the final code (optional).
+7. Size of a decoder-only wasm build.
+8. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
+9. rayon on the final code (optional).
 
 ## Verification
 

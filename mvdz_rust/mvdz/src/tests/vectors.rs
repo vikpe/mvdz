@@ -485,17 +485,91 @@ fn hostile_vectors_are_refused() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// No real demo among set8, sample40 and stratified uses MVD1 float coordinates.
+fn mvd1_float_demo() -> Vec<u8> {
+    const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
+    const ORIGIN_FLAGS: u16 = 0b111;
+    let coords = |x: f32, y: f32, z: f32| [x, y, z].map(f32::to_le_bytes).concat();
+    let mut demo = Demo(Vec::new());
+    let server_data = message(
+        11,
+        &[
+            b"MVD1",
+            &MVD_PEXT_1_FLOAT_COORDS.to_le_bytes(),
+            &28u32.to_le_bytes(),
+            &1u32.to_le_bytes(),
+            &c_string("qw"),
+            &0u32.to_le_bytes(),
+            &c_string("float test"),
+            &[0; 40],
+        ],
+    );
+    let model_list = message(
+        45,
+        &[
+            &[0],
+            &c_string("maps/dm4.bsp"),
+            &c_string("progs/player.mdl"),
+            &[0],
+            &[0],
+        ],
+    );
+    demo.frame(0, 6, &[server_data, model_list].concat());
+    for frame in 0..200u16 {
+        let step = f32::from(frame);
+        let mut payload = Vec::new();
+        for player in 0..2u8 {
+            let lane = f32::from(player) * 256.0;
+            payload.extend(message(
+                42,
+                &[
+                    &[player],
+                    &ORIGIN_FLAGS.to_le_bytes(),
+                    &[0],
+                    &coords(
+                        1.5f32.mul_add(step, lane),
+                        0.75f32.mul_add(step, -64.25),
+                        24.125,
+                    ),
+                ],
+            ));
+        }
+        if frame % 10 == 0 {
+            let channel: u16 = 1 << 3 | 1;
+            payload.extend(message(
+                6,
+                &[
+                    &channel.to_le_bytes(),
+                    &[1],
+                    &coords(1.5 * step, -64.25, 24.125),
+                ],
+            ));
+        }
+        demo.frame(13, 6, &payload);
+    }
+    demo.0
+}
+
+#[test]
+fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
+    let demo = mvd1_float_demo();
+    let (file, stats) = compress_unchecked(&demo)?;
+    assert_eq!(stats.unstructured_len, 0);
+    assert_eq!(decompress(&file, 1)?, demo);
+    Ok(())
+}
+
 /// None without the sample demos.
 fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let sources = || {
         let duel = duel()?;
-        let mvd1 = std::fs::read(test_data("gen")?.join("float_mvd1.mvd")).ok()?;
-        let fte = sample("3fdd80182a39f773710e4468c509106926450a296c0c9e4a9d4d821f4a783ddb")?;
-        Some((duel, mvd1, fte))
+        let fte = sample("03fc8ec2603c3862cbc64fd746adf4a662921951fbb189c666f6cc84d85c1673")?;
+        Some((duel, fte))
     };
-    let Some((duel, mvd1, fte)) = sources() else {
+    let Some((duel, fte)) = sources() else {
         return Ok(None);
     };
+    let mvd1 = mvd1_float_demo();
     let fte = fte[..300_000].to_vec();
     let mut vectors: Vec<Vector> = Vec::new();
     let mut add = |name: &str, file: Vec<u8>, demo: &[u8], how: &str| {
@@ -503,7 +577,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     };
     // without the input check: some vectors hold non-demo input
     let encode = |demo: &[u8]| anyhow::Ok(compress_unchecked(demo)?.0);
-    let duel_source = "duel = sample 3ff1f82b...8d92";
+    let duel_source = "duel = set8 demo 3fe477dc...1416";
     add(
         "duel.normal.mvdz",
         encode(&duel)?,
@@ -522,13 +596,13 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         "float-mvd1.normal.mvdz",
         encode(&mvd1)?,
         &mvd1,
-        "rev-correct gen1/float_mvd1.mvd (MVD1 float coordinates, 3 escapes)",
+        "synthetic demo with MVD1 float coordinates (two players, sounds)",
     );
     add(
         "float-fte.normal.mvdz",
         encode(&fte)?,
         &fte,
-        "the first 300000 bytes of sample 3fdd8018 (FTE float coordinates)",
+        "the first 300000 bytes of stratified demo 03fc8ec2 (FTE float coordinates)",
     );
     let escapes = escapes();
     add(

@@ -227,8 +227,8 @@ real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `poc/` with hostile model headers) and say so when it is unset.
 `scripts/fetch_samples.sh sample40 testdata/sample` downloads the
 development sample there (`MVDZ_TEST_DATA=$PWD/testdata`).
-`MVDZ_WRITE_VECTORS=1` regenerates the vectors (it needs the sample
-demos they were made from, which the download lacks). Fuzz targets are in `mvdz_rust/mvdz/fuzz/` (`cargo +nightly
+`MVDZ_WRITE_VECTORS=1` regenerates the vectors from two demos in
+`$MVDZ_TEST_DATA/sample/`: set8's `3fe477dc…` and stratified's `03fc8ec2…`. Fuzz targets are in `mvdz_rust/mvdz/fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `compress_rt` and the
 structure-aware `gen_rt`); they build the library with its `fuzz` feature.
 
