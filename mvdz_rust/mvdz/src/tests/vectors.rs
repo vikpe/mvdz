@@ -668,7 +668,7 @@ fn vectors_reproduce() -> anyhow::Result<()> {
             }
         }
         let mut manifest_text = String::from(
-            "# file\tdecoded_sha256 or \"error: <message>\"\tdecoded_size\thow it was made\n# Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (format, corrupt, limit; FORMAT.md 9), in its own words.\n",
+            "# file\tdecoded_sha256 or \"error: <message>\"\tdecoded_size\thow it was made\n# Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (the Error variants; FORMAT.md section 7), in its own words.\n",
         );
         for (name, file, demo, how) in &vectors {
             std::fs::write(dir().join(name), file)?;

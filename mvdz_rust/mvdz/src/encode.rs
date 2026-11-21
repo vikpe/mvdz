@@ -63,7 +63,7 @@ impl<W: Write> Write for Encoder<W> {
     }
 }
 
-/// FORMAT.md 6.2: a damaged demo with an intact start passes.
+/// FORMAT.md section 8 rule 1: a damaged demo with an intact start passes.
 pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
     const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
     if demo.is_empty() {
@@ -129,7 +129,7 @@ struct Trained {
     durations_ms: Vec<u64>,
 }
 
-/// Pass 1 (FORMAT.md section 12) keeps only counts; pass 2 walks again.
+/// Pass 1 (FORMAT.md section 8) keeps only counts; pass 2 walks again.
 fn train(src: &[u8], cuts: &[usize], threads: usize) -> Trained {
     let segment_count = cuts.len() - 1;
     let segment_bytes = |index: usize| &src[cuts[index]..cuts[index + 1]];

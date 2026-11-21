@@ -263,7 +263,7 @@ fn len_at(file: &[u8], offset: u64) -> Option<u64> {
     len_field(bytes_at(file, offset, LEN_FIELD_LEN as u64)?)
 }
 
-/// FORMAT.md, "Validation"; segment payloads are not decoded.
+/// FORMAT.md section 7; segment payloads are not decoded.
 pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Result<Layout> {
     let file_len = file.len() as u64;
     let mut layout = Layout::new(&file[..file.len().min(HEADER_LEN)], budget)?;

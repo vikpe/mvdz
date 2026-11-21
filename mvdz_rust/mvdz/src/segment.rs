@@ -1,5 +1,5 @@
 //! Transform-coded segments: the structural walk, the numeric groups and the stream bodies
-//! (FORMAT.md, "Transform segment body").
+//! (FORMAT.md section 3).
 
 use crate::budget::Budget;
 use crate::coder::rans::ModelsBlock;
@@ -332,7 +332,7 @@ pub(crate) fn numerics(src: &[u8], walked: &Walked) -> Numerics {
 }
 
 /// One model per structural and numeric stream from its per-context counts over every segment
-/// (FORMAT.md section 12 rule 11). Segments are added a few at a time; only counts are kept.
+/// (FORMAT.md section 8 rule 4). Segments are added a few at a time; only counts are kept.
 #[derive(Debug)]
 pub(crate) struct Trainer {
     tallies: Vec<std::sync::Mutex<Option<rans::Tally>>>,
@@ -412,7 +412,7 @@ pub(crate) fn models_body(models: &[Option<rans::FileModel>], ids: &[usize]) -> 
 }
 
 /// Drops the largest headers until the models block is at most `max` bytes (FORMAT.md section
-/// 9); a segment with a dropped stream is then not transform-coded.
+/// 7); a segment with a dropped stream is then not transform-coded.
 fn fit_models_block(models: &mut [Option<rans::FileModel>], max: u64) {
     loop {
         let ids: Vec<usize> = (0..models.len())

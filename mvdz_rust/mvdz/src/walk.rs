@@ -23,7 +23,7 @@ use crate::streams::{
 
 pub(crate) const NO_OFFSET: u32 = u32::MAX;
 
-/// Every `context` fits in 16 bits, the rANS table key (FORMAT.md 8.3).
+/// Every `context` fits in 16 bits, the rANS table key (FORMAT.md section 6.4).
 pub(crate) trait SymbolIo {
     fn byte(&mut self, stream: usize, context: u32, value: u8) -> u8;
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);
@@ -173,7 +173,7 @@ struct PlayerState {
     weapon_frame: u8,
 }
 
-/// The previous usercmd fields of one player (FORMAT.md 6.11).
+/// The previous usercmd fields of one player (FORMAT.md section 4.11).
 #[derive(Debug, Clone, Copy, Default)]
 struct UsercmdState {
     drop: u8,
@@ -218,7 +218,6 @@ pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     packet_number: u32,
     last_time_byte: u8,
     first_command_by_type: [u8; 8],
-    playerinfo_previous_number: u8,
     stat_previous_index: u8,
     stat_previous_residual: u8,
     last_header: u8,
@@ -264,7 +263,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             packet_number: 1,
             last_time_byte: 0,
             first_command_by_type: [0; 8],
-            playerinfo_previous_number: 255,
             stat_previous_index: 255,
             stat_previous_residual: 0,
             last_header: 0,
@@ -539,7 +537,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
 
     fn payload(&mut self, end: usize, frame_type: u8) {
         self.previous_command = 0;
-        self.playerinfo_previous_number = 255;
         self.stat_previous_index = 255;
         self.stat_previous_residual = 0;
         let mut command_index = 0u32;
@@ -747,7 +744,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         const ORIGIN_FLAGS: u16 = DF_ORIGIN | DF_ORIGIN << 1 | DF_ORIGIN << 2;
         const ANGLE_FLAGS: u16 = DF_ANGLES | DF_ANGLES << 1 | DF_ANGLES << 2;
         let number = self.blob_byte(PI_NUM);
-        self.playerinfo_previous_number = number;
         let previous = self.players[number as usize];
         let flags = self.playerinfo_flags(previous.flags);
         let frame = self.coded_residual(

@@ -495,7 +495,7 @@ fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
 /// Own contexts, quantized counts of every table (the fallback first), budget charge.
 type ModelHeader = (Vec<u32>, Vec<u8>, Charge);
 
-/// FORMAT.md, "Model header".
+/// FORMAT.md section 6.4.
 fn read_model_header(
     header: &[u8],
     required_alphabet_size: usize,

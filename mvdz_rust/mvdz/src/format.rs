@@ -1,4 +1,4 @@
-//! The MVDZ container (FORMAT.md, Part I) and the layout rules every reader applies.
+//! The MVDZ container (FORMAT.md section 2) and the layout rules every reader applies.
 
 use crate::budget::{Budget, Charge};
 use crate::coder::rans::ModelsBlock;
@@ -124,7 +124,7 @@ impl SegmentSpan {
     }
 }
 
-/// `raw_offset` and `offset_ms` are not stored: [`Layout::segment`] fills them in.
+/// `raw_offset` and `offset_ms` are not stored: [`Layout::add_segment`] fills them in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SegmentHeader {
     pub(crate) raw_offset: u64,

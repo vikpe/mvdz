@@ -479,7 +479,7 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     }
 }
 
-/// FORMAT.md section 7.6: per player and axis, linear prediction from the last two grid values.
+/// FORMAT.md section 5.6: per player and axis, linear prediction from the last two grid values.
 fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
     let mut tracks = vec![[Track::default(); 3]; 256];
     for record in records.usercmds.iter() {
