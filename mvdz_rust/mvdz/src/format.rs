@@ -145,7 +145,7 @@ impl SegmentSpan {
         self.body_offset() + self.body_len
     }
     pub(crate) fn body_range(&self) -> Option<std::ops::Range<usize>> {
-        Some(crate::util::to_usize(self.body_offset())?..crate::util::to_usize(self.end())?)
+        Some(usize::try_from(self.body_offset()).ok()?..usize::try_from(self.end()).ok()?)
     }
 }
 

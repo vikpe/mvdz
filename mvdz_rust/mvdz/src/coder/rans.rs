@@ -13,7 +13,7 @@ use crate::budget::{Budget, Charge, with_capacity};
 use crate::error::{Error, Result};
 use crate::numeric::NumericContext;
 use crate::streams::{PE_OX, PI_AP, PI_OX, SND_O, STREAM_COUNT, TE_O, UC_A, is_lazy, is_numeric};
-use crate::util::{ByteReader, approx_f64, par_map, put_u32};
+use crate::util::{ByteReader, par_map, put_u32};
 use std::sync::Arc;
 
 pub(crate) const SCALE: u32 = 12;
@@ -143,11 +143,11 @@ impl Table {
 }
 
 fn entropy_bits(counts: &[u32]) -> f64 {
-    let total: u64 = counts.iter().map(|&count| u64::from(count)).sum();
-    if total == 0 {
+    let total: f64 = counts.iter().map(|&count| f64::from(count)).sum();
+    if total == 0.0 {
         return 0.0;
     }
-    let log_total = approx_f64(total).log2();
+    let log_total = total.log2();
     counts
         .iter()
         .filter(|&&count| count > 0)
@@ -156,8 +156,8 @@ fn entropy_bits(counts: &[u32]) -> f64 {
 }
 
 fn cross_bits(counts: &[u32], reference: &[u32]) -> f64 {
-    let total: u64 = reference.iter().map(|&count| u64::from(count)).sum();
-    let log_total = approx_f64(total.max(1)).log2();
+    let total: f64 = reference.iter().map(|&count| f64::from(count)).sum();
+    let log_total = total.max(1.0).log2();
     let mut bits = 0.0;
     for (symbol, &count) in counts.iter().enumerate() {
         if count > 0 {
@@ -318,7 +318,7 @@ fn select(tally: &Tally) -> Counts {
         let mut rest = vec![0u32; alphabet_size];
         for &context in &keys {
             let counts = row(context);
-            let present = approx_f64(counts.iter().filter(|&&count| count > 0).count() as u64);
+            let present = f64::from(counts.iter().filter(|&&count| count > 0).count() as u32);
             let own_cost =
                 TABLE_BITS_PER_SYM.mul_add(present, entropy_bits(counts) + TABLE_BITS_BASE);
             if own_cost < cross_bits(counts, &fallback) {

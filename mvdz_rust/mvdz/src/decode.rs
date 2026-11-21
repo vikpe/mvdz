@@ -9,12 +9,12 @@ use crate::format::{
     SegmentHeader, SegmentSpan, check_coded_len, len_field, parse_segment_header,
 };
 use crate::segment::{self, FrameScan, frame_scan};
-use crate::util::{Crc, crc32, par_map, to_usize};
+use crate::util::{Crc, crc32, par_map};
 
 /// `None`: `file` ends first.
 fn bytes_at(file: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
-    let start = to_usize(offset)?;
-    file.get(start..start.checked_add(to_usize(len)?)?)
+    let start = usize::try_from(offset).ok()?;
+    file.get(start..start.checked_add(usize::try_from(len).ok()?)?)
 }
 
 /// `None`: `file` ends first.
@@ -138,7 +138,7 @@ pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result
     let layout = scan_layout(file, threads, &budget)?;
     let size = layout.header.size_bytes;
     let _charge = budget.alloc(size)?;
-    let mut out = zeroed(to_usize(size).ok_or(Error::Limit("demo size"))?)?;
+    let mut out = zeroed(usize::try_from(size).map_err(|_| Error::Limit("demo size"))?)?;
     let segment_count = layout.segments.len();
     let mut slices: Vec<std::sync::Mutex<&mut [u8]>> = Vec::with_capacity(segment_count);
     let mut rest: &mut [u8] = &mut out;

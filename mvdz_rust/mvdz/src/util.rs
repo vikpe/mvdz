@@ -48,15 +48,6 @@ impl<'a> ByteReader<'a> {
     }
 }
 
-#[expect(clippy::cast_precision_loss, reason = "exact below 2^53")]
-pub(crate) fn approx_f64(count: u64) -> f64 {
-    count as f64
-}
-
-pub(crate) fn to_usize(value: u64) -> Option<usize> {
-    usize::try_from(value).ok()
-}
-
 // ---------------------------------------------------------------- crc32
 
 /// As in zlib, gzip and PNG: every platform with DEFLATE has it.
