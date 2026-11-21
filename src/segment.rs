@@ -314,40 +314,66 @@ pub fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Nums {
     })
 }
 
-/// The shared models of a file (FORMAT.md §12 rule 11): one per
+/// Builds the shared models of a file (FORMAT.md §12 rule 11): one per
 /// structural and numeric stream, from its per-context counts summed over
-/// every walked segment `(walk, numeric values)`, in segment order.
-pub fn train(segs: &[(&Walked, &Nums)], threads: usize) -> Vec<Option<rans::Shared>> {
-    // where a numeric stream's values are: (group, index in the group)
-    let mut at: Vec<Option<(usize, usize)>> = vec![None; N_STREAMS];
-    for (gi, g) in groups().iter().enumerate() {
-        for (k, &sid) in g.streams().iter().enumerate() {
-            at[sid] = Some((gi, k));
+/// every walked segment, in segment order. The segments are added a few
+/// at a time: only their counts are kept.
+pub struct Trainer {
+    /// the counts of each stream
+    tallies: Vec<std::sync::Mutex<Option<rans::Tally>>>,
+    /// where a numeric stream's values are: (group, index in the group)
+    at: Vec<Option<(usize, usize)>>,
+}
+
+impl Default for Trainer {
+    fn default() -> Self {
+        let mut at = vec![None; N_STREAMS];
+        for (gi, g) in groups().iter().enumerate() {
+            for (k, &sid) in g.streams().iter().enumerate() {
+                at[sid] = Some((gi, k));
+            }
+        }
+        Trainer {
+            tallies: (0..N_STREAMS).map(|_| Default::default()).collect(),
+            at,
         }
     }
-    // a stream's counts do not depend on another stream's: streams in
-    // parallel, each over the segments in order
-    let mut models: Vec<Option<rans::Shared>> = par_map(threads, N_STREAMS, |sid| {
-        let mut tally: Option<rans::Tally> = None;
-        let mut add = |alpha: usize, syms: &[u8], ctxs: &[u16]| {
-            if !syms.is_empty() {
-                tally
-                    .get_or_insert_with(|| rans::Tally::new(alpha))
-                    .add(syms, ctxs);
+}
+
+impl Trainer {
+    /// Counts the symbols of the next segments `(walk, numeric values)`.
+    pub fn add(&self, segs: &[(&Walked, &Nums)], threads: usize) {
+        // a stream's counts do not depend on another stream's: streams in
+        // parallel, each over the segments in order
+        par_map(threads, N_STREAMS, |sid| {
+            let mut tally = self.tallies[sid].lock().expect("no panic while counting");
+            let mut add = |alpha: usize, syms: &[u8], ctxs: &[u16]| {
+                if !syms.is_empty() {
+                    tally
+                        .get_or_insert_with(|| rans::Tally::new(alpha))
+                        .add(syms, ctxs);
+                }
+            };
+            for &(wk, nums) in segs {
+                if sid < N_LAZY {
+                    add(256, &wk.io.syms[sid], &wk.io.ctxs[sid]);
+                }
+                if let Some((gi, k)) = self.at[sid] {
+                    add(rans::NALPHA, &nums[gi][k].syms, &nums[gi][k].ctxs);
+                }
             }
-        };
-        for &(wk, nums) in segs {
-            if sid < N_LAZY {
-                add(256, &wk.io.syms[sid], &wk.io.ctxs[sid]);
-            }
-            if let Some((gi, k)) = at[sid] {
-                add(rans::NALPHA, &nums[gi][k].syms, &nums[gi][k].ctxs);
-            }
-        }
-        tally.and_then(|t| t.shared())
-    });
-    fit_tables(&mut models, TABLES_MAX);
-    models
+        });
+    }
+
+    /// The models, by stream id.
+    pub fn models(self, threads: usize) -> Vec<Option<rans::Shared>> {
+        let mut models: Vec<Option<rans::Shared>> = par_map(threads, N_STREAMS, |sid| {
+            let tally = self.tallies[sid].lock().expect("no panic while counting");
+            tally.as_ref().and_then(|t| t.shared())
+        });
+        fit_tables(&mut models, TABLES_MAX);
+        models
+    }
 }
 
 /// The TABLES body (FORMAT.md §2.6) of the models of streams `ids`
@@ -740,6 +766,13 @@ mod tests {
     use super::*;
     use crate::budget::Budget;
 
+    /// The models of the segments `segs`.
+    fn train(segs: &[(&Walked, &Nums)]) -> Vec<Option<rans::Shared>> {
+        let t = Trainer::default();
+        t.add(segs, 1);
+        t.models(1)
+    }
+
     /// The segment `body` decoded.
     fn decoded(
         body: &[u8],
@@ -766,7 +799,7 @@ mod tests {
     fn coded(src: &[u8]) -> (Vec<u8>, FileTables) {
         let (wk, _) = walk(src, Proto::default()).unwrap();
         let nums = numerics(src, &wk, 1);
-        let models = train(&[(&wk, &nums)], 1);
+        let models = train(&[(&wk, &nums)]);
         let ids: Vec<usize> = (0..models.len()).filter(|&i| models[i].is_some()).collect();
         let ft = FileTables::new(&tables_body(&models, &ids), 1, &Budget::unlimited()).unwrap();
         let body = encode(&wk, &nums, 1, &mut Vec::new(), &models).unwrap();
@@ -871,7 +904,7 @@ mod tests {
         let src = demo();
         let (wk, _) = walk(&src, Proto::default()).unwrap();
         let nums = numerics(&src, &wk, 1);
-        let mut models = train(&[(&wk, &nums), (&wk, &nums)], 1);
+        let mut models = train(&[(&wk, &nums), (&wk, &nums)]);
         let ids = |m: &[Option<rans::Shared>]| -> Vec<usize> {
             (0..m.len()).filter(|&i| m[i].is_some()).collect()
         };

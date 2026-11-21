@@ -82,34 +82,56 @@ pub fn starts_like_mvd(b: &[u8]) -> bool {
     true
 }
 
-/// One segment as the encoder sees it.
-pub struct Planned {
-    pub walked: Option<Walked>,
-    /// the numeric values of the walk, once the predictors have run
-    pub nums: Option<Nums>,
-    /// its frame time: the sum of its frame time bytes
-    pub dur_ms: u64,
+/// What the first pass over the demo leaves: the file's models, and per
+/// segment what the second pass needs to code it on its own.
+struct Trained {
+    shared: Vec<Option<Shared>>,
+    /// the protocol state each segment starts in
+    protos: Vec<Proto>,
+    /// whether the transform can represent the segment
+    walked: Vec<bool>,
+    /// each segment's frame time: the sum of its frame time bytes
+    durs: Vec<u64>,
 }
 
-/// Walks every segment in order (the protocol state carries over).
-pub fn plan(src: &[u8], cuts: &[usize], proto: &mut Proto) -> Vec<Planned> {
-    let mut out = Vec::with_capacity(cuts.len());
-    for w in cuts.windows(2) {
-        let s = &src[w[0]..w[1]];
-        out.push(Planned {
-            walked: walk_one(s, proto),
-            nums: None,
-            dur_ms: frame_scan(s).1,
+/// The first pass: walks every segment in order (the protocol state
+/// carries over), runs its numeric predictors and counts its symbols for
+/// the models (FORMAT.md §12). `window` segments are held at a time, their
+/// predictors run in parallel; nothing but the counts is kept.
+fn train(src: &[u8], cuts: &[usize], window: usize, inner: usize, threads: usize) -> Trained {
+    let nseg = cuts.len() - 1;
+    let seg = |i: usize| &src[cuts[i]..cuts[i + 1]];
+    let trainer = segment::Trainer::default();
+    let mut proto = Proto::default();
+    let mut t = Trained {
+        shared: Vec::new(),
+        protos: Vec::with_capacity(nseg),
+        walked: Vec::with_capacity(nseg),
+        durs: (0..nseg).map(|i| frame_scan(seg(i)).1).collect(),
+    };
+    for first in (0..nseg).step_by(window) {
+        let n = window.min(nseg - first);
+        let walks: Vec<Option<Walked>> = (first..first + n)
+            .map(|i| {
+                t.protos.push(proto);
+                let (wk, pend) = segment::walk(seg(i), proto)?;
+                proto = pend;
+                Some(wk)
+            })
+            .collect();
+        let nums = par_map(window, n, |k| {
+            Some(segment::numerics(seg(first + k), walks[k].as_ref()?, inner))
         });
+        let segs: Vec<(&Walked, &Nums)> = walks
+            .iter()
+            .zip(&nums)
+            .filter_map(|(w, n)| Some((w.as_ref()?, n.as_ref()?)))
+            .collect();
+        trainer.add(&segs, threads);
+        t.walked.extend(walks.iter().map(|w| w.is_some()));
     }
-    out
-}
-
-/// Walks one segment and updates the protocol state.
-pub fn walk_one(s: &[u8], proto: &mut Proto) -> Option<Walked> {
-    let (wk, pend) = segment::walk(s, *proto)?;
-    *proto = pend;
-    Some(wk)
+    t.shared = trainer.models(threads);
+    t
 }
 
 /// The body of a segment coded without the transform: the whole segment
@@ -187,62 +209,53 @@ fn compress_inner(
     if cuts.windows(2).any(|w| (w[1] - w[0]) as u64 > MAX_SEG_RAW) {
         return Err(Error::Invalid("segment over 4 GiB"));
     }
-    let mut proto = Proto::default();
-    // the walk runs on one thread: with more, the demo's checksum and
-    // SHA-256 are computed beside it
-    let hashes = || (crc32(src), <[u8; 32]>::from(Sha256::digest(src)));
-    let (mut plans, (crc, sha256)) = if threads > 1 && HAS_THREADS {
-        std::thread::scope(|sc| {
-            let h = sc.spawn(hashes);
-            let plans = plan(src, &cuts, &mut proto);
-            (plans, h.join().expect("hashing"))
-        })
-    } else {
-        (plan(src, &cuts, &mut proto), hashes())
-    };
-    if plans.iter().any(|p| p.dur_ms > u32::MAX as u64) {
-        return Err(Error::Invalid("segment over 2^32 ms"));
-    }
-    let header = Header {
-        size: src.len() as u64,
-        duration_ms: plans.iter().map(|p| p.dur_ms).sum(),
-        crc,
-        sha256,
-    };
     let (outer, inner) = if nseg >= threads {
         (threads, 1)
     } else {
         (1, threads)
     };
-    // the numeric predictors run once over every walked segment: the
-    // models are trained on their values and the segments coded from them
-    if !force_raw {
-        let nums = par_map(outer, nseg, |i| {
-            let wk = plans[i].walked.as_ref()?;
-            Some(segment::numerics(&src[cuts[i]..cuts[i + 1]], wk, inner))
-        });
-        for (p, n) in plans.iter_mut().zip(nums) {
-            p.nums = n;
+    // the first pass: the models. Its walk runs on one thread: with more,
+    // the demo's checksum and SHA-256 are computed beside it
+    let hashes = || (crc32(src), <[u8; 32]>::from(Sha256::digest(src)));
+    let train = || {
+        if force_raw {
+            Trained {
+                shared: Vec::new(),
+                protos: vec![Proto::default(); nseg],
+                walked: vec![false; nseg],
+                durs: (0..nseg).map(|i| frame_scan(&src[cuts[i]..cuts[i + 1]]).1).collect(),
+            }
+        } else {
+            train(src, &cuts, outer, inner, threads)
         }
-    }
-    // one model per rANS stream from its symbols in every segment, in the
-    // models block (FORMAT.md §12)
-    let shared = if nseg > 0 && !force_raw {
-        let segs: Vec<(&Walked, &Nums)> = plans
-            .iter()
-            .filter_map(|p| Some((p.walked.as_ref()?, p.nums.as_ref()?)))
-            .collect();
-        segment::train(&segs, threads)
-    } else {
-        Vec::new()
     };
-    // every segment's body; one the transform cannot code is DEFLATE
+    let (t, (crc, sha256)) = if threads > 1 && HAS_THREADS {
+        std::thread::scope(|sc| {
+            let h = sc.spawn(hashes);
+            (train(), h.join().expect("hashing"))
+        })
+    } else {
+        (train(), hashes())
+    };
+    if t.durs.iter().any(|&d| d > u32::MAX as u64) {
+        return Err(Error::Invalid("segment over 2^32 ms"));
+    }
+    let header = Header {
+        size: src.len() as u64,
+        duration_ms: t.durs.iter().sum(),
+        crc,
+        sha256,
+    };
+    // the second pass: every segment is walked again, from the protocol
+    // state it starts in, and coded with the models (segments in parallel,
+    // each holding its own walk only). One the transform cannot code is
+    // DEFLATE
     let mut bodies: Vec<Body> = par_map(outer, nseg, |i| {
         let s = &src[cuts[i]..cuts[i + 1]];
-        let p = &plans[i];
-        if let (Some(wk), Some(nums)) = (&p.walked, &p.nums) {
+        if let Some((wk, _)) = t.walked[i].then(|| segment::walk(s, t.protos[i])).flatten() {
+            let nums = segment::numerics(s, &wk, inner);
             let mut st = Vec::new();
-            if let Some(b) = transform_body(s, wk, nums, p.dur_ms, inner, &mut st, &shared) {
+            if let Some(b) = transform_body(s, &wk, &nums, t.durs[i], inner, &mut st, &t.shared) {
                 return Body {
                     bytes: b,
                     fallback: false,
@@ -251,13 +264,9 @@ fn compress_inner(
                 };
             }
         }
-        Body::raw(s, p.dur_ms)
+        Body::raw(s, t.durs[i])
     });
-    // the walks and the numeric values are not needed again (a segment
-    // that fails the check below is coded again as DEFLATE): freed before
-    // the check, which decodes
-    let durs: Vec<u64> = plans.iter().map(|p| p.dur_ms).collect();
-    drop(plans);
+    let (shared, durs) = (t.shared, t.durs);
     for _round in 0..2 {
         let (out, info) = assemble(&header, &shared, &bodies);
         if !cfg.verify {
