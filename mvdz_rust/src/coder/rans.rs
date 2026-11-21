@@ -172,10 +172,6 @@ struct Model {
     tables: Vec<Table>,
 }
 
-pub(crate) static TABLE_BITS_PER_SYM: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(5);
-const TABLE_BITS_BASE: f64 = 16.0;
-
 /// A stream's counts and the contexts that get their own table.
 struct Counts {
     alpha: usize,
@@ -295,7 +291,8 @@ impl Counts {
 /// The tables of a model of these counts: own contexts and the fallback's
 /// counts.
 fn select(t: &Tally) -> Counts {
-    let per_sym = f64::from(TABLE_BITS_PER_SYM.load(std::sync::atomic::Ordering::Relaxed));
+    const TABLE_BITS_BASE: f64 = 16.0;
+    const TABLE_BITS_PER_SYM: f64 = 5.0;
     let (alpha, row_of, rows, keys) = (t.alpha, &t.row_of, &t.rows, &t.keys);
     let row = |k: u32| &rows[row_of[k as usize] as usize * alpha..][..alpha];
     // selection order is part of the output: most frequent context first
@@ -311,7 +308,7 @@ fn select(t: &Tally) -> Counts {
         for &k in &keys {
             let c = row(k);
             let present = approx_f64(c.iter().filter(|&&x| x > 0).count() as u64);
-            let own_cost = per_sym.mul_add(present, entropy_bits(c) + TABLE_BITS_BASE);
+            let own_cost = TABLE_BITS_PER_SYM.mul_add(present, entropy_bits(c) + TABLE_BITS_BASE);
             if own_cost < cross_bits(c, &fb) {
                 own.push(k);
             } else {

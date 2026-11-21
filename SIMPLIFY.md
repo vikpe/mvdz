@@ -1341,7 +1341,8 @@ number is given.
    check stays in `compress_inner`). Tests: 40 pass, the known 4 fail (44 tests, was
    45); with 11 archive demos as `MVDZ_TEST_DATA/sample` the same, and `sweep` round
    trips all 11. The tests that need the duel sample still skip on this machine.
-3. `TABLE_BITS_PER_SYM` (`rans.rs`): a global atomic nothing writes. Make it a constant.
+3. Done 2026-11-21 (not committed): `TABLE_BITS_PER_SYM` is a `const` (5.0) inside
+   `select`, its only user, as is `TABLE_BITS_BASE`. Output unchanged (four demos).
 4. Done 2026-11-21: the `scalar` feature is removed with the SSE2 table search (see
    "No unsafe code" under Results per change).
 
