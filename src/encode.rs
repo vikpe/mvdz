@@ -1,9 +1,9 @@
 //! Compression: walk, code, assemble, and check that the file decodes to
 //! the input (falling back per segment to DEFLATE).
 
-use crate::budget::{Budget, Limits};
+use crate::budget::Budget;
 use crate::coder::rans::Shared;
-use crate::decode::{SliceSrc, decode_segment, scan_layout};
+use crate::decode::{DemoCheck, SliceSrc, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::*;
 use crate::proto::{Proto, frame_len};
@@ -321,36 +321,47 @@ fn assemble(
     (out, info)
 }
 
-/// Decodes `file` and compares it with `src`: None if the container does
-/// not parse, else per segment whether it fails. Every segment passing
-/// means the whole file decodes (the whole-file checks are run too).
+/// Decodes `file` and compares it with `src`, segment by segment (the
+/// decoded demo is never held whole): None if the container does not
+/// parse, else per segment whether it fails. Every segment passing means
+/// the whole file decodes (the whole-file checks are run too).
 pub fn failing_segments(
     file: &[u8],
     src: &[u8],
     cuts: &[usize],
     threads: usize,
 ) -> Option<Vec<bool>> {
-    if let Ok(back) = crate::decode::decompress(file, threads, &Limits::unlimited()) {
-        if back == src {
-            return Some(vec![false; cuts.len() - 1]);
-        }
-    }
     let budget = Budget::unlimited();
     let lay = scan_layout(&mut SliceSrc(file), threads, &budget).ok()?;
-    if lay.segs.len() != cuts.len() - 1 {
+    let nseg = lay.segs.len();
+    if nseg != cuts.len() - 1 {
         return None;
     }
-    let bad = par_map(threads, lay.segs.len(), |i| {
+    let (outer, inner) = if nseg >= threads {
+        (threads, 1)
+    } else {
+        (1, threads)
+    };
+    let timings = par_map(outer, nseg, |i| {
         let (s, h) = &lay.segs[i];
         let want = &src[cuts[i]..cuts[i + 1]];
         let mut dst = vec![0u8; want.len()];
         let body = &file[s.body_off() as usize..s.end() as usize];
-        decode_segment(&lay, body, h, &mut dst, 1, &budget).is_err() || dst != want
+        decode_segment(&lay, body, h, &mut dst, inner, &budget)
+            .ok()
+            .filter(|_| dst == want)
     });
-    // a file whose segments all decode but which still fails is not
-    // fixable by falling back
-    if bad.iter().all(|&x| !x) {
-        return None;
+    let bad: Vec<bool> = timings.iter().map(|t| t.is_none()).collect();
+    if bad.iter().any(|&x| x) {
+        return Some(bad);
     }
+    // the whole-demo checks, over the input: every segment decoded to it.
+    // A file whose segments all decode but which fails these is not
+    // fixable by falling back
+    let mut chk = DemoCheck::default();
+    for (i, tm) in timings.into_iter().enumerate() {
+        chk.segment(&src[cuts[i]..cuts[i + 1]], tm?).ok()?;
+    }
+    chk.finish(&lay).ok()?;
     Some(bad)
 }

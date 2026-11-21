@@ -907,15 +907,15 @@ fn byte_ctx(c: u32) -> u32 {
 }
 
 /// The (context, symbol) pairs of a structural stream.
-pub fn byte_syms(syms: &[u8], ctxs: &[u32]) -> Vec<(u32, u16)> {
+pub fn byte_syms(syms: &[u8], ctxs: &[u16]) -> Vec<(u32, u16)> {
     syms.iter()
         .zip(ctxs)
-        .map(|(&s, &c)| (byte_ctx(c), s as u16))
+        .map(|(&s, &c)| (c as u32, s as u16))
         .collect()
 }
 
 /// A structural stream coded with its model in the file, `file`.
-pub fn encode_bytes(syms: &[u8], ctxs: &[u32], file: &Shared) -> Vec<u8> {
+pub fn encode_bytes(syms: &[u8], ctxs: &[u16], file: &Shared) -> Vec<u8> {
     pack_body(&file.model, &byte_syms(syms, ctxs), &[])
 }
 
@@ -1070,22 +1070,45 @@ impl<'a> BitR<'a> {
     }
 }
 
-/// The (context, bucket) pairs of a numeric stream and its mantissa bits.
-pub fn num_syms(sid: usize, vals: &[(NCtx, i32)]) -> (Vec<(u32, u16)>, Vec<u8>) {
-    let mut syms = Vec::with_capacity(vals.len());
-    let mut bw = BitW::default();
-    for (c, v) in vals {
-        let (b, n, m) = bucket(*v);
-        syms.push((num_ctx(sid, c), b));
-        bw.put(m, n);
+/// The values of a numeric stream as they are coded: the (context,
+/// bucket) pair of each value and the mantissa bits of all of them.
+pub struct NumSyms {
+    pub syms: Vec<(u32, u16)>,
+    pub extra: Vec<u8>,
+}
+
+/// Collects the values of numeric stream `sid` as [`NumSyms`].
+pub struct NumSymW {
+    sid: usize,
+    syms: Vec<(u32, u16)>,
+    bits: BitW,
+}
+
+impl NumSymW {
+    pub fn new(sid: usize) -> NumSymW {
+        NumSymW {
+            sid,
+            syms: Vec::new(),
+            bits: BitW::default(),
+        }
     }
-    (syms, bw.finish())
+    #[inline(always)]
+    pub fn push(&mut self, c: &NCtx, v: i32) {
+        let (b, n, m) = bucket(v);
+        self.syms.push((num_ctx(self.sid, c), b));
+        self.bits.put(m, n);
+    }
+    pub fn finish(self) -> NumSyms {
+        NumSyms {
+            syms: self.syms,
+            extra: self.bits.finish(),
+        }
+    }
 }
 
 /// A numeric stream coded with its model in the file, `file`.
-pub fn encode_num(sid: usize, vals: &[(NCtx, i32)], file: &Shared) -> Vec<u8> {
-    let (syms, extra) = num_syms(sid, vals);
-    pack_body(&file.model, &syms, &extra)
+pub fn encode_num(num: &NumSyms, file: &Shared) -> Vec<u8> {
+    pack_body(&file.model, &num.syms, &num.extra)
 }
 
 pub struct NumDec<'a> {
@@ -1157,7 +1180,7 @@ mod tests {
     #[test]
     fn byte_round_trip_and_limits() {
         // three contexts with different distributions: own tables
-        let ctxs: Vec<u32> = (0..5000u32).map(|i| i % 3).collect();
+        let ctxs: Vec<u16> = (0..5000u16).map(|i| i % 3).collect();
         let syms: Vec<u8> = (0..5000u32)
             .map(|i| {
                 [(i * 7 % 13) as u8, 100 + (i % 5) as u8, 200 + (i % 2) as u8][(i % 3) as usize]
@@ -1167,7 +1190,7 @@ mod tests {
         let b = encode_bytes(&syms, &ctxs, &sh);
         let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
         for (i, &s) in syms.iter().enumerate() {
-            assert_eq!(d.get(ctxs[i]), Some(s));
+            assert_eq!(d.get(ctxs[i] as u32), Some(s));
         }
         assert!(d.done());
         // the model of a byte stream is refused as a numeric stream's
@@ -1176,7 +1199,7 @@ mod tests {
         assert!(ByteDec::new(&b[..b.len() - 2], syms.len(), &dm).is_err());
         let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
         for i in 0..syms.len() - 1 {
-            d.get(ctxs[i]);
+            d.get(ctxs[i] as u32);
         }
         assert!(!d.done());
     }
@@ -1187,7 +1210,7 @@ mod tests {
     #[test]
     fn model_over_the_decision_limit_shrinks() {
         let n = 60_000u32;
-        let ctxs: Vec<u32> = (0..n).map(|i| i % 3000).collect();
+        let ctxs: Vec<u16> = (0..n).map(|i| (i % 3000) as u16).collect();
         let syms: Vec<u8> = ctxs.iter().map(|&c| (c % 4) as u8).collect();
         let mut t = Tally::new(256);
         t.add(&byte_syms(&syms, &ctxs));
@@ -1198,7 +1221,7 @@ mod tests {
         let b = encode_bytes(&syms, &ctxs, &sh);
         let mut d = ByteDec::new(&b, syms.len(), &dm).unwrap();
         for (i, &s) in syms.iter().enumerate() {
-            assert_eq!(d.get(ctxs[i]), Some(s));
+            assert_eq!(d.get(ctxs[i] as u32), Some(s));
         }
         assert!(d.done());
     }
@@ -1215,8 +1238,13 @@ mod tests {
                 )
             })
             .collect();
-        let (sh, dm) = models(&num_syms(PI_OX, &vals).0, NALPHA);
-        let b = encode_num(PI_OX, &vals, &sh);
+        let mut w = NumSymW::new(PI_OX);
+        for (c, v) in &vals {
+            w.push(c, *v);
+        }
+        let num = w.finish();
+        let (sh, dm) = models(&num.syms, NALPHA);
+        let b = encode_num(&num, &sh);
         let mut d = NumDec::new(PI_OX, &b, vals.len(), &dm).unwrap();
         for &(c, v) in &vals {
             assert_eq!(d.get(c), Some(v));

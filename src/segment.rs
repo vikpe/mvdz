@@ -53,7 +53,8 @@ pub struct StreamStat {
 
 pub struct EncIO {
     pub syms: Vec<Vec<u8>>,
-    pub ctxs: Vec<Vec<u32>>,
+    /// the context of each symbol (contexts fit 16 bits)
+    pub ctxs: Vec<Vec<u16>>,
     pub blobs: Vec<Vec<u8>>,
 }
 
@@ -72,7 +73,7 @@ impl SymIO for EncIO {
     fn byte(&mut self, sid: usize, ctx: u32, v: u8) -> u8 {
         debug_assert!(ctx <= 0xffff, "stream {sid}: context {ctx:#x} over 16 bits");
         self.syms[sid].push(v);
-        self.ctxs[sid].push(ctx);
+        self.ctxs[sid].push(ctx as u16);
         v
     }
     fn put_blob(&mut self, sid: usize, b: &[u8]) {
@@ -87,13 +88,13 @@ impl SymIO for EncIO {
 }
 
 struct NumEnc {
-    vals: Vec<Vec<(NCtx, i32)>>,
+    vals: Vec<rans::NumSymW>,
 }
 
 impl NumIO for NumEnc {
     #[inline(always)]
     fn code(&mut self, k: usize, ctx: NCtx, v: i32) -> i32 {
-        self.vals[k].push((ctx, v));
+        self.vals[k].push(&ctx, v);
         v
     }
 }
@@ -271,12 +272,12 @@ fn pack_one(
     kind: Kind,
     sid: usize,
     wk: &Walked,
-    num: &[(NCtx, i32)],
+    num: Option<&rans::NumSyms>,
     file: Option<&rans::Shared>,
 ) -> Option<Vec<u8>> {
     match kind {
         Kind::Lazy => Some(rans::encode_bytes(&wk.io.syms[sid], &wk.io.ctxs[sid], file?)),
-        Kind::Num => Some(rans::encode_num(sid, num, file?)),
+        Kind::Num => Some(rans::encode_num(num?, file?)),
         Kind::Blobs => {
             let ids = blob_ids(wk);
             let mut all = Vec::with_capacity(ids.iter().map(|&i| wk.io.blobs[i].len()).sum());
@@ -293,9 +294,9 @@ fn groups() -> Vec<Group> {
     WAVE1.iter().chain(WAVE2.iter()).copied().collect()
 }
 
-/// The numeric values of a walked segment, per group (in [`groups`] order)
-/// and stream of the group.
-pub type Nums = Vec<Vec<Vec<(NCtx, i32)>>>;
+/// The numeric values of a walked segment as they are coded, per group
+/// (in [`groups`] order) and stream of the group.
+pub type Nums = Vec<Vec<rans::NumSyms>>;
 
 /// Runs the numeric predictors over a walked segment `src`. The encoder
 /// does this once: the models are trained on the values and the segment is
@@ -306,10 +307,10 @@ pub fn numerics(src: &[u8], wk: &Walked, threads: usize) -> Nums {
     par_map(threads, groups.len(), |gi| {
         let g = groups[gi];
         let mut io = NumEnc {
-            vals: g.streams().iter().map(|_| Vec::new()).collect(),
+            vals: g.streams().iter().map(|&sid| rans::NumSymW::new(sid)).collect(),
         };
         g.run::<true, NumEnc>(&wk.recs, buf, &mut io);
-        io.vals
+        io.vals.into_iter().map(|w| w.finish()).collect()
     })
 }
 
@@ -340,7 +341,7 @@ pub fn train(segs: &[(&Walked, &Nums)], threads: usize) -> Vec<Option<rans::Shar
                 add(256, &rans::byte_syms(&wk.io.syms[sid], &wk.io.ctxs[sid]));
             }
             if let Some((gi, k)) = at[sid] {
-                add(rans::NALPHA, &rans::num_syms(sid, &nums[gi][k]).0);
+                add(rans::NALPHA, &nums[gi][k].syms);
             }
         }
         tally.and_then(|t| t.shared())
@@ -400,7 +401,7 @@ pub fn encode(
     }
     for (gi, g) in groups.iter().enumerate() {
         for (k, &sid) in g.streams().iter().enumerate() {
-            if !nums[gi][k].is_empty() {
+            if !nums[gi][k].syms.is_empty() {
                 jobs.push((sid, Kind::Num, gi, k));
             }
         }
@@ -413,7 +414,7 @@ pub fn encode(
     }
     let size = |j: &(usize, Kind, usize, usize)| match j.1 {
         Kind::Lazy => wk.io.syms[j.0].len(),
-        Kind::Num => nums[j.2][j.3].len() * 2,
+        Kind::Num => nums[j.2][j.3].syms.len() * 2,
         Kind::Blobs => blob_total,
     };
     // biggest first for load balance; output in stream id order
@@ -421,11 +422,7 @@ pub fn encode(
     order.sort_by_key(|&i| std::cmp::Reverse(size(&jobs[i])));
     let packed_sorted = par_map(threads, jobs.len(), |k| {
         let (sid, kind, gi, i) = jobs[order[k]];
-        let num: &[(NCtx, i32)] = if matches!(kind, Kind::Num) {
-            &nums[gi][i]
-        } else {
-            &[]
-        };
+        let num = matches!(kind, Kind::Num).then(|| &nums[gi][i]);
         let file = shared.get(sid).and_then(|m| m.as_ref());
         pack_one(kind, sid, wk, num, file)
     });
@@ -440,7 +437,7 @@ pub fn encode(
     ids.sort_by_key(|&i| jobs[i].0);
     let count = |i: usize| match jobs[i].1 {
         Kind::Lazy => wk.io.syms[jobs[i].0].len(),
-        Kind::Num => nums[jobs[i].2][jobs[i].3].len(),
+        Kind::Num => nums[jobs[i].2][jobs[i].3].syms.len(),
         Kind::Blobs => blob_total,
     };
     let blob_body: &[u8] = match blob_job {
