@@ -28,7 +28,7 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         assert_eq!(header_bytes(&header), file[..HEADER_LEN]);
         let decoder = crate::Decoder::new(Cursor::new(&file))?;
         assert_eq!(*decoder.header(), header);
-        let layout = scan(&file, &crate::budget::Limits::default())?;
+        let layout = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
         assert_eq!(layout.header, header);
         assert_eq!(
             layout.segments.len() > 1,

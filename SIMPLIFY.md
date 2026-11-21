@@ -99,8 +99,9 @@ A format simple enough to stay unchanged for 10+ years.
 | Output files (tool) | Written directly with `File::create`, removed when the write fails; no temporary file, no fsync | As gzip and zstd; fsync cost 2.9 ms a file (18 % of a batch decompression). Ceiling: a failed `-f` overwrite loses the old file, a killed process leaves a partial one |
 | Crates | A virtual workspace (`mvdz_rust/Cargo.toml`: members, shared dependency pins, lints, profiles) with the library `mvdz` in `mvdz/` and the tool `mvdz_cli` (binary `mvdz`) in `mvdz_cli/` | Not every user needs a CLI: a library user builds no tool code. Directory names match crate names (rust AGENTS rule) |
 | Library scope | No file writing, no JSON: `mvdz info`'s JSON is built in `mvdz_cli/src/main.rs` | Not the codec's job |
-| Public API | `encode`, `decode`, `Encoder` (`Encoder::new(writer)`, `.max_threads(n)`, implements `io::Write`, buffers the demo; `finish` encodes and writes, since the encoder needs the whole demo), `Decoder` (`Decoder::new(reader)?`, `.max_threads(n)`, implements `io::Read`; bounded memory); the pair as gzip libraries have it, Viktor 2026-11-21, `Decoder::header()` (`Header`, the file header's fields, which all describe the demo: getters only, no format version; as gzip's decoder exposes its header). No `info`: the file size is a file-system call, the segment list waits for part-of-file decoding (task 5), `Error`, `Result`. Everything else is `pub(crate)`. The opt-in feature `fuzz` adds a hidden `fuzz` module (`encode_any`, `check_demo`) for the fuzz targets; the fuzz generator tracks the protocol state itself. Tests that build files by hand are unit tests in `src/tests/` | Information hiding: what a crate exposes is its contract |
-| Memory limit | Fixed: 1 GiB on 64-bit (`Limits::default`); no option, no `--max-memory` | Viktor, 2026-11-21 |
+| Public API | `encode`, `decode`, `Encoder` (`Encoder::new(writer)`, `.max_threads(n)`, implements `io::Write`, buffers the demo; `finish` encodes and writes, since the encoder needs the whole demo), `Decoder` (`Decoder::new(reader)?`, `.max_threads(n)`, implements `io::Read`; bounded memory); the pair as gzip libraries have it, Viktor 2026-11-21, `Decoder::header()` (`Header`, the file header's fields, which all describe the demo: getters only, no format version; as gzip's decoder exposes its header). No `info`: the file size is a file-system call, the segment list waits for part-of-file decoding (task 4), `Error`, `Result`. Everything else is `pub(crate)`. The opt-in feature `fuzz` adds a hidden `fuzz` module (`encode_any`, `check_demo`) for the fuzz targets; the fuzz generator tracks the protocol state itself. Tests that build files by hand are unit tests in `src/tests/` | Information hiding: what a crate exposes is its contract |
+| Memory limit | Fixed: 1 GiB on 64-bit, 256 MiB on 32-bit (`DEFAULT_MAX_MEMORY`); no option, no `--max-memory` | Viktor, 2026-11-21 |
+| Work limit | Removed (2026-11-21); only the memory limit stays | Rule M2 and at most 34 models bound model decoding far below the old 4096 units per input byte; output is at most 1 MiB per segment (about 10^4 times the input, estimated), and whole-file `decode` is capped by memory. The most compressible demos measured encode at 1,471:1. gzip and zstd have no work limit either |
 | Non-demo input | Refused; `--allow-non-demo` and `compress_any` removed | Viktor, 2026-11-21 |
 | Tool exit status | `main` returns `ExitCode` (2 bad command line, 1 a failed file, 0 when standard output closes early); no `process::exit` | Errors return to `main` instead of ending the process where they occur |
 | Names | Spelled out (`SegmentHeader`); protocol constants are qwprot's names with words split by `_` (`U_FTE_MODEL_DBL`), no comments. Stream-id constants (`PI_OX`, ...) stay short | Stream-id constants mirror the stream names in FORMAT.md |
@@ -302,48 +303,43 @@ Code:
 1. Truncating casts: 86 in the library under one allow; about 37 are positions
    narrowed from `usize` to `u32` (a `u32` walker cursor would remove them; hot loop:
    measure).
-2. The work budget (`Limits::work_per_byte`, now internal): with segments at 1 MiB and models at
-   16 MiB the work a file can demand is bounded by its size; maybe only the memory limit
-   is needed. Check what the hostile-file tests rely on first.
-3. `benches/codec.rs`: which demos (set8 is 18.9 MB; 6 of its 8 are in the download).
-4. Streaming input for the encoder (read the demo twice instead of holding it): peak
+2. `benches/codec.rs`: which demos (set8 is 18.9 MB; 6 of its 8 are in the download).
+3. Streaming input for the encoder (read the demo twice instead of holding it): peak
    drops by the raw size; 250 MB works today at about 410 MiB.
 
 API gaps:
 
-5. Part of a file (a time range, the last segment) cannot be decoded from outside the
+4. Part of a file (a time range, the last segment) cannot be decoded from outside the
    crate. If wanted: one public function, and each segment's starting protocol state.
-6. No regression test for the `Budget::unlimited()` bug (needs a demo whose models
-   take more than 2^20 decisions to build).
 
 Format and specification:
 
-7. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
-8. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
+5. Regenerate the vectors in `tests/vectors/` (clears the known failing tests).
+6. FORMAT.md: rewrite the container (section 2); delete metadata, index, demoinfo
    sharing, attachments, streaming (sections 3, 4, 5.3, 10, 11) and the C interface.
    State: the 1 MiB segment rule (it still gives 4 GiB and "only the last segment may
    end inside a frame"); `MAX_SEGMENTS` as a 16 GiB demo limit; section 12 rule 1 as
    the 1 MiB cut with each piece walked afresh, rule 5 as all tail; encoders refuse
    input not starting like an MVD; "scan back from the last segment" for demoinfo;
    a model no segment uses is allowed and ignored; the protocol constant names of
-   `proto.rs`.
+   `proto.rs`; no work limit, only memory (the resource rules section).
    Stale: line 382 (`info` JSON: now the header only: `size_bytes`, `duration_ms`,
    `crc32`, `sha256`), line 668 (decode waves), line 357 (`FileInfo::to_json`, now `header_json` in
    `mvdz_cli/src/main.rs`).
-9. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
+7. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz
    list are current (2026-11-21). Still rc.4: the intro (levels, metadata, attachments,
-   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 10's numbers,
+   C), Install (the AVX2 speed claim), Ratios and speeds (needs task 8's numbers,
    mentions `--trusted` and the fast level), the FAQ (metadata, attachments) and the
-   Tests paragraph's `MVDZ_WRITE_VECTORS` note (check after task 7).
-10. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
-11. Later: implementations in C, Go and other languages from the settled
-    specification, with a shared test suite.
+   Tests paragraph's `MVDZ_WRITE_VECTORS` note (check after task 5).
+8. BENCHMARKS.md from the final measurements; drop Miri (no `unsafe` left).
+9. Later: implementations in C, Go and other languages from the settled
+   specification, with a shared test suite.
 
 Not measured:
 
-12. Size of a decoder-only wasm build.
-13. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
-14. rayon on the final code (optional).
+10. Size of a decoder-only wasm build.
+11. `uc` and `uc.a` against blobs, on demos with usercmd blocks.
+12. rayon on the final code (optional).
 
 ## Verification
 

@@ -13,10 +13,8 @@ pub(crate) fn compress(src: &[u8]) -> crate::Result<Vec<u8>> {
 }
 
 /// Header, models and every segment header, without decoding a segment.
-pub(crate) fn scan(file: &[u8], limits: &crate::budget::Limits) -> crate::Result<Layout> {
-    let budget = crate::budget::Budget::new(limits);
-    budget.input(file.len() as u64);
-    crate::decode::scan_layout(file, 1, &budget)
+pub(crate) fn scan(file: &[u8], max_memory: u64) -> crate::Result<Layout> {
+    crate::decode::scan_layout(file, 1, &crate::budget::Budget::new(max_memory))
 }
 
 /// Decodes the whole file on `threads` threads (0: one per logical core).
@@ -382,7 +380,7 @@ pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
             ),
         }
     }
-    let scanned = scan(file, &crate::budget::Limits::default());
+    let scanned = scan(file, crate::budget::DEFAULT_MAX_MEMORY);
     if first.is_ok() {
         assert!(
             scanned.is_ok(),

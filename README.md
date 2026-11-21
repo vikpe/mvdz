@@ -174,8 +174,8 @@ early (`mvdz info *.mvdz | head`), the tool stops quietly.
   and the demo's size and duration, checked on every decode.
 
 Files from elsewhere are untrusted input: decoders bound their memory
-(1 GiB on 64-bit targets, 256 MiB on 32-bit ones such as wasm32) and
-work, and demos can carry console commands (`svc_stufftext`) that players
+(1 GiB on 64-bit targets, 256 MiB on 32-bit ones such as wasm32), and the
+format bounds their work by the input's size; demos can carry console commands (`svc_stufftext`) that players
 must filter.
 
 ## Rust
@@ -202,7 +202,7 @@ std::io::copy(&mut decoder, &mut std::io::stdout())?;
 ```
 
 Errors (`mvdz::Error`) are `Format` (not MVDZ or an unsupported version),
-`Corrupt` (any rule of FORMAT.md), `Limit` (the memory or work bound),
+`Corrupt` (any rule of FORMAT.md), `Limit` (the memory bound),
 `Invalid`, `Io`, `Internal` and `NotMvd` (`encode` given input that is not
 an MVD demo). Decoders never panic on corrupt input; they return an error.
 `Decoder` yields only checked bytes: each segment's CRC-32 is checked

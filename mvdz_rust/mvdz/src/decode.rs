@@ -1,7 +1,7 @@
 //! Decoding: the layout scan every random-access reader runs, the decode
 //! of one segment, and whole-file decompression.
 
-use crate::budget::{Budget, Limits, zeroed};
+use crate::budget::{Budget, zeroed};
 use crate::coder::rans::ModelsBlock;
 use crate::error::{Error, Result, bad};
 use crate::format::{
@@ -133,13 +133,11 @@ impl DemoCheck {
     }
 }
 
-pub(crate) fn decompress(file: &[u8], threads: usize, limits: &Limits) -> Result<Vec<u8>> {
-    let budget = Budget::new(limits);
-    budget.input(file.len() as u64);
+pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result<Vec<u8>> {
+    let budget = Budget::new(max_memory);
     let layout = scan_layout(file, threads, &budget)?;
     let size = layout.header.size_bytes;
     let _charge = budget.alloc(size)?;
-    budget.work(size)?;
     let mut out = zeroed(to_usize(size).ok_or(Error::Limit("demo size"))?)?;
     let segment_count = layout.segments.len();
     let mut slices: Vec<std::sync::Mutex<&mut [u8]>> = Vec::with_capacity(segment_count);

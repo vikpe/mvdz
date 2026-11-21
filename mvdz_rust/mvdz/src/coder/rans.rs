@@ -552,7 +552,6 @@ fn read_model_header(
     if decoder.pos() != header.len() || decoder.decisions > max_decisions {
         return Err(corrupt);
     }
-    budget.work(decoder.decisions)?;
     Ok((keys, quantized_tables, charge))
 }
 

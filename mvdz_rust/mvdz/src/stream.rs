@@ -1,7 +1,7 @@
 //! In-order decompression: [`Decoder`] decodes a file as it arrives from any `io::Read`,
 //! as many segments at a time as it has threads.
 
-use crate::budget::{Budget, Charge, Limits, zeroed};
+use crate::budget::{Budget, Charge, DEFAULT_MAX_MEMORY, zeroed};
 use crate::coder::rans::ModelsBlock;
 use crate::decode::{DemoCheck, decode_segment};
 use crate::error::{Error, Result, bad};
@@ -37,7 +37,7 @@ pub struct Decoder<R: Read> {
 impl<R: Read> Decoder<R> {
     /// Reads the header; decodes on all logical cores until `max_threads` says otherwise.
     pub fn new(input: R) -> Result<Self> {
-        Self::with_limits(input, thread_count(0), &Limits::default())
+        Self::with_max_memory(input, thread_count(0), DEFAULT_MAX_MEMORY)
     }
 
     /// Up to this many segments are decoded at once, nothing more is buffered; capped at the
@@ -52,7 +52,7 @@ impl<R: Read> Decoder<R> {
         &self.layout.header
     }
 
-    pub(crate) fn with_limits(mut input: R, threads: usize, limits: &Limits) -> Result<Self> {
+    pub(crate) fn with_max_memory(mut input: R, threads: usize, max_memory: u64) -> Result<Self> {
         let mut header = [0u8; HEADER_LEN];
         let mut filled = 0;
         while filled < HEADER_LEN {
@@ -63,9 +63,8 @@ impl<R: Read> Decoder<R> {
                 Err(error) => return Err(error.into()),
             }
         }
-        let budget = Budget::new(limits);
+        let budget = Budget::new(max_memory);
         let layout = Layout::new(&header[..filled], &budget)?;
-        budget.input(HEADER_LEN as u64);
         let check = Some(DemoCheck::default());
         Ok(Self {
             input,
@@ -136,7 +135,6 @@ impl<R: Read> Decoder<R> {
         if body.len() as u64 != len {
             return bad("incomplete file");
         }
-        self.budget.input(len);
         Ok((body, charge))
     }
 
@@ -177,7 +175,6 @@ impl<R: Read> Decoder<R> {
         let decoded = par_map(self.threads, segments.len(), |index| {
             let (header, body, _) = &segments[index];
             let charge = budget.alloc(u64::from(header.raw_len))?;
-            budget.work(u64::from(header.raw_len))?;
             let mut out = zeroed(header.raw_len as usize)?;
             let scan = decode_segment(layout, body, header, &mut out, budget)?;
             Ok((out, charge, scan))

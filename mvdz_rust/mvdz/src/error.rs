@@ -5,7 +5,7 @@ pub enum Error {
     Format(&'static str),
     /// Damaged, or breaks a checksum, structure or limit of FORMAT.md.
     Corrupt(&'static str),
-    /// Decoding would exceed the caller's memory or work budget.
+    /// Decoding would exceed the memory limit.
     Limit(&'static str),
     Invalid(&'static str),
     Io(std::io::ErrorKind),

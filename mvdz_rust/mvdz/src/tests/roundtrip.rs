@@ -39,12 +39,12 @@ fn sample_demos() -> anyhow::Result<()> {
 /// The bytes a sequential reader yields before its first error, and that error.
 fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<crate::Error>) {
     let mut out = Vec::new();
-    let limits = crate::budget::Limits::default();
-    let mut reader = match crate::stream::Decoder::with_limits(Cursor::new(file), threads, &limits)
-    {
-        Ok(reader) => reader,
-        Err(error) => return (out, Some(error)),
-    };
+    let max_memory = crate::budget::DEFAULT_MAX_MEMORY;
+    let mut reader =
+        match crate::stream::Decoder::with_max_memory(Cursor::new(file), threads, max_memory) {
+            Ok(reader) => reader,
+            Err(error) => return (out, Some(error)),
+        };
     let mut buf = [0u8; 4096];
     loop {
         match reader.read_demo(&mut buf) {
@@ -251,7 +251,7 @@ fn segments_are_capped() -> anyhow::Result<()> {
         ("oversized frame", oversized.0, 2),
     ] {
         let (file, _) = unchecked(&src)?;
-        let layout = scan(&file, &crate::budget::Limits::default())?;
+        let layout = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
         let count = layout.segments.len();
         assert!(count >= segments, "{what}: {count} segments");
         assert!(

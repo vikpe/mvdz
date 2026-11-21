@@ -1,4 +1,4 @@
-use crate::budget::Limits;
+use crate::budget::DEFAULT_MAX_MEMORY;
 use crate::error::{Error, Result};
 use crate::util::thread_count;
 use std::io::Write;
@@ -61,7 +61,7 @@ impl<W: Write> Write for Encoder<W> {
 /// `bytes`: what `encode` returned. `max_threads`: capped at the logical cores; 0 is one per
 /// logical core.
 pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
-    crate::decode::decompress(bytes, thread_count(max_threads), &Limits::default())
+    crate::decode::decompress(bytes, thread_count(max_threads), DEFAULT_MAX_MEMORY)
 }
 
 /// The first frame must be whole, carry messages (not only a `dem_set`) and parse without

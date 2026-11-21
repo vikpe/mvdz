@@ -4,7 +4,6 @@
 
 use super::common::*;
 use crate::Error;
-use crate::budget::Limits;
 use crate::format::*;
 use crate::util::put_u32;
 use anyhow::Context as _;
@@ -88,12 +87,9 @@ fn r_m2_padded_model() {
     }
     .build();
     let start = Instant::now();
-    let limits = Limits {
-        memory: 64 << 20,
-        ..Default::default()
-    };
+    let max_memory: u64 = 64 << 20;
     assert_eq!(
-        crate::decode::decompress(&file, 1, &limits).err(),
+        crate::decode::decompress(&file, 1, max_memory).err(),
         Some(Error::Corrupt("model"))
     );
     assert!(
@@ -125,15 +121,12 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
     // the demo is 0.4 MB and a sequential reader holds one segment at a
     // time: only the record kept per segment (64 bytes each, 3.8 MB) can
     // exceed this
-    let limits = Limits {
-        memory: 3 << 20,
-        ..Default::default()
-    };
+    let max_memory: u64 = 3 << 20;
     assert_eq!(
-        crate::decode::decompress(&file, 1, &limits).err(),
+        crate::decode::decompress(&file, 1, max_memory).err(),
         Some(Error::Limit("memory"))
     );
-    let mut reader = crate::stream::Decoder::with_limits(Cursor::new(&file), 1, &limits)?;
+    let mut reader = crate::stream::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?;
     let mut read_all = || -> crate::Result<()> {
         while reader.read_demo(&mut [0; 4096])? > 0 {}
         Ok(())

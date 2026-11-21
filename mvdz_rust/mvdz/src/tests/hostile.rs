@@ -166,16 +166,13 @@ fn declared_sizes() -> anyhow::Result<()> {
     refused(&past_end, "segment length", is_corrupt);
     // the caller's memory budget
     let (demo, file) = small_demo_and_file(false)?;
-    let small = crate::budget::Limits {
-        memory: demo.len() as u64 / 2,
-        ..Default::default()
-    };
+    let max_memory = demo.len() as u64 / 2;
     assert_matches!(
-        crate::decode::decompress(&file, 1, &small),
+        crate::decode::decompress(&file, 1, max_memory),
         Err(Error::Limit(_))
     );
     assert!(
-        crate::stream::Decoder::with_limits(Cursor::new(&file), 1, &small)
+        crate::stream::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)
             .and_then(|mut reader| reader.read_demo(&mut [0; 10]))
             .is_err()
     );
@@ -334,16 +331,13 @@ fn large_models_block() -> anyhow::Result<()> {
     file_parts.models = models;
     let wide = file_parts.build();
     // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
-    let limits = crate::budget::Limits {
-        memory: 128 << 20,
-        ..Default::default()
-    };
-    let error = scan(&wide, &limits).err();
+    let max_memory: u64 = 128 << 20;
+    let error = scan(&wide, max_memory).err();
     assert_eq!(error, Some(Error::Limit("memory")));
-    let error = crate::decode::decompress(&wide, 1, &limits).err();
+    let error = crate::decode::decompress(&wide, 1, max_memory).err();
     assert_eq!(error, Some(Error::Limit("memory")));
     let start = Instant::now();
-    scan(&wide, &crate::budget::Limits::default())?;
+    scan(&wide, crate::budget::DEFAULT_MAX_MEMORY)?;
     assert!(
         start.elapsed().as_secs_f64() < 10.0,
         "reading the models took {:?}",
