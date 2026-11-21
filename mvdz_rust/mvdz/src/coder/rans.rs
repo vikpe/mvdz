@@ -11,9 +11,10 @@
 use super::rc::{IntModel, RangeDecoder, RangeEncoder};
 use crate::budget::{Budget, Charge, with_capacity};
 use crate::error::{Error, Result};
+use crate::fields::{put_u32, read_length_prefixed, read_usize};
 use crate::numeric::NumericContext;
+use crate::parallel::par_map;
 use crate::streams::{PE_OX, PI_AP, PI_OX, SND_O, STREAM_COUNT, TE_O, UC_A, is_lazy, is_numeric};
-use crate::util::{ByteReader, par_map, put_u32};
 use std::sync::Arc;
 
 pub(crate) const SCALE: u32 = 12;
@@ -634,7 +635,7 @@ pub(crate) fn read_model(
         entries.push(entry);
     }
     if model.pool.len() >= ENTRY_LUT as usize || model.luts.len() >= ENTRY_LUT as usize {
-        return Err(Error::Limit("model size"));
+        return Err(Error::Corrupt("model size"));
     }
     model.fallback = entries[0];
     model.map.resize(map_len, model.fallback);
@@ -855,14 +856,9 @@ struct Unpacked<'a> {
 }
 
 fn unpack(body: &[u8]) -> Result<Unpacked<'_>> {
-    let mut reader = ByteReader::new(body);
-    let rans = reader
-        .length_prefixed()
-        .ok_or(Error::Corrupt("rans stream"))?;
-    Ok(Unpacked {
-        rans,
-        extra: reader.rest(),
-    })
+    let mut rest = body;
+    let rans = read_length_prefixed(&mut rest).ok_or(Error::Corrupt("rans stream"))?;
+    Ok(Unpacked { rans, extra: rest })
 }
 
 // --------------------------------------------------------------- file models
@@ -905,14 +901,14 @@ impl ModelsBlock {
 /// independent, so they are built in parallel.
 fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Models> {
     let corrupt = Error::Corrupt("tables");
-    let mut reader = ByteReader::new(body);
-    let count = reader.u32_len().ok_or(corrupt)?;
+    let mut rest = body;
+    let count = read_usize(&mut rest).ok_or(corrupt)?;
     if count == 0 {
         return Err(corrupt);
     }
     let mut entries: Vec<(usize, usize, &[u8])> = Vec::new();
     for _ in 0..count {
-        let stream = reader.u32_len().ok_or(corrupt)?;
+        let stream = read_usize(&mut rest).ok_or(corrupt)?;
         if entries.last().is_some_and(|previous| stream <= previous.0) {
             return Err(corrupt);
         }
@@ -926,10 +922,10 @@ fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Mod
         entries.push((
             stream,
             alphabet_size,
-            reader.length_prefixed().ok_or(corrupt)?,
+            read_length_prefixed(&mut rest).ok_or(corrupt)?,
         ));
     }
-    if !reader.is_done() {
+    if !rest.is_empty() {
         return Err(corrupt);
     }
     let built = par_map(threads, entries.len(), |index| {

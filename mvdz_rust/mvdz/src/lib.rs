@@ -12,29 +12,28 @@
 //! # }
 //! ```
 
-mod api;
 mod budget;
 mod coder;
 mod decode;
 mod deflate;
 mod encode;
 mod error;
+mod fields;
 mod format;
 mod numeric;
+mod parallel;
 mod proto;
 mod segment;
-mod stream;
 mod streams;
-mod util;
 mod walk;
 
 #[cfg(test)]
 mod tests;
 
-pub use api::{Encoder, decode, encode};
+pub use decode::{Decoder, decode};
+pub use encode::{Encoder, encode};
 pub use error::{Error, Result};
 pub use format::Header;
-pub use stream::Decoder;
 
 #[cfg(feature = "fuzz")]
 #[doc(hidden)]

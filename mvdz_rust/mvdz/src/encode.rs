@@ -1,5 +1,5 @@
-//! Compression: walk, code, assemble, and check that the file decodes to
-//! the input (falling back per segment to all tail).
+//! Encoding: `encode` and `Encoder`, then the internals: walk, code, assemble, and check
+//! that the file decodes to the input (falling back per segment to all tail).
 
 use crate::budget::Budget;
 use crate::coder::rans::FileModel;
@@ -9,10 +9,83 @@ use crate::format::{
     Header, MAX_SEGMENT_CODED, MAX_SEGMENTS, SEGMENT_FIELDS_LEN, header_bytes, models_block,
     segment_block, segment_header_bytes,
 };
+use crate::parallel::{HAS_THREADS, par_map, thread_count};
 use crate::proto::{DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, Proto, frame_len};
 use crate::segment::{self, Numerics, Walked, cut_points, frame_scan};
-use crate::util::{HAS_THREADS, crc32, par_map};
 use sha2::{Digest, Sha256};
+use std::io::Write;
+
+/// `bytes`: a raw `.mvd`; other bytes are `Error::NotMvd`.
+/// `max_threads`: capped at the logical cores; 0 is one per logical core.
+pub fn encode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
+    check_demo(bytes)?;
+    compress(bytes, thread_count(max_threads)).map(|(encoded, _)| encoded)
+}
+
+/// Collects the bytes written to it; `finish` encodes them and writes the result. The
+/// encoder needs all the bytes, so nothing is written before `finish`, and dropping it
+/// without `finish` writes nothing.
+#[derive(Debug)]
+pub struct Encoder<W: Write> {
+    writer: W,
+    max_threads: u8,
+    bytes: Vec<u8>,
+}
+
+impl<W: Write> Encoder<W> {
+    /// Encodes on all logical cores until `max_threads` says otherwise.
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            max_threads: 0,
+            bytes: Vec::new(),
+        }
+    }
+
+    /// Capped at the logical cores; 0 is all of them.
+    #[must_use]
+    pub fn max_threads(mut self, max_threads: u8) -> Self {
+        self.max_threads = max_threads;
+        self
+    }
+
+    /// Encodes the bytes, writes the result and flushes; returns the writer.
+    pub fn finish(mut self) -> Result<W> {
+        self.writer
+            .write_all(&encode(&self.bytes, self.max_threads)?)?;
+        self.writer.flush()?;
+        Ok(self.writer)
+    }
+}
+
+impl<W: Write> Write for Encoder<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    /// Writes nothing: `finish` writes the result.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The first frame must be whole, carry messages (not only a `dem_set`) and parse without
+/// an escape (FORMAT.md 6.2); a damaged demo with an intact start passes. A `.mvd.gz`
+/// fails: decompress it first.
+pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
+    const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+    if demo.is_empty() {
+        return Err(Error::NotMvd("empty input"));
+    }
+    if demo.starts_with(&GZIP_MAGIC) {
+        return Err(Error::NotMvd("gzip-compressed data (decompress it first)"));
+    }
+    if !starts_like_mvd(demo) {
+        return Err(Error::NotMvd("the first frame does not parse"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EncodeStats {
@@ -125,7 +198,7 @@ pub(crate) fn transform_body(
     model_ids: &mut Vec<usize>,
     file_models: &[Option<FileModel>],
 ) -> Option<Vec<u8>> {
-    let mut body = segment_header_bytes(raw.len() as u32, duration_ms as u32, crc32(raw));
+    let mut body = segment_header_bytes(raw.len() as u32, duration_ms as u32, crc32fast::hash(raw));
     body.extend_from_slice(&segment::encode(walked, numerics, model_ids, file_models)?);
     ((body.len() - SEGMENT_FIELDS_LEN) as u64 <= MAX_SEGMENT_CODED).then_some(body)
 }
@@ -150,10 +223,10 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
     };
     let segment_count = cuts.len() - 1;
     if segment_count > MAX_SEGMENTS {
-        return Err(Error::Invalid("too many segments"));
+        return Err(Error::DemoTooLarge);
     }
     // with more threads, the hashes run beside the first pass
-    let hashes = || (crc32(src), <[u8; 32]>::from(Sha256::digest(src)));
+    let hashes = || (crc32fast::hash(src), <[u8; 32]>::from(Sha256::digest(src)));
     let train = || {
         if is_all_tail {
             Trained {

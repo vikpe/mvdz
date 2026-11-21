@@ -17,7 +17,7 @@
 use crate::budget::{Budget, Charge};
 use crate::coder::rans::ModelsBlock;
 use crate::error::{Error, Result, bad};
-use crate::util::ByteReader;
+use crate::fields::read_u32;
 
 pub(crate) const MAGIC: &[u8; 4] = b"MVDZ";
 pub(crate) const VERSION: u32 = 2;
@@ -86,11 +86,11 @@ pub(crate) fn header_bytes(header: &Header) -> [u8; HEADER_LEN] {
 /// bytes present show it; otherwise "truncated header".
 pub(crate) fn parse_header(bytes: &[u8]) -> Result<Header> {
     if bytes.first_chunk() != Some(MAGIC) {
-        return Err(Error::Format("not an MVDZ file"));
+        return Err(Error::NotMvdz);
     }
     let version = bytes.get(4..).and_then(<[u8]>::first_chunk);
     if version.is_some_and(|version| u32::from_le_bytes(*version) != VERSION) {
-        return Err(Error::Format("unsupported MVDZ version"));
+        return Err(Error::UnsupportedVersion);
     }
     let field = |at: usize| {
         let value = bytes.get(at..).and_then(<[u8]>::first_chunk)?;
@@ -177,10 +177,10 @@ pub(crate) const SEGMENT_FIELDS_LEN: usize = 4 + 4 + 4;
 
 pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
     let error = Error::Corrupt("segment header");
-    let mut reader = ByteReader::new(body);
-    let raw_len = reader.u32le().ok_or(error)?;
-    let duration_ms = reader.u32le().ok_or(error)?;
-    let crc32 = reader.u32le().ok_or(error)?;
+    let mut rest = body;
+    let raw_len = read_u32(&mut rest).ok_or(error)?;
+    let duration_ms = read_u32(&mut rest).ok_or(error)?;
+    let crc32 = read_u32(&mut rest).ok_or(error)?;
     if raw_len == 0 {
         return bad("empty segment");
     }
@@ -301,14 +301,11 @@ mod tests {
         let bytes = header_bytes(&header);
         assert_eq!(bytes.len(), HEADER_LEN);
         assert_eq!(parse_header(&bytes)?, header);
-        assert_eq!(parse_header(b"MVD"), Err(Error::Format("not an MVDZ file")));
-        assert_eq!(
-            parse_header(b"XXXX\x02\0\0\0"),
-            Err(Error::Format("not an MVDZ file"))
-        );
+        assert_eq!(parse_header(b"MVD"), Err(Error::NotMvdz));
+        assert_eq!(parse_header(b"XXXX\x02\0\0\0"), Err(Error::NotMvdz));
         assert_eq!(
             parse_header(b"MVDZ\x01\0\0\0"),
-            Err(Error::Format("unsupported MVDZ version"))
+            Err(Error::UnsupportedVersion)
         );
         assert_eq!(
             parse_header(&bytes[..HEADER_LEN - 1]),

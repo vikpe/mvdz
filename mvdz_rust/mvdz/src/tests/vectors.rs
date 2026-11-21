@@ -9,8 +9,8 @@
 //! `MVDZ_WRITE_VECTORS=1` it writes the files and the manifest instead.
 
 use super::common::*;
+use crate::fields::put_u32;
 use crate::format::*;
-use crate::util::put_u32;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
@@ -190,7 +190,7 @@ fn transform_body(
 /// The file of `demo` as one transform segment with these models and body.
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
     let ms = crate::segment::frame_scan(demo).duration_ms;
-    let crc = crate::util::crc32(demo);
+    let crc = crc32fast::hash(demo);
     let mut segment = segment_header_bytes(u32::try_from(demo.len())?, u32::try_from(ms)?, crc);
     segment.extend_from_slice(body);
     Ok(Parts {
@@ -286,7 +286,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     let mut edited = file_parts.clone();
     edited
         .segments
-        .insert(1, segment_header_bytes(0, 0, crate::util::crc32(&[])));
+        .insert(1, segment_header_bytes(0, 0, crc32fast::hash(&[])));
     add("segment-empty", edited.build(), "an empty segment");
     let mut edited = file_parts.clone();
     edited.segments[0].resize(
@@ -486,8 +486,7 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     );
     let amplifying = amplifying_model(2000);
     let mut edited = entries.clone();
-    edited[0].1 = crate::util::ByteReader::new(&amplifying)
-        .length_prefixed()
+    edited[0].1 = crate::fields::read_length_prefixed(&mut amplifying.as_slice())
         .context("the model's header")?
         .to_vec();
     add(

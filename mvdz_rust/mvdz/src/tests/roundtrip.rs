@@ -41,7 +41,7 @@ fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<crate::Erro
     let mut out = Vec::new();
     let max_memory = crate::budget::DEFAULT_MAX_MEMORY;
     let mut reader =
-        match crate::stream::Decoder::with_max_memory(Cursor::new(file), threads, max_memory) {
+        match crate::decode::Decoder::with_max_memory(Cursor::new(file), threads, max_memory) {
             Ok(reader) => reader,
             Err(error) => return (out, Some(error)),
         };
@@ -175,7 +175,7 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
     }
     for (index, src) in inputs.iter().enumerate() {
         // the encoder refuses what is not a demo
-        if crate::api::check_demo(src).is_err() {
+        if crate::encode::check_demo(src).is_err() {
             let refusal = compress(src);
             assert_matches!(refusal, Err(crate::Error::NotMvd(_)), "input {index}");
             continue;
@@ -301,7 +301,7 @@ fn edited_demos_round_trip() -> anyhow::Result<()> {
             }
         }
         // an edit that destroys the first frame makes it a non-demo
-        if crate::api::check_demo(&demo).is_err() {
+        if crate::encode::check_demo(&demo).is_err() {
             refused += 1;
             continue;
         }
@@ -343,7 +343,7 @@ fn constructed_demos() -> anyhow::Result<()> {
         // a few have no MVD start (only dem_set frames, a cut first
         // frame): refused, and still round-trip through the unchecked
         // encoder
-        if crate::api::check_demo(&src).is_err() {
+        if crate::encode::check_demo(&src).is_err() {
             assert_matches!(compress(&src), Err(crate::Error::NotMvd(_)));
             let (file, _) = unchecked(&src)?;
             assert!(decompress(&file, 2)? == src, "{name}");

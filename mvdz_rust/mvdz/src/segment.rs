@@ -19,14 +19,15 @@ use crate::budget::Budget;
 use crate::coder::rans::ModelsBlock;
 use crate::coder::{self, rans};
 use crate::error::{Error, Result, bad};
+use crate::fields::{put_u32, read_bytes, read_u32, read_usize};
 use crate::format::{MAX_MODELS_LEN, MAX_SEGMENT_RAW};
 use crate::numeric::{GROUPS, Group, NumericContext, NumericIo};
+use crate::parallel::par_map;
 use crate::proto::{Proto, frame_len};
 use crate::streams::{
     BLOB_BODY, LAZY_STREAM_COUNT, PE_BITS, PI_NUM, RAW, SND_NUM, STREAM_COUNT, TAIL, TE_TYPE, UC,
     UC_MIN_SYMBOLS, is_blob, is_lazy, is_numeric,
 };
-use crate::util::{ByteReader, par_map, put_u32};
 use crate::walk::{Records, SymbolIo, Walker};
 
 /// A segment is cut at the first frame boundary at or after this many raw bytes.
@@ -590,12 +591,12 @@ pub(crate) struct TransformHeader {
 /// Header and stream table; `raw_len` is the decoded length.
 pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<TransformHeader> {
     let header_error = Error::Corrupt("segment header");
-    let mut reader = ByteReader::new(body);
-    let fte = reader.u32le().ok_or(header_error)?;
-    let fte2 = reader.u32le().ok_or(header_error)?;
-    let mvd1 = reader.u32le().ok_or(header_error)?;
-    let tail = reader.u32_len().ok_or(header_error)?;
-    let stream_count = reader.u32_len().ok_or(header_error)?;
+    let mut rest = body;
+    let fte = read_u32(&mut rest).ok_or(header_error)?;
+    let fte2 = read_u32(&mut rest).ok_or(header_error)?;
+    let mvd1 = read_u32(&mut rest).ok_or(header_error)?;
+    let tail = read_usize(&mut rest).ok_or(header_error)?;
+    let stream_count = read_usize(&mut rest).ok_or(header_error)?;
     if tail > raw_len {
         return bad("tail length");
     }
@@ -608,15 +609,15 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     let mut total = 0usize;
     let mut blob_total = 0usize;
     for _ in 0..stream_count {
-        let id = reader.u32_len().ok_or(table_error)?;
+        let id = read_usize(&mut rest).ok_or(table_error)?;
         if id >= STREAM_COUNT || !(is_lazy(id) || is_numeric(id) || is_blob(id)) {
             return bad("stream id");
         }
-        let count = reader.u32_len().ok_or(table_error)?;
+        let count = read_usize(&mut rest).ok_or(table_error)?;
         let len = if is_blob(id) {
             0
         } else {
-            reader.u32_len().ok_or(table_error)?
+            read_usize(&mut rest).ok_or(table_error)?
         };
         if is_blob(id) {
             blob_total = blob_total.checked_add(count).ok_or(table_error)?;
@@ -632,12 +633,12 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
         total = total.checked_add(len).ok_or(table_error)?;
         entries.push((id, count, len));
     }
-    let blob_len = reader.u32_len().ok_or(table_error)?;
+    let blob_len = read_usize(&mut rest).ok_or(table_error)?;
     if (blob_total == 0) != (blob_len == 0) {
         return bad("blob body");
     }
     total = total.checked_add(blob_len).ok_or(table_error)?;
-    if total != body.len() - reader.offset {
+    if total != rest.len() {
         return bad("stream bodies");
     }
     Ok(TransformHeader {
@@ -645,7 +646,7 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
         tail,
         entries,
         blob_len,
-        body_offset: reader.offset,
+        body_offset: body.len() - rest.len(),
     })
 }
 
@@ -660,16 +661,14 @@ pub(crate) fn decode(
     let stream_count = transform_header.entries.len();
     let file_models = models_block.map(super::coder::rans::ModelsBlock::models);
     let mut bodies: Vec<&[u8]> = Vec::with_capacity(stream_count);
-    let mut reader = ByteReader {
-        bytes: body,
-        offset: transform_header.body_offset,
-    };
-    for &(_, _, len) in &transform_header.entries {
-        bodies.push(reader.take(len).ok_or(Error::Corrupt("stream body"))?);
-    }
-    let blob_body = reader
-        .take(transform_header.blob_len)
+    let mut rest = body
+        .get(transform_header.body_offset..)
         .ok_or(Error::Corrupt("stream body"))?;
+    for &(_, _, len) in &transform_header.entries {
+        bodies.push(read_bytes(&mut rest, len).ok_or(Error::Corrupt("stream body"))?);
+    }
+    let blob_body =
+        read_bytes(&mut rest, transform_header.blob_len).ok_or(Error::Corrupt("stream body"))?;
     let count_of = |stream: usize| {
         transform_header
             .entries

@@ -201,10 +201,10 @@ eprintln!("{} ms", decoder.header().duration_ms());       // before decoding, as
 std::io::copy(&mut decoder, &mut std::io::stdout())?;
 ```
 
-Errors (`mvdz::Error`) are `Format` (not MVDZ or an unsupported version),
-`Corrupt` (any rule of FORMAT.md), `Limit` (the memory bound),
-`Invalid`, `Io`, `Internal` and `NotMvd` (`encode` given input that is not
-an MVD demo). Decoders never panic on corrupt input; they return an error.
+Errors (`mvdz::Error`): `NotMvd` (`encode` given input that is not an MVD
+demo), `NotMvdz`, `UnsupportedVersion`, `Corrupt` (breaks a rule of
+FORMAT.md), `MemoryLimit`, `DemoTooLarge` (more than 65,536 segments), `Io`
+and `Internal`. Decoders never panic on corrupt input; they return an error.
 `Decoder` yields only checked bytes: each segment's CRC-32 is checked
 before its bytes are returned, the whole demo's before the end.
 

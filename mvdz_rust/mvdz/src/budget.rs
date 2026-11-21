@@ -49,7 +49,7 @@ impl Budget {
             let new = current
                 .checked_add(len)
                 .filter(|&total| total <= inner.max_memory)
-                .ok_or(Error::Limit("memory"))?;
+                .ok_or(Error::MemoryLimit("memory"))?;
             match inner.used.compare_exchange_weak(
                 current,
                 new,
@@ -95,7 +95,7 @@ pub(crate) fn zeroed(len: usize) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(len)
-        .map_err(|_| Error::Limit("out of memory"))?;
+        .map_err(|_| Error::MemoryLimit("out of memory"))?;
     buffer.resize(len, 0);
     Ok(buffer)
 }
@@ -105,6 +105,6 @@ pub(crate) fn with_capacity<T>(capacity: usize) -> Result<Vec<T>> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(capacity)
-        .map_err(|_| Error::Limit("out of memory"))?;
+        .map_err(|_| Error::MemoryLimit("out of memory"))?;
     Ok(buffer)
 }

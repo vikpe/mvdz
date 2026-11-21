@@ -23,7 +23,7 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         assert_eq!(&file[..4], b"MVDZ");
         assert_eq!(header.size_bytes, demo.len() as u64);
         assert_eq!(header.duration_ms, frames.duration_ms);
-        assert_eq!(header.crc32, crate::util::crc32(&demo));
+        assert_eq!(header.crc32, crc32fast::hash(&demo));
         assert_eq!(header.sha256, <[u8; 32]>::from(Sha256::digest(&demo)));
         assert_eq!(header_bytes(&header), file[..HEADER_LEN]);
         let decoder = crate::Decoder::new(Cursor::new(&file))?;
@@ -98,11 +98,14 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     // an unknown version, another magic
     let mut other_version = file.clone();
     other_version[4] = 3;
-    assert_matches!(decompress(&other_version, 1), Err(crate::Error::Format(_)));
+    assert_matches!(
+        decompress(&other_version, 1),
+        Err(crate::Error::UnsupportedVersion)
+    );
     assert!(readers_agree(&other_version, "version").is_none());
     let mut other_magic = file.clone();
     other_magic[0] = b'N';
-    assert_matches!(decompress(&other_magic, 1), Err(crate::Error::Format(_)));
+    assert_matches!(decompress(&other_magic, 1), Err(crate::Error::NotMvdz));
     // every cut of the file
     for cut in [
         0,

@@ -401,10 +401,16 @@ pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
 
 /// The entries (stream id, model) of a models block.
 pub(crate) fn models_entries(body: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
-    let mut reader = crate::util::ByteReader::new(body);
-    let count = reader.u32_len().context("the entry count")?;
+    use crate::fields::{read_length_prefixed, read_usize};
+    let mut rest = body;
+    let count = read_usize(&mut rest).context("the entry count")?;
     (0..count)
-        .map(|_| Some((reader.u32_len()?, reader.length_prefixed()?.to_vec())))
+        .map(|_| {
+            Some((
+                read_usize(&mut rest)?,
+                read_length_prefixed(&mut rest)?.to_vec(),
+            ))
+        })
         .collect::<Option<_>>()
         .context("a models entry")
 }
@@ -412,10 +418,10 @@ pub(crate) fn models_entries(body: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)
 /// A models block from its entries.
 pub(crate) fn models_body(entries: &[(usize, Vec<u8>)]) -> Vec<u8> {
     let mut body = Vec::new();
-    crate::util::put_u32(&mut body, entries.len());
+    crate::fields::put_u32(&mut body, entries.len());
     for (stream, model) in entries {
-        crate::util::put_u32(&mut body, *stream);
-        crate::util::put_u32(&mut body, model.len());
+        crate::fields::put_u32(&mut body, *stream);
+        crate::fields::put_u32(&mut body, model.len());
         body.extend_from_slice(model);
     }
     body

@@ -4,8 +4,8 @@
 
 use super::common::*;
 use crate::Error;
+use crate::fields::put_u32;
 use crate::format::*;
-use crate::util::put_u32;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use std::io::Cursor;
@@ -124,14 +124,14 @@ fn r_m4_section_bookkeeping() -> anyhow::Result<()> {
     let max_memory: u64 = 3 << 20;
     assert_eq!(
         crate::decode::decompress(&file, 1, max_memory).err(),
-        Some(Error::Limit("memory"))
+        Some(Error::MemoryLimit("memory"))
     );
-    let mut reader = crate::stream::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?;
+    let mut reader = crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?;
     let mut read_all = || -> crate::Result<()> {
         while reader.read_demo(&mut [0; 4096])? > 0 {}
         Ok(())
     };
-    assert_eq!(read_all().err(), Some(Error::Limit("memory")));
+    assert_eq!(read_all().err(), Some(Error::MemoryLimit("memory")));
     Ok(())
 }
 

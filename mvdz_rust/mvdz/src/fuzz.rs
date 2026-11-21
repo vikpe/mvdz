@@ -2,7 +2,7 @@
 
 /// What `encode` refuses with `Error::NotMvd`.
 pub fn check_demo(demo: &[u8]) -> crate::Result<()> {
-    crate::api::check_demo(demo)
+    crate::encode::check_demo(demo)
 }
 
 /// Any bytes, also those `check_demo` refuses; returns the file and the number of segments

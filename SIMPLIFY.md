@@ -8,7 +8,7 @@ Earlier versions of this file (plans of done steps, superseded results) are in g
 Branch `feature/simplify` on `master` (rc.4, a9ac8fc). Every open question is decided
 (see Decisions). Code is in `mvdz_rust/`, a virtual workspace: the library in `mvdz/`, the tool in `mvdz_cli/`.
 Paths below are relative to `mvdz_rust/mvdz/` unless they start with `mvdz_cli/`.
-Tests (`cargo nextest run --release`): 45 pass, 4 fail (see "Known failing tests").
+Tests (`cargo nextest run --release`): 44 pass, 4 fail (see "Known failing tests").
 `cargo clippy --all-targets -- -D warnings` is clean, with no lint allowed for naming. Next: "Open tasks".
 
 ## Working rules
@@ -323,7 +323,8 @@ Format and specification:
    input not starting like an MVD; "scan back from the last segment" for demoinfo;
    a model no segment uses is allowed and ignored; the protocol constant names of
    `proto.rs`; no work limit, only memory (the resource rules section).
-   Stale: line 382 (`info` JSON: now the header only: `size_bytes`, `duration_ms`,
+   Stale: code references `api.rs:…` and `stream.rs:…` (now `encode.rs`, and
+   `decode.rs:Decoder`), line 382 (`info` JSON: now the header only: `size_bytes`, `duration_ms`,
    `crc32`, `sha256`), line 668 (decode waves), line 357 (`FileInfo::to_json`, now `header_json` in
    `mvdz_cli/src/main.rs`).
 7. README: Quickstart, Command line, Hashes and trust, Rust, WebAssembly and the fuzz

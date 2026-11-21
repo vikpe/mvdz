@@ -4,8 +4,8 @@
 
 use super::common::*;
 use crate::Error;
+use crate::fields::put_u32;
 use crate::format::*;
-use crate::util::put_u32;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use std::assert_matches;
@@ -94,7 +94,7 @@ fn structure_rules() -> anyhow::Result<()> {
     let mut edited = file_parts.clone();
     edited
         .segments
-        .insert(1, segment_header_bytes(0, 0, crate::util::crc32(&[])));
+        .insert(1, segment_header_bytes(0, 0, crc32fast::hash(&[])));
     refused(&edited.build(), "empty segment", is_corrupt);
     // the models block missing
     let mut no_models = file[..HEADER_LEN].to_vec();
@@ -169,10 +169,10 @@ fn declared_sizes() -> anyhow::Result<()> {
     let max_memory = demo.len() as u64 / 2;
     assert_matches!(
         crate::decode::decompress(&file, 1, max_memory),
-        Err(Error::Limit(_))
+        Err(Error::MemoryLimit(_))
     );
     assert!(
-        crate::stream::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)
+        crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)
             .and_then(|mut reader| reader.read_demo(&mut [0; 10]))
             .is_err()
     );
@@ -229,7 +229,7 @@ fn model_amplification() -> anyhow::Result<()> {
         let mut segment = segment_header_bytes(
             u32::try_from(demo.len())?,
             u32::try_from(file_parts.header.duration_ms)?,
-            crate::util::crc32(&demo),
+            crc32fast::hash(&demo),
         );
         segment.extend_from_slice(&body);
         let mut edited = file_parts.clone();
@@ -333,9 +333,9 @@ fn large_models_block() -> anyhow::Result<()> {
     // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
     let max_memory: u64 = 128 << 20;
     let error = scan(&wide, max_memory).err();
-    assert_eq!(error, Some(Error::Limit("memory")));
+    assert_eq!(error, Some(Error::MemoryLimit("memory")));
     let error = crate::decode::decompress(&wide, 1, max_memory).err();
-    assert_eq!(error, Some(Error::Limit("memory")));
+    assert_eq!(error, Some(Error::MemoryLimit("memory")));
     let start = Instant::now();
     scan(&wide, crate::budget::DEFAULT_MAX_MEMORY)?;
     assert!(

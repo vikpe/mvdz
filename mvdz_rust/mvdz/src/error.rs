@@ -1,29 +1,27 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// Not an MVDZ file, or an unsupported version.
-    Format(&'static str),
-    /// Damaged, or breaks a checksum, structure or limit of FORMAT.md.
     Corrupt(&'static str),
-    /// Decoding would exceed the memory limit.
-    Limit(&'static str),
-    Invalid(&'static str),
-    Io(std::io::ErrorKind),
-    /// The encoder could not produce a file that decodes to its input.
+    DemoTooLarge,
     Internal(&'static str),
+    Io(std::io::ErrorKind),
+    MemoryLimit(&'static str),
     NotMvd(&'static str),
+    NotMvdz,
+    UnsupportedVersion,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Format(message) => write!(formatter, "format: {message}"),
             Self::Corrupt(message) => write!(formatter, "corrupt: {message}"),
-            Self::Limit(message) => write!(formatter, "limit: {message}"),
-            Self::Invalid(message) => write!(formatter, "invalid argument: {message}"),
-            Self::Io(kind) => write!(formatter, "i/o: {kind}"),
+            Self::DemoTooLarge => write!(formatter, "demo too large: more than 65536 segments"),
             Self::Internal(message) => write!(formatter, "internal: {message}"),
+            Self::Io(kind) => write!(formatter, "i/o: {kind}"),
+            Self::MemoryLimit(message) => write!(formatter, "memory limit: {message}"),
             Self::NotMvd(message) => write!(formatter, "not an MVD demo: {message}"),
+            Self::NotMvdz => write!(formatter, "not an MVDZ file"),
+            Self::UnsupportedVersion => write!(formatter, "unsupported MVDZ version"),
         }
     }
 }
