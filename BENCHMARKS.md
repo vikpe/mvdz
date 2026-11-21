@@ -169,7 +169,7 @@ decode 33.3, fast compress 14.6 and fast decode 57.5).
 ## Speeds
 
 The release download (`mvdz-<version>-x86_64-unknown-linux-musl`, a
-static musl build with mimalloc; Builds), set8 (normal level 0.212 of raw
+static musl build, at the time with mimalloc; Builds), set8 (normal level 0.212 of raw
 on these, fast 0.255).
 
 **Library, in memory** (`mvdz bench`; decode with every check, including
@@ -197,16 +197,18 @@ redirect.
 
 ## Builds
 
-The release downloads are static musl builds (they run on any Linux),
-built with mimalloc as the allocator (the cargo feature `mimalloc`): musl's
-own allocator is slow, above all when several threads allocate, and costs
-these builds 15-40 % against a glibc build; with mimalloc they come close.
+The release downloads are static musl builds (they run on any Linux).
+musl's own allocator is slow, above all when several threads allocate, and
+costs these builds 15-40 % against a glibc build. Up to rc.4 they were
+built with mimalloc as the allocator (a cargo feature, since removed: the
+crate has no allocator dependency), which came close to glibc; the
+"mimalloc" columns below are those builds.
 The `-v3` download is built for `target-cpu=x86-64-v3` (AVX2, BMI2,
 LZCNT; any x86-64 CPU from about 2015 on). `cargo build --release` gives a
 glibc build with the system allocator, portable unless `RUSTFLAGS="-C
 target-cpu=native"` is set. Speeds on set8 (library, or CLI as marked):
 
-| measure | musl | musl -v3 | **release** (musl, mimalloc) | **release -v3** | glibc (`cargo build`) | glibc, native |
+| measure | musl | musl -v3 | musl, mimalloc (rc.4 release) | musl -v3, mimalloc (rc.4 release -v3) | glibc (`cargo build`) | glibc, native |
 |---|---|---|---|---|---|---|
 | compress, normal, 1t | 6.0 | 6.5 | 8.1 | 8.4 | 8.4 | 8.1 |
 | compress, normal, batch | 15.4 | 16.0 | 22.2 | 23.6 | 24.7 | 24.4 |
@@ -226,9 +228,9 @@ target-cpu=native"` is set. Speeds on set8 (library, or CLI as marked):
 (Medians of 5 rounds, the normal level's compression of 7; the ranges,
 about ±5-10 %, are in the raw results.)
 
-* mimalloc brings the musl build within about 5 % of glibc at one thread
-  at the normal level, and restores multi-threaded decoding (4 threads:
-  23.7 to 33.5 MB/s; glibc 38.0). At the fast level, mostly zstd, it stays
+* mimalloc (no longer a feature) brought the musl build within about 5 % of glibc at one thread
+  at the normal level, and restored multi-threaded decoding (4 threads:
+  23.7 to 33.5 MB/s; glibc 38.0). At the fast level, mostly zstd, it stayed
   10-20 % behind glibc, probably in musl's C library itself (`memcpy`)
   rather than the allocator.
 * x86-64-v3 is about 10-20 % faster at decoding (a little less for
@@ -362,7 +364,7 @@ used here.
 
 ```
 # ratios and library speeds over a set of demos (as the release builds:
-# --features mimalloc, and --target x86_64-unknown-linux-musl)
+# --target x86_64-unknown-linux-musl)
 cargo build --release
 target/release/mvdz bench --levels normal,fast -r 1 -j 4 demos/*.mvd
 target/release/mvdz bench --levels normal,fast -r 1 -j 1 --skip-compress --trusted demos/*.mvd

@@ -29,9 +29,6 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 [dev-dependencies]
 serde_json = "1"
 
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-mimalloc = { version = "0.1", optional = true, default-features = false }
-
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -47,9 +44,6 @@ codegen-units = 16
 debug = 0
 
 [features]
-# mimalloc as the command-line tool's allocator: musl's own allocator makes
-# the static release builds 15-40 % slower (BENCHMARKS.md)
-mimalloc = ["dep:mimalloc"]
 # force the portable (non-SIMD) code paths, to test the fallbacks used on
 # wasm32 and other targets
 scalar = []

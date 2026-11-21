@@ -173,8 +173,10 @@ All Viktor's to decide. Of those left, 4, 9, 12 and 13 can change the file forma
    probe's small file (256 are the header's SHA-256, 80 in the models block, 448 in the
    chunks); never with a different demo. Accept, or require every flip to be refused.
 10. Optional features: the built-in profiler is removed (`sampler.rs`, the `sampler`
-    feature and the optional `libc` dependency; `perf` does its job). Left: `mimalloc`,
-    which the static musl release builds use.
+    feature and the optional `libc` dependency; `perf` does its job). The `mimalloc`
+    feature is removed too (2026-11-21): no speed gain on glibc and 2-4 times the
+    memory; the static musl release builds now use musl's allocator (slower: not
+    measured on this branch).
 11. Compression speed further: the walk is single-threaded (17.7 % of compression before
     the speed changes; not profiled since). Peak memory rose with changes 4 and 5.
 12. `pi.ar` (-0.002 %) is low value, but it is the third axis of the angle predictor, so

@@ -1,7 +1,3 @@
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use mvdz::api::{self, Config};
 use mvdz::Limits;
 use sha2::{Digest, Sha256};

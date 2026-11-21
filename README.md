@@ -66,8 +66,8 @@ The default build runs on any CPU of its architecture. Building for the
 machine you run on, with `RUSTFLAGS="-C target-cpu=native" cargo build
 --release`, is faster on x86-64 CPUs with AVX2 (about 10-15 % at the
 normal level; [BENCHMARKS.md](BENCHMARKS.md)). The release downloads are
-static musl builds with mimalloc (`--features mimalloc`): musl's own
-allocator would cost them 15-40 %.
+static musl builds, which run on any Linux but are slower than a glibc
+build (musl's allocator).
 
 ## Quickstart
 
