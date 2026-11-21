@@ -430,7 +430,7 @@ fn tables(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
         "a model with one byte of padding (not consumed exactly)",
     );
     let mut e = ents.clone();
-    e[num].1 = lazy.1.clone();
+    e[num].1.clone_from(&lazy.1);
     add(
         "tables-alphabet",
         with(&e),

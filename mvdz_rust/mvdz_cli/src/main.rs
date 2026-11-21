@@ -1,19 +1,34 @@
-// The tool reports errors by exit status from where they occur.
-#![allow(clippy::exit)]
+//! The `mvdz` command-line tool.
 
 use mvdz::Config;
 use mvdz::Limits;
 use std::io::{Read, Write};
+use std::process::ExitCode;
 
-/// `println!` that exits quietly when standard output is closed (a pipe
-/// into `head`, say) instead of panicking.
-macro_rules! out {
-    ($($t:tt)*) => {
-        writeln!(std::io::stdout().lock(), $($t)*).unwrap_or_else(|e| stdout_failed(e))
-    };
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => code,
+    }
 }
 
-fn usage() -> ! {
+/// Runs the command line; `Err` carries the exit status to stop with.
+fn run() -> Result<(), ExitCode> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let Some((command, rest)) = argv.split_first() else {
+        return Err(usage());
+    };
+    let args = parse(rest)?;
+    match command.as_str() {
+        "compress" | "c" => run_jobs(&args, true),
+        "decompress" | "d" => run_jobs(&args, false),
+        "info" => info(&args),
+        _ => Err(usage()),
+    }
+}
+
+/// Prints the usage; the exit status of a bad command line.
+fn usage() -> ExitCode {
     eprintln!(
         "usage:
   mvdz compress   [-j threads] [--allow-non-demo]
@@ -36,7 +51,7 @@ independently decodable segments of 256 KiB. decompress decodes up to -j
 segments at once, each with memory of its own: a tight --max-memory may need
 a lower -j."
     );
-    std::process::exit(2)
+    ExitCode::from(2)
 }
 
 struct Args {
@@ -49,21 +64,23 @@ struct Args {
     rm: bool,
 }
 
-fn size(s: &str) -> u64 {
-    let (num, mul) = match s.as_bytes().last() {
-        Some(b'k' | b'K') => (&s[..s.len() - 1], 1u64 << 10),
-        Some(b'm' | b'M') => (&s[..s.len() - 1], 1 << 20),
-        Some(b'g' | b'G') => (&s[..s.len() - 1], 1 << 30),
-        _ => (s, 1),
+/// A size with an optional K, M or G suffix (binary).
+fn size(text: &str) -> Result<u64, ExitCode> {
+    let (number, unit) = match text.as_bytes().last() {
+        Some(b'k' | b'K') => (&text[..text.len() - 1], 1u64 << 10),
+        Some(b'm' | b'M') => (&text[..text.len() - 1], 1 << 20),
+        Some(b'g' | b'G') => (&text[..text.len() - 1], 1 << 30),
+        _ => (text, 1),
     };
-    num.parse::<u64>()
+    number
+        .parse::<u64>()
         .ok()
-        .and_then(|n| n.checked_mul(mul))
-        .unwrap_or_else(|| usage())
+        .and_then(|count| count.checked_mul(unit))
+        .ok_or_else(usage)
 }
 
-fn parse(args: &[String]) -> Args {
-    let mut a = Args {
+fn parse(argv: &[String]) -> Result<Args, ExitCode> {
+    let mut args = Args {
         threads: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         max_memory: None,
         files: Vec::new(),
@@ -72,43 +89,29 @@ fn parse(args: &[String]) -> Args {
         overwrite: false,
         rm: false,
     };
-    let mut i = 0;
-    while i < args.len() {
-        let s = &args[i];
-        let mut val = || {
-            i += 1;
-            args.get(i).cloned().unwrap_or_else(|| usage())
+    let mut index = 0;
+    while let Some(arg) = argv.get(index) {
+        let mut value = || {
+            index += 1;
+            argv.get(index).cloned().ok_or_else(usage)
         };
-        match s.as_str() {
+        match arg.as_str() {
             "-j" | "--threads" => {
-                a.threads = mvdz::util::threads(val().parse().unwrap_or_else(|_| usage()));
+                let threads = value()?.parse().map_err(|_| usage())?;
+                args.threads = mvdz::util::threads(threads);
             }
-            "--max-memory" => a.max_memory = Some(size(&val())),
-            "--allow-non-demo" => a.any_input = true,
-            "-o" | "--output" => a.output = Some(val()),
-            "-f" | "--force" => a.overwrite = true,
-            "--rm" => a.rm = true,
-            "-" => a.files.push(s.clone()),
-            _ if s.starts_with('-') => usage(),
-            _ => a.files.push(s.clone()),
+            "--max-memory" => args.max_memory = Some(size(&value()?)?),
+            "--allow-non-demo" => args.any_input = true,
+            "-o" | "--output" => args.output = Some(value()?),
+            "-f" | "--force" => args.overwrite = true,
+            "--rm" => args.rm = true,
+            "-" => args.files.push(arg.clone()),
+            _ if arg.starts_with('-') => return Err(usage()),
+            _ => args.files.push(arg.clone()),
         }
-        i += 1;
+        index += 1;
     }
-    a
-}
-
-/// A failed write to standard output: a closed pipe ends the program
-/// quietly (the reader wanted no more), anything else is an error.
-fn stdout_failed(e: std::io::Error) -> ! {
-    if e.kind() == std::io::ErrorKind::BrokenPipe {
-        std::process::exit(0)
-    }
-    die(e)
-}
-
-fn die(e: impl std::fmt::Display) -> ! {
-    eprintln!("error: {e}");
-    std::process::exit(1)
+    Ok(args)
 }
 
 /// Reads a whole input file (or standard input), once.
@@ -152,8 +155,11 @@ fn try_write_with(
     fill: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
 ) -> Result<(), String> {
     if p == "-" {
-        fill(&mut std::io::stdout().lock()).unwrap_or_else(|e| stdout_failed(e));
-        return Ok(());
+        return match fill(&mut std::io::stdout().lock()) {
+            // a closed pipe ends the output quietly: the reader wanted no more
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            result => result.map_err(|error| error.to_string()),
+        };
     }
     let path = std::path::Path::new(p);
     let is_special = std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file());
@@ -200,73 +206,82 @@ fn output_name(i: &str, compress: bool) -> Result<String, String> {
     }
 }
 
-/// The (input, output) pairs of a compress or decompress command line.
-fn jobs(a: &Args, compress: bool) -> Vec<(String, Result<String, String>)> {
-    let f = &a.files;
-    if let Some(o) = &a.output {
-        if f.len() != 1 {
-            usage();
-        }
-        return vec![(f[0].clone(), Ok(o.clone()))];
+/// An input and its output name, or why it has none.
+type Job = (String, Result<String, String>);
+
+/// The jobs of a compress or decompress command line.
+fn jobs(args: &Args, compress: bool) -> Result<Vec<Job>, ExitCode> {
+    let files = &args.files;
+    if let Some(output) = &args.output {
+        let [input] = files.as_slice() else {
+            return Err(usage());
+        };
+        return Ok(vec![(input.clone(), Ok(output.clone()))]);
     }
-    if f.is_empty() {
-        usage();
+    if files.is_empty() {
+        return Err(usage());
     }
     // the two-name form `in out`: the second names an output
-    let second_is_output = |o: &str| o == "-" || has_suffix(o, ".mvdz") == compress;
-    if f.len() == 2 && second_is_output(&f[1]) {
-        return vec![(f[0].clone(), Ok(f[1].clone()))];
+    let is_output = |name: &str| name == "-" || has_suffix(name, ".mvdz") == compress;
+    if let [input, output] = files.as_slice()
+        && is_output(output)
+    {
+        return Ok(vec![(input.clone(), Ok(output.clone()))]);
     }
-    if f.len() > 1 && f.iter().any(|x| x == "-") {
-        usage();
+    if files.len() > 1 && files.iter().any(|file| file == "-") {
+        return Err(usage());
     }
     let mut seen = std::collections::HashMap::new();
-    f.iter()
-        .map(|i| {
-            let o =
-                output_name(i, compress).and_then(|o| match seen.insert(o.clone(), i.clone()) {
-                    Some(prev) => Err(format!("{o} is also the output of {prev}")),
-                    None => Ok(o),
-                });
-            (i.clone(), o)
+    Ok(files
+        .iter()
+        .map(|input| {
+            let output = output_name(input, compress).and_then(|output| {
+                match seen.insert(output.clone(), input.clone()) {
+                    Some(previous) => Err(format!("{output} is also the output of {previous}")),
+                    None => Ok(output),
+                }
+            });
+            (input.clone(), output)
         })
-        .collect()
+        .collect())
 }
 
-/// Runs every job of a compress or decompress command line: several files
-/// on -j threads, one file at a time each. Errors are reported per file;
-/// the exit status is 1 if any file failed.
-fn run_jobs(a: &Args, compress: bool) {
-    let jobs = jobs(a, compress);
+/// Runs every job of a compress or decompress command line: several files on -j
+/// threads, one file at a time each. Errors are reported per file.
+fn run_jobs(args: &Args, compress: bool) -> Result<(), ExitCode> {
+    let jobs = jobs(args, compress)?;
     let (workers, threads) = if jobs.len() > 1 {
-        (a.threads, 1)
+        (args.threads, 1)
     } else {
-        (1, a.threads)
+        (1, args.threads)
     };
-    let failed = mvdz::util::par_map(workers, jobs.len(), |k| {
-        let (i, o) = &jobs[k];
-        let r = o.clone().and_then(|o| {
-            if o != "-" && !a.overwrite && std::fs::metadata(&o).is_ok_and(|m| m.is_file()) {
-                return Err(format!("{o} exists (-f overwrites)"));
+    let failed = mvdz::util::par_map(workers, jobs.len(), |index| {
+        let (input, output) = &jobs[index];
+        let result = output.clone().and_then(|output| {
+            let is_existing_file = output != "-"
+                && std::fs::metadata(&output).is_ok_and(|metadata| metadata.is_file());
+            if is_existing_file && !args.overwrite {
+                return Err(format!("{output} exists (-f overwrites)"));
             }
             if compress {
-                compress_one(a, i, &o, threads)
+                compress_one(args, input, &output, threads)
             } else {
-                decompress_one(a, i, &o, threads)
+                decompress_one(args, input, &output, threads)
             }?;
-            if a.rm && i != "-" && o != "-" {
-                std::fs::remove_file(i).map_err(|e| format!("--rm: {e}"))?;
+            if args.rm && input != "-" && output != "-" {
+                std::fs::remove_file(input).map_err(|error| format!("--rm: {error}"))?;
             }
             Ok(())
         });
-        if let Err(e) = &r {
-            eprintln!("error: {i}: {e}");
+        if let Err(error) = &result {
+            eprintln!("error: {input}: {error}");
         }
-        r.is_err()
+        result.is_err()
     });
     if failed.contains(&true) {
-        std::process::exit(1);
+        return Err(ExitCode::FAILURE);
     }
+    Ok(())
 }
 
 fn compress_one(a: &Args, i: &str, o: &str, threads: usize) -> Result<(), String> {
@@ -307,28 +322,23 @@ fn read_limits(a: &Args) -> Limits {
     l
 }
 
-fn main() {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.is_empty() {
-        usage();
-    }
-    let a = parse(&argv[1..]);
-    match argv[0].as_str() {
-        "compress" | "c" => run_jobs(&a, true),
-        "decompress" | "d" => run_jobs(&a, false),
-        "info" => info(&a),
-        _ => usage(),
-    }
-}
-
-fn info(args: &Args) {
+fn info(args: &Args) -> Result<(), ExitCode> {
+    let fail = |message: String| {
+        eprintln!("error: {message}");
+        ExitCode::FAILURE
+    };
+    let mut stdout = std::io::stdout().lock();
     for path in &args.files {
-        let file = std::fs::File::open(path).unwrap_or_else(|error| die(error));
-        match mvdz::read_info(std::io::BufReader::new(file)) {
-            Ok(file_info) => out!("{}", info_json(&file_info)),
-            Err(error) => die(format!("{path}: {error}")),
+        let file = std::fs::File::open(path).map_err(|error| fail(format!("{path}: {error}")))?;
+        let file_info = mvdz::read_info(std::io::BufReader::new(file))
+            .map_err(|error| fail(format!("{path}: {error}")))?;
+        match writeln!(stdout, "{}", info_json(&file_info)) {
+            // a closed pipe ends the output quietly: the reader wanted no more
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+            result => result.map_err(|error| fail(error.to_string()))?,
         }
     }
+    Ok(())
 }
 
 /// One object: `version`, `file_size`, `size`, `duration_ms`, `crc32` and `sha256`

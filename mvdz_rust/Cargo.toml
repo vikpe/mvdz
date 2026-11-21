@@ -1,37 +1,27 @@
-[package]
-name = "mvdz"
+[workspace]
+members = ["mvdz", "mvdz_cli"]
+resolver = "3"
+
+[workspace.package]
 version = "1.0.0-rc.4"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
-description = "Lossless, format-aware compression of QuakeWorld MVD demos"
 repository = "https://github.com/galfthan/mvdz"
-documentation = "https://github.com/galfthan/mvdz"
-readme = "../README.md"
-keywords = ["quakeworld", "mvd", "demo", "compression", "rans"]
-categories = ["compression", "game-development", "command-line-utilities"]
-exclude = ["/fuzz"]
 
-[dependencies]
-sha2 = "0.10"
+[workspace.dependencies]
+mvdz = { path = "mvdz" }
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
 # the CRC-32 of zlib
-crc32fast = "1"
+crc32fast = { version = "1", default-features = false, features = ["std"] }
 # raw DEFLATE, the format's general-purpose compressor: pure Rust, so no C
 # code and the same on wasm
-miniz_oxide = "0.9"
-
-# the tests parse the JSON of `mvdz info`
-[dev-dependencies]
-anyhow = "1"
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+anyhow = { version = "1", default-features = false, features = ["std"] }
 # benches/codec.rs; no plots and no rayon: the statistics and the baseline
 # comparison are what is used
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
-serde_json = "1"
-
-# encode and decode speed (benches/codec.rs); needs MVDZ_BENCH_DEMOS
-[[bench]]
-name = "codec"
-harness = false
+serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = 3
@@ -47,13 +37,13 @@ lto = false
 codegen-units = 16
 debug = 0
 
-[lints.rust]
+[workspace.lints.rust]
 # no unsafe code anywhere: library, tool, tests, examples, benchmarks
 unsafe_code = "forbid"
 # `pub` only where something outside the crate names it
 unreachable_pub = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 

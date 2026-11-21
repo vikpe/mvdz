@@ -1,0 +1,23 @@
+[package]
+name = "mvdz_cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tool for MVDZ, lossless compression of QuakeWorld MVD demos"
+categories = ["compression", "command-line-utilities"]
+
+[[bin]]
+name = "mvdz"
+path = "src/main.rs"
+
+[dependencies]
+mvdz = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

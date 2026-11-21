@@ -24,7 +24,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cd fuzz && cargo fmt --check
+      - run: cd mvdz/fuzz && cargo fmt --check
       - run: cargo clippy --profile fast --all-targets -- -D warnings
 
   test:

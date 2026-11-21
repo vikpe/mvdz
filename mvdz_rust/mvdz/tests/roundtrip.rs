@@ -111,7 +111,7 @@ fn sequential_reader_threads_agree() -> anyhow::Result<()> {
 fn empty_and_tiny_inputs() -> anyhow::Result<()> {
     let mut rng = Rng(7);
     let random: Vec<u8> = Vec::from_fn(10_000, |_| rng.next() as u8);
-    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md"))?;
+    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))?;
     let inputs: [&[u8]; 7] = [
         b"",
         b"\x00",
@@ -136,7 +136,7 @@ fn empty_and_tiny_inputs() -> anyhow::Result<()> {
 fn non_mvd_input_streams() -> anyhow::Result<()> {
     let mut rng = Rng(7);
     let random: Vec<u8> = Vec::from_fn(10_000, |_| rng.next() as u8);
-    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md"))?;
+    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"))?;
     let mut inputs = vec![vec![1u8], random, text];
     if let Some(d) = duel() {
         inputs.push(d[..300].to_vec());

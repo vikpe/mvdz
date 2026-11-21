@@ -1,0 +1,30 @@
+[package]
+name = "mvdz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lossless, format-aware compression of QuakeWorld MVD demos"
+documentation = "https://github.com/galfthan/mvdz"
+readme = "../../README.md"
+keywords = ["quakeworld", "mvd", "demo", "compression", "rans"]
+categories = ["compression", "game-development"]
+exclude = ["/fuzz"]
+
+[dependencies]
+sha2 = { workspace = true }
+crc32fast = { workspace = true }
+miniz_oxide = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+criterion = { workspace = true }
+
+# encode and decode speed (benches/codec.rs); needs MVDZ_BENCH_DEMOS
+[[bench]]
+name = "codec"
+harness = false
+
+[lints]
+workspace = true

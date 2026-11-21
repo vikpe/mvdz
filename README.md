@@ -10,7 +10,7 @@ decoding. Files can also carry attachments stored beside the demo.
 
 It comes as a command-line tool and a Rust library, and builds for
 WebAssembly. The format is specified in [FORMAT.md](FORMAT.md), precisely
-enough to write an independent decoder, and `mvdz_rust/tests/vectors/` holds valid
+enough to write an independent decoder, and `mvdz_rust/mvdz/tests/vectors/` holds valid
 and hostile test files. The work now is the specification and this Rust
 implementation; implementations in C, Go and other languages follow once
 the format is settled.
@@ -52,7 +52,7 @@ Rust (1.100 at the time of writing).
 ```
 git clone https://github.com/galfthan/mvdz && cd mvdz/mvdz_rust
 cargo build --release            # target/release/mvdz
-cargo install --path .           # or: put mvdz on your PATH
+cargo install --path mvdz_cli    # or: put mvdz on your PATH
 ```
 
 The default build runs on any CPU of its architecture. Building for the
@@ -231,7 +231,8 @@ all of them. FORMAT.md §14 covers this.
 
 ## Rust
 
-Not on crates.io yet: depend on it by git
+Two crates: the library `mvdz` and the tool `mvdz_cli` (binary `mvdz`); a library
+user builds no command-line code. Not on crates.io yet: depend on it by git
 (`mvdz = { git = "https://github.com/galfthan/mvdz" }`) or by path.
 
 ```rust
@@ -302,7 +303,7 @@ real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
 `scripts/fetch_samples.sh sample40 testdata/sample` downloads the
 development sample there (`MVDZ_TEST_DATA=$PWD/testdata`).
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors (it needs the sample
-demos they were made from, which the download lacks). Fuzz targets are in `mvdz_rust/fuzz/` (`cargo +nightly
+demos they were made from, which the download lacks). Fuzz targets are in `mvdz_rust/mvdz/fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `read_metadata`, `attachments`,
 `stream_writer`, `compress_rt` and the structure-aware `gen_rt`).
 

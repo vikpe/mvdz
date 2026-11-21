@@ -1,6 +1,6 @@
 target/
 target-*/
 *.mvdz
-!mvdz_rust/tests/vectors/*.mvdz
+!mvdz_rust/mvdz/tests/vectors/*.mvdz
 /demos/
 /testdata/
