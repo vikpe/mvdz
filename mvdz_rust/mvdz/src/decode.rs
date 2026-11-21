@@ -13,6 +13,11 @@ use std::collections::VecDeque;
 use std::io::{self, Read};
 
 /// `max_threads` 0 is all logical cores.
+///
+/// # Errors
+///
+/// [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for another file type or version,
+/// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] past the memory limit.
 pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     decompress(bytes, thread_count(max_threads), DEFAULT_MAX_MEMORY)
 }
@@ -37,6 +42,12 @@ pub struct Decoder<R: Read> {
 }
 
 impl<R: Read> Decoder<R> {
+    /// Reads the header only; the segments are read by [`Read::read`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when reading fails, [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for
+    /// another file type or version, [`Error::Corrupt`] for a truncated header.
     pub fn new(input: R) -> Result<Self> {
         Self::with_max_memory(input, thread_count(0), DEFAULT_MAX_MEMORY)
     }

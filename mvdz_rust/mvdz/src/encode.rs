@@ -14,7 +14,12 @@ use crate::segment::{self, Numerics, Walked, cut_points, frame_scan};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
-/// Refuses bytes that are not an MVD demo; `max_threads` 0 is all logical cores.
+/// `max_threads` 0 is all logical cores.
+///
+/// # Errors
+///
+/// [`Error::NotMvd`] for bytes that are not an MVD demo, [`Error::DemoTooLarge`] past 65536
+/// segments, [`Error::Internal`] when the output fails its self-check (a bug).
 pub fn encode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     check_demo(bytes)?;
     compress(bytes, thread_count(max_threads)).map(|(encoded, _)| encoded)
@@ -44,6 +49,9 @@ impl<W: Write> Encoder<W> {
         self
     }
 
+    /// # Errors
+    ///
+    /// Those of [`encode`], and [`Error::Io`] when writing fails.
     pub fn finish(mut self) -> Result<W> {
         self.writer
             .write_all(&encode(&self.bytes, self.max_threads)?)?;
