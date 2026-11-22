@@ -194,7 +194,7 @@ func readModelsBlock(body []byte) (*fileModels, error) {
 }
 
 func decodeRawModel(coded []byte, rawLen uint32, meta *streamModel) ([]byte, error) {
-	decoder, err := newStreamDecoder(meta, coded, rawLen)
+	decoder, err := newStreamDecoder(meta, coded)
 	if err != nil {
 		return nil, err
 	}
@@ -366,11 +366,10 @@ type streamDecoder struct {
 	rans         []byte
 	wordPosition int
 	state        uint32
-	remaining    uint32 // symbols of the stream's count not yet decoded
 	mantissas    bitReader
 }
 
-func newStreamDecoder(model *streamModel, body []byte, count uint32) (*streamDecoder, error) {
+func newStreamDecoder(model *streamModel, body []byte) (*streamDecoder, error) {
 	fields := byteCursor{data: body}
 	rans := fields.bytes(fields.u32())
 	if fields.isShort {
@@ -379,7 +378,6 @@ func newStreamDecoder(model *streamModel, body []byte, count uint32) (*streamDec
 	decoder := &streamDecoder{
 		model:     model,
 		rans:      rans,
-		remaining: count,
 		mantissas: bitReader{data: body[fields.position:]},
 	}
 	high := decoder.word()
@@ -387,14 +385,12 @@ func newStreamDecoder(model *streamModel, body []byte, count uint32) (*streamDec
 	return decoder, nil
 }
 
-// symbol decodes the next symbol; false if the stream has none left or the
-// context's table is empty.
+// symbol decodes the next symbol; false if the context's table is empty.
 func (decoder *streamDecoder) symbol(context uint16) (uint8, bool) {
 	table := decoder.model.table(context)
-	if decoder.remaining == 0 || len(table.symbols) == 0 {
+	if len(table.symbols) == 0 {
 		return 0, false
 	}
-	decoder.remaining--
 	if len(table.symbols) == 1 {
 		return table.symbols[0], true
 	}
@@ -442,8 +438,7 @@ func (decoder *streamDecoder) value(context uint16) (int32, bool) {
 }
 
 func (decoder *streamDecoder) isComplete() bool {
-	return decoder.remaining == 0 &&
-		decoder.state == ransLowerBound &&
+	return decoder.state == ransLowerBound &&
 		decoder.wordPosition == len(decoder.rans) &&
 		decoder.mantissas.isFinished()
 }

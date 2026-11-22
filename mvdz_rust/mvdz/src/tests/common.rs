@@ -102,7 +102,7 @@ pub(crate) fn all_stored(src: &[u8]) -> Vec<u8> {
 /// The bytes the walk left unstructured: the RAW and TAIL streams of every segment.
 pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
     use crate::fields::{read_usize, skip};
-    use crate::streams::{RAW, TAIL, is_blob};
+    use crate::streams::{RAW, TAIL};
     const PROTOCOL_FIELDS_LEN: usize = 3 * 4;
     let mut total = 0;
     for segment in parts(file)?.segments {
@@ -111,12 +111,9 @@ pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
         let stream_count = read_usize(&mut rest).context("the stream count")?;
         for _ in 0..stream_count {
             let id = read_usize(&mut rest).context("a stream id")?;
-            let count = read_usize(&mut rest).context("a stream's count")?;
-            if !is_blob(id) {
-                skip(&mut rest, 4).context("a stream's length")?;
-            }
+            let size = read_usize(&mut rest).context("a stream's size")?;
             if id == RAW || id == TAIL {
-                total += count;
+                total += size;
             }
         }
     }

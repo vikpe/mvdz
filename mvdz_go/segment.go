@@ -1,12 +1,5 @@
 package mvdz
 
-// maxStreamCount is the most a stream table entry may count, FORMAT.md
-// section 3.1. Most streams hold at most a symbol per byte of the segment,
-// but not all: an entity word of two bytes can take three gap symbols.
-func maxStreamCount(rawLen uint32) uint32 {
-	return 2*rawLen + 16
-}
-
 // maxBlobTotal is the most the blob streams of a segment may hold together,
 // FORMAT.md section 7.
 func maxBlobTotal(rawLen uint32) uint64 {
@@ -84,8 +77,10 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 		return nil, corrupt("transform header")
 	}
 
+	// size is the length of the body of a structural or numeric stream, the
+	// number of bytes of a blob stream.
 	type streamEntry struct {
-		id, count, length uint32
+		id, size uint32
 	}
 	entries := make([]streamEntry, entryCount)
 	var isListed [streamCount]bool
@@ -93,18 +88,15 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 	for index := range entries {
 		entry := &entries[index]
 		entry.id = fields.u32()
-		entry.count = fields.u32()
-		isBlob := entry.id >= firstBlobStream
-		if isBlob {
-			blobSize += uint64(entry.count)
-		} else {
-			entry.length = fields.u32()
-		}
+		entry.size = fields.u32()
 		isIdValid := entry.id < streamCount && !isListed[entry.id]
-		if fields.isShort || !isIdValid || entry.count > maxStreamCount(rawLen) {
+		if fields.isShort || !isIdValid {
 			return nil, corrupt("stream table")
 		}
 		isListed[entry.id] = true
+		if entry.id >= firstBlobStream {
+			blobSize += uint64(entry.size)
+		}
 	}
 	if blobSize > maxBlobTotal(rawLen) {
 		return nil, corrupt("blob streams")
@@ -122,14 +114,14 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 		if entry.id >= firstBlobStream {
 			continue
 		}
-		body := fields.bytes(entry.length)
+		body := fields.bytes(entry.size)
 		if fields.isShort {
 			return nil, corrupt("stream table")
 		}
 		if models[entry.id] == nil {
 			return nil, corrupt("stream without a model")
 		}
-		decoder, err := newStreamDecoder(models[entry.id], body, entry.count)
+		decoder, err := newStreamDecoder(models[entry.id], body)
 		if err != nil {
 			return nil, err
 		}
@@ -145,8 +137,8 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 	}
 	for _, entry := range entries {
 		if entry.id >= firstBlobStream {
-			streams.blobs[entry.id] = blobBytes[:entry.count]
-			blobBytes = blobBytes[entry.count:]
+			streams.blobs[entry.id] = blobBytes[:entry.size]
+			blobBytes = blobBytes[entry.size:]
 		}
 	}
 	return streams, nil

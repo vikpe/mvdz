@@ -65,9 +65,9 @@ value.
   (`math.rs:byte_residual_bucket`).
 * "Symbol" = one byte of a structural stream; "value" = one `i32` of a
   numeric stream.
-* **Over-read.** Reading past the end of a stream is an error: more symbols
-  or values than its `count` (3.1), a rANS word or a mantissa bit past its
-  bytes (6.4), more bytes than a blob stream holds. A decoder may report it
+* **Over-read.** Reading past the end of a stream is an error: a rANS word
+  or a mantissa bit past its bytes (6.4), more bytes than a blob stream
+  holds. A decoder may report it
   at once, or carry on with any value and fail the segment later: the
   result is an error either way.
 
@@ -176,8 +176,8 @@ rules above.
 
 ```
 coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
-         | n x { id u32 | count u32 | [len u32 if id is not a blob stream] }
-         | stream bodies, in table order (body k is len_k bytes)
+         | n x { id u32 | size u32 }
+         | stream bodies, in table order
 ```
 
 * `fte`, `fte2`, `mvd1`: the protocol extension state at the segment
@@ -185,19 +185,15 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
 * `n`: `n = 0` is a stored segment (below). Per entry:
   * `id`: a structural, numeric or blob stream id (3.2), each at most
     once, in any order: so `n` is at most 322;
-  * `count`: symbols, values or bytes in the stream, at most
-    `2 * raw_len + 16`: two per byte of the segment (an entity word of two
-    bytes takes up to three `ENTITY_GAP` symbols) plus a fixed margin of
-    16 for short segments;
-  * `len`: length of the stream body, present only for a structural or
-    numeric stream. A blob stream has no body.
+  * `size`: for a structural or numeric stream the length of its body;
+    for a blob stream the number of its bytes. A blob stream has no body.
 * The stream bodies fill `coded` exactly to its end.
 * **Stream bodies**: one per structural or numeric entry, coded with the
   model of its id from the models block (2.2): `rans_len u32 | rans | extra`
   (section 6.1).
-* **Blob bytes**: the blob streams' counts sum to `blob_total`, at most
+* **Blob bytes**: the blob streams' sizes sum to `blob_total`, at most
   `2 * raw_len`. The blob tokens (section 6.6) give that many bytes; the
-  blob streams take them in table order, `count` bytes each.
+  blob streams take them in table order, `size` bytes each.
 * A structural or numeric stream absent from the table has no symbols:
   reading from it is an error. An absent blob stream is empty: reading 0
   bytes from it succeeds, reading more is an error.
@@ -295,9 +291,8 @@ An id of 322 or above is an error.
    36 must be complete.
 5. **Walk** (section 4), producing the structural bytes of the segment and
    the record lists of the numeric fields. Afterwards every structural
-   stream (stream 16 included) must have yielded exactly `count` symbols
-   with its coded data consumed, and every blob stream must be consumed
-   exactly.
+   stream (stream 16 included) must be complete (section 6.5), and every
+   blob stream must be consumed exactly.
 6. Run the **numeric groups** (section 5) in their fixed order; afterwards
    every numeric stream must be complete.
 7. Check `crc32(output) == crc32` of the segment fields.
@@ -333,8 +328,7 @@ Three kinds of stream feed the walker (stream ids: section 3):
 Walker primitives (decode direction; `p` = output cursor):
 
 * `symbol(s, ctx)`: the next symbol of structural stream `s` under context
-  `ctx`; error if `s` is absent or has no symbol left
-  (`segment.rs:DecodeIo::symbol`).
+  `ctx`; error if `s` is absent (`segment.rs:DecodeIo::symbol`).
 * `code_symbol(s, ctx)`: `v = symbol(s, ctx)`; write `v` at `dst[p]`;
   `p += 1`; return `v`.
 * `code_symbol_residual(s, ctx, pred)`: `v = (symbol(s, ctx) + pred) mod 256`;
@@ -498,13 +492,13 @@ section 5:
 * `TempEntityRecord {offset u32, references[3] u32, kind u8}`
 * `UsercmdRecord {pitch_offset u32, number u8, grid_axes u8}` (section 4.11)
 
-The lists grow as the walk appends. Every record consumes a symbol of its
-stream, so the stream table's counts bound them (section 9, note 1).
+The lists grow as the walk appends. Every record follows a byte the walk
+wrote, so `raw_len` bounds them (section 9, note 1).
 
 ### 4.4 Segment walk and frames (`SegmentWalker::run`, `SegmentWalker::frame`)
 
 ```
-tail = the count of blob stream TAIL (0 if absent)
+tail = the size of blob stream TAIL (0 if absent)
 if tail > raw_len: error
 stop = raw_len - tail
 while no error and p < stop: frame()
@@ -1197,15 +1191,14 @@ min(v, m)`:
 
 ### 6.5 End of a stream
 
-A structural or numeric stream is complete only if exactly `count` symbols
-(its stream table entry, section 3; symbols of single-symbol tables count,
-though they are not coded) were decoded, the state is back at 2^16 and
-every word of `rans` was read (the word cursor equals `rans_len`, which is
-therefore even and at least 4). A numeric
-stream's mantissa bits must also end within the last byte of `extra`:
+A structural or numeric stream is complete only if the state is back at
+2^16 and every word of `rans` was read (the word cursor equals `rans_len`,
+which is therefore even and at least 4). A numeric stream's mantissa bits
+must also end within the last byte of `extra`:
 `ceil(bits_read / 8) == len(extra)`, at most 7 padding bits
 (`ByteDecoder::is_done`, `NumericDecoder::is_done`, `BitReader::is_finished`).
-An incomplete stream is an error.
+An incomplete stream is an error. No stream stores how many symbols it
+holds: the walk and the numeric groups decide how many they read.
 
 ### 6.6 Blob tokens (`lz.rs`)
 
@@ -1237,7 +1230,7 @@ while len(out) < blob_total:
 ```
 
 `value` decodes a numeric value (section 6.4) and `symbol` a structural symbol;
-a stream that is absent or has no symbol left is an error. Afterwards
+an absent stream is an error. Afterwards
 streams 35 and 36 must be complete (section 6.5), and stream 16 once the
 walk is done (section 3.3). With `blob_total = 0` no token is read. A
 decoder accepts any tokens that follow these rules; the tokens an encoder
@@ -1286,15 +1279,17 @@ Each hostile vector breaks one rule only.
 | segment coded length (`len`) | at most 2^21 bytes | section 2 |
 | models block | at most 2^24 bytes | section 2 |
 | raw models, the meta model included | at most 2^24 bytes together | section 2 |
-| stream table | each id once, `count <= 2 * raw_len + 16` | section 3 |
+| stream table | each id once | section 3 |
 | blob streams of a segment | at most `2 * raw_len` bytes together | section 3 |
 | own tables per model | at most 65536 | section 6 |
 
 With these, every size a decoder allocates is bounded: a segment yields at most 2^20
 bytes and takes at least its 16 header bytes of the file, its blob bytes are at most
 twice its length, and the raw models of a file are at most 16 MiB together, checked from
-the models block's fields before any of them is decoded. Every decoder applies these
-limits, so all decoders accept the same files.
+the models block's fields before any of them is decoded. The work is bounded with them:
+every round of a loop of the walk writes at least one byte of the segment or reads at
+least one blob byte, and every blob token gives at least one byte. Every decoder applies
+these limits, so all decoders accept the same files.
 
 A decoder may cap its memory on top and refuse a file that needs more with `MemoryLimit`.
 The reference (`memory.rs:DEFAULT_MAX_MEMORY`) refuses models whose decoder tables take
@@ -1386,8 +1381,8 @@ its blob parser (rule 10) on its own.
    * stored (section 3.1).
 
    A way works if every structural and numeric stream it codes has a model with a code
-   for each of its symbols under its context, no stream's count and not the blob total
-   exceed the limits of section 7, and the coded length is at most 2^21. The protocol
+   for each of its symbols under its context, the blob total does not exceed the limit
+   of section 7, and the coded length is at most 2^21. The protocol
    fields are the segment's start state in all three. Streams are written in id order,
    empty streams omitted; the blob bytes are the non-empty blob streams in id order.
 6. **Models block** (`rans.rs:write_models_block`): lists only the models some
@@ -1472,10 +1467,10 @@ its blob parser (rule 10) on its own.
 
 ## 9. Notes for implementers
 
-1. **Record lists are bounded by the stream table.** Every record consumes a symbol from
-   its stream (one `PLAYER_NUMBER` per player record, one `ENTITY_BITS` per entity
-   record, one `SOUND_NUMBER` per sound, one `TEMP_ENTITY_TYPE` per temp entity), and
-   over-reading a stream is an error (section 1).
+1. **Record lists are bounded by `raw_len`.** Every record follows at least one byte its
+   command wrote: the player number of a player record, the entity word of an entity
+   record, the channel word of a sound, the type of a temp entity, the player of a
+   usercmd.
 2. **Arithmetic that could overflow on invalid input** wraps in the reference: time
    differences (`numeric.rs:time_deltas`), time-scaled predictions
    (`predict_time_scaled`) and residuals. Use wrapping 32-bit and 16-bit arithmetic

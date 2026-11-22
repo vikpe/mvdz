@@ -115,8 +115,8 @@ fn token_body(
         tally.file_model()
     }
     const UNCODABLE: &str = "every symbol has a code";
-    // (id, count, model, body)
-    let mut coded: Vec<(usize, usize, rans::FileModel, Vec<u8>)> = Vec::new();
+    // (id, model, body)
+    let mut coded: Vec<(usize, rans::FileModel, Vec<u8>)> = Vec::new();
     let structural_with_literals = (structural.iter())
         .map(|&(id, symbols)| (id, symbols, vec![0u16; symbols.len()]))
         .chain([(
@@ -128,14 +128,14 @@ fn token_body(
         if !symbols.is_empty() {
             let model = file_model(256, symbols, &contexts);
             let body = rans::encode_bytes(symbols, &contexts, &model).context(UNCODABLE)?;
-            coded.push((id, symbols.len(), model, body));
+            coded.push((id, model, body));
         }
     }
     for (id, numeric) in [(LZ_LENGTH, &tokens.lens), (LZ_DISTANCE, &tokens.dists)] {
         if !numeric.symbols.is_empty() {
             let model = file_model(rans::NUMERIC_ALPHABET, &numeric.symbols, &numeric.contexts);
             let body = rans::encode_num(numeric, &model).context(UNCODABLE)?;
-            coded.push((id, numeric.symbols.len(), model, body));
+            coded.push((id, model, body));
         }
     }
     coded.sort_by_key(|&(id, ..)| id);
@@ -144,8 +144,8 @@ fn token_body(
     for field in [0, 0, 0, coded.len() + blob_counts.len()] {
         put_usize(&mut body, field);
     }
-    for (id, count, _, stream_body) in &coded {
-        for field in [*id, *count, stream_body.len()] {
+    for (id, _, stream_body) in &coded {
+        for field in [*id, stream_body.len()] {
             put_usize(&mut body, field);
         }
     }
@@ -155,7 +155,7 @@ fn token_body(
     }
     let mut ids = Vec::new();
     let mut models: Vec<Option<rans::FileModel>> = Vec::new();
-    for (id, _, model, stream_body) in coded {
+    for (id, model, stream_body) in coded {
         body.extend_from_slice(&stream_body);
         models.resize_with(models.len().max(id + 1), || None);
         models[id] = Some(model);
@@ -339,8 +339,8 @@ struct StreamTable {
     /// fte, fte2, mvd1
     fields: [usize; 3],
     stream_count: usize,
-    /// (id, count, body length; None for a blob stream)
-    entries: Vec<(usize, usize, Option<usize>)>,
+    /// (id, size)
+    entries: Vec<(usize, usize)>,
     bodies: Vec<u8>,
 }
 
@@ -353,14 +353,7 @@ impl StreamTable {
         let stream_count = next()?;
         let mut entries = Vec::new();
         for _ in 0..stream_count {
-            let id = next()?;
-            let count = next()?;
-            let len = if crate::streams::is_blob(id) {
-                None
-            } else {
-                Some(next()?)
-            };
-            entries.push((id, count, len));
+            entries.push((next()?, next()?));
         }
         Ok(Self {
             fields,
@@ -375,12 +368,9 @@ impl StreamTable {
         for field in self.fields.into_iter().chain([self.stream_count]) {
             put_usize(&mut out, field);
         }
-        for &(id, count, len) in &self.entries {
+        for &(id, size) in &self.entries {
             put_usize(&mut out, id);
-            put_usize(&mut out, count);
-            if let Some(len) = len {
-                put_usize(&mut out, len);
-            }
+            put_usize(&mut out, size);
         }
         out.extend_from_slice(&self.bodies);
         out
@@ -401,7 +391,7 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         edited.build()
     };
     let blob_at: Vec<usize> = (0..table.entries.len())
-        .filter(|&index| table.entries[index].2.is_none())
+        .filter(|&index| crate::streams::is_blob(table.entries[index].0))
         .collect();
     let last_blob = *blob_at.last().context("a blob stream")?;
     let mut edited = table.clone();
@@ -425,20 +415,13 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         with_table(&edited),
         "the last blob stream's id set to the one before it (the same id twice)",
     );
-    let mut edited = table.clone();
-    edited.entries[0].1 = 2 * raw_len + 17;
-    add(
-        "table-count-limit",
-        with_table(&edited),
-        "the first stream's count one over 2 * raw_len + 16",
-    );
     let blob_total: usize = blob_at.iter().map(|&index| table.entries[index].1).sum();
     let mut edited = table.clone();
     edited.entries[last_blob].1 += 2 * raw_len + 1 - blob_total;
     add(
         "table-blob-total",
         with_table(&edited),
-        "the last blob stream's count raised so the blob counts sum to 2 * raw_len + 1",
+        "the last blob stream's size raised so the blob sizes sum to 2 * raw_len + 1",
     );
     let mut edited = table.clone();
     edited.bodies.push(0);
@@ -454,17 +437,20 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     add(
         "blob-split",
         with_table(&edited),
-        "the first two blob streams' counts moved by one byte: the same blob bytes, split differently",
+        "the first two blob streams' sizes moved by one byte: the same blob bytes, split differently",
     );
+    let rans_len = u32::from_le_bytes(table.bodies[..4].try_into()?);
     let mut edited = table.clone();
-    edited.entries[0].1 -= 1;
+    let rans_end = 4 + rans_len as usize;
+    edited.bodies.drain(rans_end - 2..rans_end);
+    edited.bodies[..4].copy_from_slice(&(rans_len - 2).to_le_bytes());
+    edited.entries[0].1 -= 2;
     add(
-        "stream-short",
+        "rans-short",
         with_table(&edited),
-        "the first stream's count one lower than the walk needs",
+        "the first stream body without its last rANS word",
     );
     let mut edited = table;
-    let rans_len = u32::from_le_bytes(edited.bodies[..4].try_into()?);
     edited.bodies[..4].copy_from_slice(&(rans_len + 1).to_le_bytes());
     add(
         "rans-odd",
@@ -490,11 +476,6 @@ fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> 
             "lz-overrun",
             vec![literal, Token::Match { len: 9, dist: 1 }],
             "a match of 9 bytes where 3 are left",
-        ),
-        (
-            "lz-short",
-            vec![literal, literal],
-            "tokens for 2 of the 4 blob bytes",
         ),
     ] {
         let tokens = crate::lz::code(demo, &tokens);

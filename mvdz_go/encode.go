@@ -285,13 +285,9 @@ func collectBlobTokens(streams *segmentStreams) {
 // and section 8 rule 5; false if a stream has no model or no code for one of
 // its symbols, or a limit of FORMAT.md section 7 does not hold.
 func encodeStreams(streams *segmentStreams, rawLen uint32, models *fileModels) ([]byte, bool) {
-	maxCount := int(maxStreamCount(rawLen))
 	blobTotal := uint64(0)
 	for _, blob := range streams.blobs {
 		blobTotal += uint64(len(blob))
-		if len(blob) > maxCount {
-			return nil, false
-		}
 	}
 	if blobTotal > maxBlobTotal(rawLen) {
 		return nil, false
@@ -303,7 +299,7 @@ func encodeStreams(streams *segmentStreams, rawLen uint32, models *fileModels) (
 		if len(values) == 0 {
 			continue
 		}
-		if len(values) > maxCount || models[stream] == nil {
+		if models[stream] == nil {
 			return nil, false
 		}
 		body, isEncoded := encodeStream(models[stream], values, stream >= firstNumericStream)
@@ -311,7 +307,6 @@ func encodeStreams(streams *segmentStreams, rawLen uint32, models *fileModels) (
 			return nil, false
 		}
 		table = binary.LittleEndian.AppendUint32(table, uint32(stream))
-		table = binary.LittleEndian.AppendUint32(table, uint32(len(values)))
 		table = binary.LittleEndian.AppendUint32(table, uint32(len(body)))
 		bodies = append(bodies, body...)
 		entryCount++

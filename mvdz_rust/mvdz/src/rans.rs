@@ -752,7 +752,7 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
 
 fn decode_raw_model(coded: &[u8], raw_len: usize, meta: &DecoderModel) -> Result<Vec<u8>> {
     let corrupt = Error::Corrupt("model");
-    let mut decoder = ByteDecoder::new(coded, raw_len, meta)?;
+    let mut decoder = ByteDecoder::new(coded, meta)?;
     let mut raw_model = try_with_capacity(raw_len)?;
     let mut previous_byte = 0;
     for _ in 0..raw_len {
@@ -779,13 +779,11 @@ pub(crate) fn encode_bytes(
     pack_body(&file_model.model, symbols, contexts, &[])
 }
 
-/// `count` symbols of one stream body under one model.
+/// The symbols of one stream body under one model.
 #[derive(Debug)]
 struct SymbolDecoder<'a> {
     model: &'a DecoderModel,
     decoder: RansDecoder<'a>,
-    count: usize,
-    used: usize,
 }
 
 impl<'a> SymbolDecoder<'a> {
@@ -793,26 +791,21 @@ impl<'a> SymbolDecoder<'a> {
         SymbolDecoder {
             model: &EMPTY_MODEL,
             decoder: RansDecoder::finished_empty(),
-            count: 0,
-            used: 0,
         }
     }
-    fn new(rans: &'a [u8], count: usize, file_model: &'a DecoderModel) -> Self {
+    fn new(rans: &'a [u8], file_model: &'a DecoderModel) -> Self {
         SymbolDecoder {
             model: file_model,
             decoder: RansDecoder::new(rans),
-            count,
-            used: 0,
         }
     }
     #[inline(always)]
     fn get(&mut self, context_key: u32) -> Option<u32> {
-        self.used += 1;
         let entry = self.model.entry(context_key);
         self.model.decode(&mut self.decoder, entry)
     }
     fn is_done(&self) -> bool {
-        self.used == self.count && self.decoder.is_finished()
+        self.decoder.is_finished()
     }
 }
 
@@ -827,13 +820,13 @@ impl<'a> ByteDecoder<'a> {
             symbols: SymbolDecoder::empty(),
         }
     }
-    pub(crate) fn new(body: &'a [u8], count: usize, file_model: &'a DecoderModel) -> Result<Self> {
+    pub(crate) fn new(body: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
         let unpacked = unpack(body)?;
         if !unpacked.extra.is_empty() {
             return Err(Error::Corrupt("rans stream"));
         }
         Ok(ByteDecoder {
-            symbols: SymbolDecoder::new(unpacked.rans, count, file_model),
+            symbols: SymbolDecoder::new(unpacked.rans, file_model),
         })
     }
     #[inline(always)]
@@ -996,16 +989,11 @@ impl<'a> NumericDecoder<'a> {
             bits: BitReader::new(&[]),
         }
     }
-    pub(crate) fn new(
-        stream: usize,
-        body: &'a [u8],
-        count: usize,
-        file_model: &'a DecoderModel,
-    ) -> Result<Self> {
+    pub(crate) fn new(stream: usize, body: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
         let unpacked = unpack(body)?;
         Ok(NumericDecoder {
             stream,
-            symbols: SymbolDecoder::new(unpacked.rans, count, file_model),
+            symbols: SymbolDecoder::new(unpacked.rans, file_model),
             bits: BitReader::new(unpacked.extra),
         })
     }
@@ -1084,7 +1072,7 @@ mod tests {
         let (file_model, model) = models(&symbols, &contexts, 256)?;
         let body =
             encode_bytes(&symbols, &contexts, &file_model).context("every symbol has a code")?;
-        let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
+        let mut decoder = ByteDecoder::new(&body, &model)?;
         for (index, &symbol) in symbols.iter().enumerate() {
             assert_eq!(decoder.get(u32::from(contexts[index])), Some(symbol));
         }
@@ -1099,8 +1087,8 @@ mod tests {
             .is_err()
         );
         // a body cut short is refused; a symbol short does not finish
-        assert!(ByteDecoder::new(&body[..body.len() - 2], symbols.len(), &model).is_err());
-        let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
+        assert!(ByteDecoder::new(&body[..body.len() - 2], &model).is_err());
+        let mut decoder = ByteDecoder::new(&body, &model)?;
         for &context in &contexts[..symbols.len() - 1] {
             decoder.get(u32::from(context));
         }
@@ -1127,7 +1115,7 @@ mod tests {
         let num = writer.finish();
         let (file_model, model) = models(&num.symbols, &num.contexts, NUMERIC_ALPHABET)?;
         let body = encode_num(&num, &file_model).context("every symbol has a code")?;
-        let mut decoder = NumericDecoder::new(PLAYER_ORIGIN, &body, values.len(), &model)?;
+        let mut decoder = NumericDecoder::new(PLAYER_ORIGIN, &body, &model)?;
         for &(context, value) in &values {
             assert_eq!(decoder.get(context), Some(value));
         }

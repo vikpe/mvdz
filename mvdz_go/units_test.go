@@ -103,7 +103,7 @@ func TestNumericValue(test *testing.T) {
 	for _, valueCase := range cases {
 		singleSymbol := frequencyTable{symbols: []uint8{valueCase.bucket}, cumulative: []uint16{0, frequencyTotal}}
 		body := append([]byte{4, 0, 0, 0, 1, 0, 0, 0}, valueCase.mantissa...)
-		decoder, err := newStreamDecoder(&streamModel{tables: []frequencyTable{singleSymbol}}, body, 1)
+		decoder, err := newStreamDecoder(&streamModel{tables: []frequencyTable{singleSymbol}}, body)
 		if err != nil {
 			test.Fatal(err)
 		}
