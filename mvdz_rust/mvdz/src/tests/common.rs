@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use crate::decode::ScannedFile;
 use crate::format::*;
 use anyhow::Context as _;
 use sha2::{Digest, Sha256};
@@ -8,10 +7,6 @@ use std::io::{Cursor, Read};
 
 pub(crate) fn compress(src: &[u8]) -> crate::Result<Vec<u8>> {
     crate::encode(src, 1)
-}
-
-pub(crate) fn scan(file: &[u8], max_memory: u64) -> crate::Result<ScannedFile> {
-    crate::decode::scan_layout(file, 1, &crate::budget::Budget::new(max_memory))
 }
 
 pub(crate) fn decompress(file: &[u8], max_threads: u8) -> crate::Result<Vec<u8>> {
@@ -398,20 +393,6 @@ pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
             ),
         }
     }
-    let scanned = scan(file, crate::budget::DEFAULT_MAX_MEMORY);
-    if first.is_ok() {
-        assert!(
-            scanned.is_ok(),
-            "{what}: scan refuses a file the decoders accept: {:?}",
-            scanned.err()
-        );
-    }
-    if let Err(error) = &scanned {
-        assert!(
-            first.is_err(),
-            "{what}: decoders accept a file scan refuses ({error})"
-        );
-    }
     first.as_ref().ok().cloned()
 }
 
@@ -452,7 +433,8 @@ pub(crate) fn parts(file: &[u8]) -> anyhow::Result<Parts> {
     let header = parse_header(file)?;
     let mut offset = HEADER_LEN;
     let mut next_block = |file: &[u8], fields_len: usize| -> anyhow::Result<Vec<u8>> {
-        let len = len_field(&file[offset..]).context("a length field")? as usize + fields_len;
+        let len =
+            crate::fields::read_usize(&mut &file[offset..]).context("a length field")? + fields_len;
         let block = file[offset + LEN_FIELD_LEN..offset + LEN_FIELD_LEN + len].to_vec();
         offset += LEN_FIELD_LEN + len;
         Ok(block)

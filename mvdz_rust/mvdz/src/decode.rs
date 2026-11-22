@@ -1,11 +1,11 @@
-//! Decoding: whole-file and streaming, the layout scan, and the checks over the demo.
+//! Decoding: the container reader, segment by segment, and the checks over the demo.
 
 use crate::budget::{Budget, Charge, DEFAULT_MAX_MEMORY, try_zeroed};
 use crate::coder::rans::ModelsBlock;
 use crate::error::{Error, Result, bad};
 use crate::format::{
     HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, MAX_SEGMENT_RAW, SEGMENT_FIELDS_LEN,
-    SegmentHeader, SegmentSpan, check_coded_len, len_field, parse_segment_header,
+    SegmentHeader, check_coded_len, parse_segment_header,
 };
 use crate::parallel::{par_map, thread_count};
 use crate::segment::{self, FrameScan, frame_scan};
@@ -27,10 +27,10 @@ pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
 pub struct Decoder<R: Read> {
     input: R,
     layout: Layout,
-    current: Option<Decoded>,
+    current: Option<DecodedSegment>,
     /// Into `current`.
     at: usize,
-    ready: VecDeque<Decoded>,
+    ready: VecDeque<DecodedSegment>,
     /// Met after the segments in `ready`; reported once they are read.
     deferred_error: Option<Error>,
     is_done: bool,
@@ -41,8 +41,8 @@ pub struct Decoder<R: Read> {
 }
 
 #[derive(Debug)]
-struct Decoded {
-    bytes: Vec<u8>,
+pub(crate) struct DecodedSegment {
+    pub(crate) bytes: Vec<u8>,
     _charge: Charge,
 }
 
@@ -89,30 +89,80 @@ impl<R: Read> Decoder<R> {
     }
 
     pub(crate) fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.check_failed()?;
-        if let Err(error) = self.advance() {
-            self.failure = Some(error);
-            self.current = None;
-            self.ready.clear();
+        if self.at == self.current_bytes().len() {
+            self.current = self.next_segment()?;
             self.at = 0;
-            return Err(error);
         }
-        let current = self.current_bytes();
-        let len = buf.len().min(current.len() - self.at);
-        buf[..len].copy_from_slice(&current[self.at..self.at + len]);
+        let unread = &self.current_bytes()[self.at..];
+        let len = buf.len().min(unread.len());
+        buf[..len].copy_from_slice(&unread[..len]);
         self.at += len;
         Ok(len)
     }
 
-    fn current_bytes(&self) -> &[u8] {
-        self.current.as_ref().map_or(&[], |decoded| &decoded.bytes)
+    /// `None` at the end of the demo. The first error is sticky.
+    pub(crate) fn next_segment(&mut self) -> Result<Option<DecodedSegment>> {
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
+        let next = self.advance();
+        if let Err(error) = &next {
+            self.failure = Some(*error);
+            self.ready.clear();
+        }
+        next
     }
 
-    fn check_failed(&self) -> Result<()> {
-        match self.failure {
-            Some(error) => Err(error),
-            None => Ok(()),
+    fn current_bytes(&self) -> &[u8] {
+        self.current.as_ref().map_or(&[], |segment| &segment.bytes)
+    }
+
+    fn advance(&mut self) -> Result<Option<DecodedSegment>> {
+        loop {
+            if let Some(segment) = self.ready.pop_front() {
+                return Ok(Some(segment));
+            }
+            if let Some(error) = self.deferred_error.take() {
+                return Err(error);
+            }
+            if self.is_done {
+                return Ok(None);
+            }
+            if !self.layout.has_models() {
+                self.read_models()?;
+            } else if self.layout.is_complete() {
+                self.finish()?;
+            } else {
+                self.decode_batch()?;
+            }
         }
+    }
+
+    fn read_models(&mut self) -> Result<()> {
+        let Some(len) = self.read_len()? else {
+            return bad("incomplete file");
+        };
+        if len > MAX_MODELS_LEN {
+            return bad("models too large");
+        }
+        let models_block = if len > 0 {
+            let (body, _charge) = self.read_body(len)?;
+            Some(ModelsBlock::new(&body, self.threads, &self.budget)?)
+        } else {
+            None
+        };
+        self.layout.models(models_block)
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        let mut one = [0u8; 1];
+        if read_up_to(&mut self.input, &mut one)? != 0 {
+            return bad("trailing bytes");
+        }
+        self.layout.finish()?;
+        std::mem::take(&mut self.check).finish(&self.layout)?;
+        self.is_done = true;
+        Ok(())
     }
 
     /// `None` at the end of the input.
@@ -174,7 +224,7 @@ impl<R: Read> Decoder<R> {
         for result in decoded {
             let checked = result.and_then(|(bytes, charge, scan)| {
                 self.check.segment(&bytes, scan)?;
-                Ok(Decoded {
+                Ok(DecodedSegment {
                     bytes,
                     _charge: charge,
                 })
@@ -187,48 +237,6 @@ impl<R: Read> Decoder<R> {
                     break;
                 }
             }
-        }
-        Ok(())
-    }
-
-    /// Until `current` has unread bytes or the demo is done.
-    fn advance(&mut self) -> Result<()> {
-        while !self.is_done && self.at == self.current_bytes().len() {
-            self.current = self.ready.pop_front();
-            self.at = 0;
-            if self.current.is_some() {
-                continue;
-            }
-            if let Some(error) = self.deferred_error.take() {
-                return Err(error);
-            }
-            if !self.layout.has_models() {
-                let Some(len) = self.read_len()? else {
-                    return bad("incomplete file");
-                };
-                if len > MAX_MODELS_LEN {
-                    return bad("models too large");
-                }
-                let models_block = if len > 0 {
-                    let (body, _charge) = self.read_body(len)?;
-                    Some(ModelsBlock::new(&body, self.threads, &self.budget)?)
-                } else {
-                    None
-                };
-                self.layout.models(models_block)?;
-                continue;
-            }
-            if self.layout.is_complete() {
-                let mut one = [0u8; 1];
-                if read_up_to(&mut self.input, &mut one)? != 0 {
-                    return bad("trailing bytes");
-                }
-                self.layout.finish()?;
-                std::mem::take(&mut self.check).finish(&self.layout)?;
-                self.is_done = true;
-                break;
-            }
-            self.decode_batch()?;
         }
         Ok(())
     }
@@ -254,79 +262,7 @@ fn read_up_to(input: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     Ok(filled)
 }
 
-fn bytes_at(file: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
-    let start = usize::try_from(offset).ok()?;
-    file.get(start..start.checked_add(usize::try_from(len).ok()?)?)
-}
-
-fn len_at(file: &[u8], offset: u64) -> Option<u64> {
-    len_field(bytes_at(file, offset, LEN_FIELD_LEN as u64)?)
-}
-
-#[derive(Debug)]
-pub(crate) struct ScannedFile {
-    pub(crate) layout: Layout,
-    pub(crate) segments: Vec<(SegmentSpan, SegmentHeader)>,
-    _segments_charge: Charge,
-}
-
-/// FORMAT.md section 7; segment payloads are not decoded.
-pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Result<ScannedFile> {
-    const SEGMENT_RECORD_LEN: u64 = std::mem::size_of::<(SegmentSpan, SegmentHeader)>() as u64;
-    let file_len = file.len() as u64;
-    let mut layout = Layout::new(&file[..file.len().min(HEADER_LEN)], budget)?;
-    let mut offset = HEADER_LEN as u64;
-    let Some(models_len) = len_at(file, offset) else {
-        return bad("incomplete file");
-    };
-    offset += LEN_FIELD_LEN as u64;
-    if models_len > MAX_MODELS_LEN {
-        return bad("models too large");
-    }
-    if models_len > file_len - offset {
-        return bad("incomplete file");
-    }
-    if models_len > 0 {
-        let body = bytes_at(file, offset, models_len).ok_or(Error::Corrupt("truncated"))?;
-        layout.models(Some(ModelsBlock::new(body, threads, budget)?))?;
-    } else {
-        layout.models(None)?;
-    }
-    offset += models_len;
-    let mut segments = Vec::new();
-    let mut segments_charge = Charge::none(budget);
-    while !layout.is_complete() {
-        let Some(coded) = len_at(file, offset) else {
-            return bad("incomplete file");
-        };
-        check_coded_len(coded)?;
-        let span = SegmentSpan {
-            len_field_offset: offset,
-            body_len: coded + SEGMENT_FIELDS_LEN as u64,
-        };
-        if span.body_len > file_len - span.body_offset() {
-            return bad("incomplete file");
-        }
-        let fields = bytes_at(file, span.body_offset(), SEGMENT_FIELDS_LEN as u64)
-            .ok_or(Error::Corrupt("truncated"))?;
-        let header = parse_segment_header(fields)?;
-        layout.add_segment(&header)?;
-        segments_charge.grow(SEGMENT_RECORD_LEN)?;
-        segments.push((span, header));
-        offset = span.end();
-    }
-    if offset != file_len {
-        return bad("trailing bytes");
-    }
-    layout.finish()?;
-    Ok(ScannedFile {
-        layout,
-        segments,
-        _segments_charge: segments_charge,
-    })
-}
-
-pub(crate) fn decode_segment(
+fn decode_segment(
     layout: &Layout,
     body: &[u8],
     header: &SegmentHeader,
@@ -354,7 +290,7 @@ pub(crate) fn decode_segment(
 
 /// Decoding does not recompute the header's SHA-256.
 #[derive(Debug, Default)]
-pub(crate) struct DemoCheck {
+struct DemoCheck {
     crc32: crc32fast::Hasher,
     size_bytes: u64,
     duration_ms: u64,
@@ -362,7 +298,7 @@ pub(crate) struct DemoCheck {
 }
 
 impl DemoCheck {
-    pub(crate) fn segment(&mut self, out: &[u8], scan: FrameScan) -> Result<()> {
+    fn segment(&mut self, out: &[u8], scan: FrameScan) -> Result<()> {
         if self.is_inside_frame {
             return bad("segment ends inside a frame");
         }
@@ -374,7 +310,7 @@ impl DemoCheck {
         self.is_inside_frame = has_tail && !is_cut_at_max;
         Ok(())
     }
-    pub(crate) fn finish(self, layout: &Layout) -> Result<()> {
+    fn finish(self, layout: &Layout) -> Result<()> {
         let header = &layout.header;
         if self.crc32.finalize() != header.crc32 || self.size_bytes != header.size_bytes {
             return bad("checksum mismatch");
@@ -387,36 +323,14 @@ impl DemoCheck {
 }
 
 pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result<Vec<u8>> {
-    let budget = Budget::new(max_memory);
-    let ScannedFile {
-        layout, segments, ..
-    } = &scan_layout(file, threads, &budget)?;
-    let size = layout.header.size_bytes;
-    let _charge = budget.alloc(size)?;
-    let mut out = try_zeroed(usize::try_from(size).map_err(|_| Error::MemoryLimit("demo size"))?)?;
-    let mut slices: Vec<&mut [u8]> = Vec::with_capacity(segments.len());
-    let mut rest: &mut [u8] = &mut out;
-    for (_, header) in segments {
-        let (slice, after) = rest.split_at_mut(header.raw_len as usize);
-        slices.push(slice);
-        rest = after;
+    let mut decoder = Decoder::with_max_memory(file, threads, max_memory)?;
+    let mut demo_charge = Charge::none(&decoder.budget);
+    let mut demo = Vec::new();
+    while let Some(segment) = decoder.next_segment()? {
+        demo_charge.grow(segment.bytes.len() as u64)?;
+        demo.try_reserve(segment.bytes.len())
+            .map_err(|_| Error::MemoryLimit("out of memory"))?;
+        demo.extend_from_slice(&segment.bytes);
     }
-    let results = par_map(
-        threads,
-        segments.iter().zip(slices),
-        |((span, header), dst)| {
-            let body = span.body(file).ok_or(Error::Corrupt("truncated"))?;
-            decode_segment(layout, body, header, dst, &budget)
-        },
-    );
-    let mut check = DemoCheck::default();
-    let mut at = 0usize;
-    for (result, (_, header)) in results.into_iter().zip(segments) {
-        let scan = result?;
-        let len = header.raw_len as usize;
-        check.segment(&out[at..at + len], scan)?;
-        at += len;
-    }
-    check.finish(layout)?;
-    Ok(out)
+    Ok(demo)
 }

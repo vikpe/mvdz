@@ -670,7 +670,7 @@ mod tests {
             transform_header,
             &mut dst,
             models_block,
-            &Budget::unlimited(),
+            &Budget::new(u64::MAX),
         )?;
         Ok(dst)
     }
@@ -682,7 +682,8 @@ mod tests {
         let ids: Vec<usize> = (0..models.len())
             .filter(|&stream| models[stream].is_some())
             .collect();
-        let models_block = ModelsBlock::new(&models_body(&models, &ids), 1, &Budget::unlimited())?;
+        let models_block =
+            ModelsBlock::new(&models_body(&models, &ids), 1, &Budget::new(u64::MAX))?;
         let body =
             encode(&walked, &numerics, &mut Vec::new(), &models).context("a transform body")?;
         Ok((body, models_block))

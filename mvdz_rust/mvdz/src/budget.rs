@@ -25,10 +25,6 @@ impl Budget {
         }))
     }
 
-    pub(crate) fn unlimited() -> Self {
-        Self::new(u64::MAX)
-    }
-
     pub(crate) fn alloc(&self, len: u64) -> Result<Charge> {
         self.reserve(len)?;
         Ok(Charge {

@@ -7,7 +7,7 @@ use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use std::assert_matches;
-use std::io::Cursor;
+use std::io::{Cursor, Read as _};
 use std::time::Instant;
 
 fn small_demo_and_file(has_several_segments: bool) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
@@ -292,19 +292,123 @@ fn large_models_block() -> anyhow::Result<()> {
         models.extend_from_slice(&model);
     }
     file_parts.models = models;
-    let wide = file_parts.build();
+    let read_models = |max_memory: u64| {
+        let budget = crate::budget::Budget::new(max_memory);
+        crate::coder::rans::ModelsBlock::new(&file_parts.models, 1, &budget).map(|_| ())
+    };
     // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
     let max_memory: u64 = 128 << 20;
-    let error = scan(&wide, max_memory).err();
-    assert_eq!(error, Some(Error::MemoryLimit("memory")));
-    let error = crate::decode::decompress(&wide, 1, max_memory).err();
+    assert_eq!(
+        read_models(max_memory).err(),
+        Some(Error::MemoryLimit("memory"))
+    );
+    let error = crate::decode::decompress(&file_parts.build(), 1, max_memory).err();
     assert_eq!(error, Some(Error::MemoryLimit("memory")));
     let start = Instant::now();
-    scan(&wide, crate::budget::DEFAULT_MAX_MEMORY)?;
+    read_models(crate::budget::DEFAULT_MAX_MEMORY)?;
     assert!(
         start.elapsed().as_secs_f64() < 10.0,
         "reading the models took {:?}",
         start.elapsed()
     );
+    Ok(())
+}
+
+/// A model header padded to pass the decision limit is refused before any table is built.
+#[test]
+fn padded_model_of_65535_tables_is_refused_quickly() {
+    use crate::coder::rc::{IntModel, RangeEncoder};
+    const NQC: usize = 17 * 18;
+    let table_count = 65535u32;
+    let mut encoder = RangeEncoder::new();
+    let mut int_model = IntModel::new(NQC + 8);
+    int_model.put(&mut encoder, NQC, 256);
+    int_model.put(&mut encoder, NQC + 1, table_count);
+    let mut previous = 0usize;
+    for _ in 0..256 {
+        int_model.put(&mut encoder, 17 * 17 + previous, 0);
+        previous = 0;
+    }
+    for table in 0..table_count {
+        int_model.put(&mut encoder, NQC + 2, u32::from(table > 0));
+        for _ in 0..256 {
+            int_model.put(&mut encoder, 0, 0);
+        }
+    }
+    let decisions = encoder.decisions;
+    let mut header = encoder.finish();
+    header.resize(
+        header
+            .len()
+            .max((decisions.saturating_sub(1024) / 128 + 1) as usize),
+        0,
+    );
+    let mut models = Vec::new();
+    for field in [1, 0, header.len()] {
+        put_usize(&mut models, field);
+    }
+    models.extend_from_slice(&header);
+    let mut rans_body = Vec::new();
+    put_usize(&mut rans_body, 0);
+    let raw_len = table_count + 100;
+    // fte, fte2, mvd1, tail; one entry (id 0, count, length); no blob body
+    let mut body = Vec::new();
+    for field in [
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        table_count as usize + 16,
+        rans_body.len(),
+        0,
+    ] {
+        put_usize(&mut body, field);
+    }
+    body.extend_from_slice(&rans_body);
+    let mut segment = segment_header_bytes(raw_len, 0, 0);
+    segment.extend_from_slice(&body);
+    let file = Parts {
+        header: Header {
+            size_bytes: u64::from(raw_len),
+            ..Default::default()
+        },
+        models,
+        segments: vec![segment],
+    }
+    .build();
+    let start = Instant::now();
+    let max_memory: u64 = 64 << 20;
+    assert_eq!(
+        crate::decode::decompress(&file, 1, max_memory).err(),
+        Some(Error::Corrupt("model"))
+    );
+    assert!(start.elapsed().as_secs_f64() < 5.0, "{:?}", start.elapsed());
+}
+
+/// No reader keeps a record per segment: many tiny segments decode within a limit just
+/// over the demo's size.
+#[test]
+fn many_tiny_segments_decode_in_little_memory() -> anyhow::Result<()> {
+    // the encoder cuts at 256 KiB, so one segment per frame is built by hand
+    let frame = [0, 1, 1, 0, 0, 0, 1]; // dem_read holding one svc_nop
+    let segment_count = 60_000;
+    let demo = frame.repeat(segment_count);
+    let one = parts(&compress(&frame)?)?;
+    assert_eq!(one.segments.len(), 1);
+    let file = Parts {
+        header: parts(&compress(&demo)?)?.header,
+        models: one.models,
+        segments: vec![one.segments[0].clone(); segment_count],
+    }
+    .build();
+    // the demo is 0.4 MB
+    let max_memory: u64 = 1 << 20;
+    assert_eq!(crate::decode::decompress(&file, 1, max_memory)?, demo);
+    let mut reader = crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?;
+    let mut streamed = Vec::new();
+    reader.read_to_end(&mut streamed)?;
+    assert_eq!(streamed, demo);
     Ok(())
 }

@@ -62,15 +62,3 @@ pub(crate) fn skip_cstr(bytes: &mut &[u8]) -> Option<()> {
     let len = bytes.iter().position(|&byte| byte == 0)?;
     skip(bytes, len + 1)
 }
-
-/// The caller checked for 2 bytes.
-#[inline]
-pub(crate) fn le16(bytes: &[u8]) -> u16 {
-    u16::from_le_bytes(*bytes.first_chunk().expect("caller checked 2 bytes"))
-}
-
-/// The caller checked for 4 bytes.
-#[inline]
-pub(crate) fn le32(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(*bytes.first_chunk().expect("caller checked 4 bytes"))
-}

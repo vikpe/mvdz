@@ -1192,7 +1192,7 @@ mod tests {
         let mut tally = Tally::new(alphabet_size);
         tally.add(symbols, contexts);
         let file_model = tally.file_model().context("a model")?;
-        let model = read_model(&file_model.bytes, alphabet_size, &Budget::unlimited())?;
+        let model = read_model(&file_model.bytes, alphabet_size, &Budget::new(u64::MAX))?;
         Ok((file_model, model))
     }
 
@@ -1231,7 +1231,7 @@ mod tests {
         }
         assert!(decoder.is_done());
         // the model of a byte stream is refused as a numeric stream's
-        assert!(read_model(&file_model.bytes, NUMERIC_ALPHABET, &Budget::unlimited()).is_err());
+        assert!(read_model(&file_model.bytes, NUMERIC_ALPHABET, &Budget::new(u64::MAX)).is_err());
         // a body cut short is refused; a symbol short does not finish
         assert!(ByteDecoder::new(&body[..body.len() - 2], symbols.len(), &model).is_err());
         let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;

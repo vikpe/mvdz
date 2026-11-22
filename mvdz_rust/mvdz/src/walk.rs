@@ -2,7 +2,7 @@
 //! listed in [`Records`]; `numeric.rs` fills them in after the walk.
 
 use crate::budget::Charge;
-use crate::fields::{le16, le32};
+use crate::fields::{read_u16, read_u32, read_usize};
 use crate::proto::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
     DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS,
@@ -501,11 +501,10 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
 
     fn length_prefixed(&mut self, frame_type: u8, is_hidden: bool) {
         if IS_ENCODE {
-            if self.src.len() - self.offset < 4 {
+            let Some(len) = read_usize(&mut &self.src[self.offset..]) else {
                 self.has_error = true;
                 return;
-            }
-            let len = le32(&self.src[self.offset..]) as usize;
+            };
             self.offset += 4;
             let end = self.offset + len;
             if end > self.src.len() {
@@ -856,11 +855,11 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             let word: u16;
             let entity: usize;
             if IS_ENCODE {
-                if self.src.len() - self.offset < 2 {
+                let Some(read_word) = read_u16(&mut &self.src[self.offset..]) else {
                     self.has_error = true;
                     return;
-                }
-                word = le16(&self.src[self.offset..]);
+                };
+                word = read_word;
                 self.offset += 2;
                 if word == 0 {
                     self.io.byte(PE_ENT, entity_context, 0);
@@ -1112,11 +1111,9 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                     self.tag(HIDTAG, 2);
                     return;
                 }
-                let mut is_block = remaining >= 6;
-                if is_block {
-                    let block_len = u64::from(le32(&self.src[self.offset..]));
-                    is_block = block_len >= 1 && block_len <= (remaining - 6) as u64;
-                }
+                let is_block = remaining >= 6
+                    && read_usize(&mut &self.src[self.offset..])
+                        .is_some_and(|block_len| (1..=remaining - 6).contains(&block_len));
                 if !is_block {
                     self.tag(HIDTAG, 0);
                     self.escape(end);
@@ -1165,7 +1162,8 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         let mut grid = 0u8;
         if IS_ENCODE {
             for axis in 0..3 {
-                if on_grid(le32(&self.src[self.offset + 4 * axis..])).is_some() {
+                let angle_bits = read_u32(&mut &self.src[self.offset + 4 * axis..]);
+                if angle_bits.and_then(on_grid).is_some() {
                     grid |= 1 << axis;
                 }
             }

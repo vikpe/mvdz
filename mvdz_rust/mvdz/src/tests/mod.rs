@@ -4,6 +4,5 @@ mod common;
 mod corrupt;
 mod hostile;
 mod info;
-mod review_fixes;
 mod roundtrip;
 mod vectors;

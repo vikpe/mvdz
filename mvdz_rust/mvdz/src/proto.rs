@@ -1,7 +1,7 @@
 //! `svc_*` body sizes as mvdsv `sv_ents.c` and ezquake `cl_parse.c` write them. A mis-sized
 //! command stays lossless: both directions size it alike.
 
-use crate::fields::{le32, read_u8, read_u16, read_u32, skip, skip_cstr};
+use crate::fields::{read_u8, read_u16, read_u32, read_usize, skip, skip_cstr};
 
 pub(crate) const PROTOCOL_VERSION: u32 = 28;
 
@@ -379,24 +379,15 @@ impl Proto {
 /// Includes the frame header.
 pub(crate) fn frame_len(src: &[u8], start: usize) -> Option<usize> {
     let remaining = src.len().checked_sub(start)?;
-    if remaining < 2 {
-        return None;
-    }
-    let after_time = &src[start + 1..];
-    match src[start + 1] & 7 {
+    let payload_len_at = |offset: usize| read_usize(&mut src.get(start + offset..)?);
+    match src.get(start + 1)? & 7 {
         DEM_SET => (remaining >= 10).then_some(10),
         DEM_MULTIPLE => {
-            if remaining < 10 {
-                return None;
-            }
-            let len = le32(&after_time[5..]) as usize;
+            let len = payload_len_at(6)?;
             (len <= remaining - 10).then_some(10 + len)
         }
         DEM_READ | DEM_SINGLE | DEM_STATS | DEM_ALL => {
-            if remaining < 6 {
-                return None;
-            }
-            let len = le32(&after_time[1..]) as usize;
+            let len = payload_len_at(2)?;
             (len <= remaining - 6).then_some(6 + len)
         }
         _ => None,

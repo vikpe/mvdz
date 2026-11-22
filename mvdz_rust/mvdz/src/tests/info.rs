@@ -22,18 +22,10 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         assert_eq!(header_bytes(&header), file[..HEADER_LEN]);
         let decoder = crate::Decoder::new(Cursor::new(&file))?;
         assert_eq!(*decoder.header(), header);
-        let scanned = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
-        assert_eq!(scanned.layout.header, header);
         assert_eq!(
-            scanned.segments.len() > 1,
+            parts(&file)?.segments.len() > 1,
             demo.len() > crate::segment::SEGMENT_TARGET_RAW
         );
-        let raw_len: u64 = scanned
-            .segments
-            .iter()
-            .map(|(_, segment)| u64::from(segment.raw_len))
-            .sum();
-        assert_eq!(raw_len, header.size_bytes);
         assert_eq!(
             readers_agree(&file, "header").context("every reader refuses")?,
             demo
@@ -147,5 +139,31 @@ fn truncated_demo_round_trips() -> anyhow::Result<()> {
             assert_eq!(decompress(&file, 2)?, &duel[..cut], "cut {cut}");
         }
     }
+    Ok(())
+}
+
+#[test]
+fn sha256_is_not_checked_on_decode() -> anyhow::Result<()> {
+    let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
+    let file = compress(&demo)?;
+    let mut file_parts = parts(&file)?;
+    file_parts.header.sha256 = [0xff; 32];
+    let other = file_parts.build();
+    let decoded = decompress(&other, 1)?;
+    assert_eq!(decoded, demo);
+    let mut read = Vec::new();
+    std::io::Read::read_to_end(&mut crate::Decoder::new(Cursor::new(&other))?, &mut read)?;
+    assert_eq!(read, decoded);
+    let demo = synthetic(&[], false);
+    let file = compress(&[demo, vec![0; 5000]].concat())?;
+    let intact = decompress(&file, 1)?;
+    let mut bad = file;
+    let at = (0..bad.len())
+        .rev()
+        .find(|&at| bad[at] != 0 && at > 200)
+        .context("a non-zero byte")?;
+    bad[at - 100] ^= 0x40;
+    assert!(decompress(&bad, 1).is_err());
+    assert!(!intact.is_empty());
     Ok(())
 }

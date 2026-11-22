@@ -1,4 +1,5 @@
 use super::common::*;
+use crate::format::{SEGMENT_FIELDS_LEN, parse_segment_header};
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use std::assert_matches;
@@ -232,16 +233,16 @@ fn segments_are_capped() -> anyhow::Result<()> {
         ("oversized frame", oversized.0, 2),
     ] {
         let (file, _) = compress_unchecked(&src)?;
-        let scanned = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
-        let count = scanned.segments.len();
+        let file_segments = parts(&file)?.segments;
+        let count = file_segments.len();
         assert!(count >= segments, "{what}: {count} segments");
-        assert!(
-            scanned
-                .segments
-                .iter()
-                .all(|(_, segment)| segment.raw_len as usize <= max_segment),
-            "{what}: a segment over the largest length"
-        );
+        for segment in &file_segments {
+            let header = parse_segment_header(&segment[..SEGMENT_FIELDS_LEN])?;
+            assert!(
+                header.raw_len as usize <= max_segment,
+                "{what}: a segment over the largest length"
+            );
+        }
         assert!(
             readers_agree(&file, what).context("every reader refuses")? == src,
             "{what}"

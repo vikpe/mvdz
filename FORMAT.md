@@ -1380,13 +1380,12 @@ reference encoder writes level 9 (`miniz_oxide`).
 
 ## 7. Validation rules and limits
 
-Every reader applies the same rules: whole-file decoding (`decode.rs:decompress`) and
-in-order streaming (`decode.rs:Decoder`) accept and refuse the same files, through one
-set of layout checks (`format.rs:Layout`). The reference tests this on every vector and
-on mutated files.
+The reference has one reader: whole-file decoding (`decode.rs:decompress`) collects what
+in-order streaming (`decode.rs:Decoder`) reads, so both accept and refuse the same files.
+The reference tests this on every vector and on mutated files.
 
-**Layout rules** (`decode.rs:scan_layout`, `format.rs:Layout`), checked before any
-segment is decoded; refuse the file if any fails:
+**Layout rules** (`decode.rs:Decoder`, `format.rs:Layout`), each checked before the
+block it covers is decoded; refuse the file if any fails:
 
 1. Header (section 2): the magic `MVDZ` (else *NotMvdz*), version 2 (else
    *UnsupportedVersion*), all 64 bytes present, the high 4 bytes of the `crc` field 0.
@@ -1426,9 +1425,9 @@ reference's):
 | `Internal` | encoding only: the output does not decode to the input (a bug) |
 
 When a file breaks several rules, the one reported depends on the order of the checks:
-the reference checks the header, the models block, then each segment header in file
-order, then, when decoding, the content rules segment by segment and the whole-demo
-checks. Each hostile vector breaks one rule only.
+the reference checks the header, the models block, then the segments in file order, a
+few at a time (their headers, then their content rules), then the whole-demo checks.
+Each hostile vector breaks one rule only.
 
 **Limits.** All are rules of the format:
 
@@ -1446,9 +1445,9 @@ yields at most 2^20 bytes and takes at least its 16 header bytes of the file, an
 model at most 34 (one per modelled stream) is read once per file, its work bounded by
 M2. A decoder may cap its memory on top (the reference: 1 GiB on 64-bit targets,
 256 MiB on 32-bit ones; `budget.rs:DEFAULT_MAX_MEMORY`) and refuse a file that needs
-more with `MemoryLimit`. The reference charges to that cap the models, a fixed amount
-per segment it records, each segment's decode scratch (record lists, blob bytes) and the
-output it holds. A decoder must never abort the process on a declared size.
+more with `MemoryLimit`. The reference charges to that cap the models, each segment's
+decode scratch (record lists, blob bytes) and the output it holds. A decoder must never
+abort the process on a declared size.
 
 **Not checked.** The header's SHA-256 (section 10): no reader recomputes it. The `fte2` field
 of a transform header beyond carrying it. Padding bits after a numeric stream's mantissa
@@ -1497,10 +1496,10 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
    id order.
 6. **Models block**: lists only the models some segment uses, in id order; length 0 when
    none is used.
-7. **Self-check** (`encode.rs:failing_segments`), always on: the encoder decodes its
-   output, each segment against its input, then the whole-demo checks. Every segment
+7. **Self-check** (`encode.rs:first_failing_segment`), always on: the encoder decodes its
+   output, each segment against its input, then the whole-demo checks. The first segment
    that fails is rewritten all tail and the file assembled again, until none fails. A
-   failing all-tail segment, or a file whose layout does not read back, is `Internal`.
+   failing all-tail segment, or a file that fails outside a segment, is `Internal`.
 8. **Determinism**: the output depends only on the input, not on the thread count.
 
 ---------------------------------------------------------------------------

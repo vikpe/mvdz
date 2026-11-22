@@ -99,28 +99,6 @@ pub(crate) fn segment_block(out: &mut Vec<u8>, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-pub(crate) fn len_field(mut bytes: &[u8]) -> Option<u64> {
-    read_u32(&mut bytes).map(u64::from)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct SegmentSpan {
-    pub(crate) len_field_offset: u64,
-    pub(crate) body_len: u64,
-}
-
-impl SegmentSpan {
-    pub(crate) fn body_offset(&self) -> u64 {
-        self.len_field_offset + LEN_FIELD_LEN as u64
-    }
-    pub(crate) fn end(&self) -> u64 {
-        self.body_offset() + self.body_len
-    }
-    pub(crate) fn body<'a>(&self, file: &'a [u8]) -> Option<&'a [u8]> {
-        file.get(usize::try_from(self.body_offset()).ok()?..usize::try_from(self.end()).ok()?)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SegmentHeader {
     pub(crate) raw_len: u32,
@@ -155,7 +133,7 @@ pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
     })
 }
 
-/// Every reader applies the layout rules through it, so all accept and refuse the same files.
+/// The layout rules (FORMAT.md section 7) over the blocks read so far.
 #[derive(Debug)]
 pub(crate) struct Layout {
     pub(crate) header: Header,
