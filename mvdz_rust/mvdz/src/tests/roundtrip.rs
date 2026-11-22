@@ -14,6 +14,27 @@ fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Three `PE_ENT` symbols per two-byte entity word: a stream with more symbols than the
+/// stream table allows for its segment.
+#[test]
+fn a_stream_over_the_count_limit_falls_back_to_tail() -> anyhow::Result<()> {
+    let mut demo = Demo(synthetic(&[], false));
+    let mut packet = vec![crate::proto::SVC_PACKET_ENTITIES];
+    for index in 0..120_000u32 {
+        packet.extend_from_slice(&((511 - index % 511) as u16).to_le_bytes());
+    }
+    packet.extend_from_slice(&[0, 0]);
+    demo.frame(5, crate::proto::DEM_ALL, &packet);
+    demo.0.extend_from_slice(&synthetic(&[], false));
+    let file = compress(&demo.0)?;
+    assert_eq!(
+        readers_agree(&file, "count limit").context("every reader refuses")?,
+        demo.0
+    );
+    assert!(unstructured_len(&file)? >= packet.len());
+    Ok(())
+}
+
 #[test]
 fn synthetic_demos() -> anyhow::Result<()> {
     check_all_ways(&synthetic(&[], false), "plain")?;

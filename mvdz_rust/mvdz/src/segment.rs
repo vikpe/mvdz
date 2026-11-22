@@ -198,6 +198,7 @@ fn run_group(
 pub(crate) struct Walked {
     io: EncodeIo,
     records: Records,
+    raw_len: usize,
     tail: usize,
     start_proto: Proto,
 }
@@ -223,6 +224,7 @@ pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
         Walked {
             io,
             records,
+            raw_len: src.len(),
             tail,
             start_proto: proto,
         },
@@ -237,9 +239,22 @@ pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked {
     Walked {
         io,
         records,
+        raw_len: src.len(),
         tail: src.len(),
         start_proto: proto,
     }
+}
+
+/// Of one stream in a segment's stream table (FORMAT.md section 3.1). Most streams hold
+/// at most a symbol per byte of the segment, but not all: an entity word of two bytes can
+/// take three `PE_ENT` symbols.
+fn max_stream_count(raw_len: usize) -> usize {
+    raw_len.saturating_add(16)
+}
+
+/// Of the blob streams of a segment together (FORMAT.md section 7).
+fn max_blob_total(raw_len: usize) -> usize {
+    raw_len.saturating_mul(2)
 }
 
 /// The non-empty ones, in id order.
@@ -378,8 +393,9 @@ struct CodedStream {
     body: Vec<u8>,
 }
 
-/// `None` if a structural or numeric stream has no model in `file_models` (by stream id).
-/// `model_ids` gets the streams coded with a model.
+/// `None` if a structural or numeric stream has no model in `file_models` (by stream id), or
+/// a stream holds more than the stream table allows. `model_ids` gets the streams coded with
+/// a model.
 pub(crate) fn encode(
     walked: &Walked,
     numerics: &Numerics,
@@ -387,6 +403,19 @@ pub(crate) fn encode(
     file_models: &[Option<rans::FileModel>],
 ) -> Option<Vec<u8>> {
     let file_model = |stream: usize| file_models.get(stream)?.as_ref();
+    let max_count = max_stream_count(walked.raw_len);
+    let numeric_counts = numerics
+        .iter()
+        .flatten()
+        .map(|numeric| numeric.symbols.len());
+    let is_any_stream_over_the_limit = (walked.io.symbols.iter().map(Vec::len))
+        .chain(walked.io.blobs.iter().map(Vec::len))
+        .chain(numeric_counts)
+        .any(|count| count > max_count);
+    let blob_total: usize = walked.io.blobs.iter().map(Vec::len).sum();
+    if is_any_stream_over_the_limit || blob_total > max_blob_total(walked.raw_len) {
+        return None;
+    }
     let mut coded_streams: Vec<CodedStream> = Vec::new();
     for (stream, symbols) in walked.io.symbols.iter().enumerate() {
         if !symbols.is_empty() {
@@ -545,15 +574,14 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
             return bad("duplicate stream");
         }
         was_seen[id] = true;
-        // no stream holds more symbols than the output has bytes (plus slack)
-        if count > raw_len.saturating_add(16) {
+        if count > max_stream_count(raw_len) {
             return bad("stream count");
         }
         total = total.checked_add(len).ok_or(table_error)?;
         entries.push(StreamEntry { id, count, len });
     }
-    // implied by the walk (FORMAT.md section 7): refused here, before the blob bytes are allocated
-    if blob_total > raw_len.saturating_mul(2) {
+    // refused here, before the blob bytes are allocated
+    if blob_total > max_blob_total(raw_len) {
         return bad("blob streams");
     }
     let blob_len = read_usize(&mut rest).ok_or(table_error)?;
