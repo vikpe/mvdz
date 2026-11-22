@@ -7,7 +7,7 @@ use crate::math::residual_bucket;
 use crate::memory::try_with_capacity;
 use crate::numeric::NumericContext;
 use crate::rans::{ByteDecoder, NumericDecoder, NumericSymbolWriter, NumericSymbols};
-use crate::streams::{LZ_DIST, LZ_LEN};
+use crate::streams::{LZ_DISTANCE, LZ_LENGTH};
 
 /// The blob bytes of one segment as the encoder codes them.
 #[derive(Debug)]
@@ -35,8 +35,8 @@ pub(crate) fn tokens(bytes: &[u8]) -> Tokens {
 pub(crate) fn code(bytes: &[u8], tokens: &[Token]) -> Tokens {
     let mut literals = Vec::new();
     let mut literal_contexts = Vec::new();
-    let mut lens = NumericSymbolWriter::new(LZ_LEN);
-    let mut dists = NumericSymbolWriter::new(LZ_DIST);
+    let mut lens = NumericSymbolWriter::new(LZ_LENGTH);
+    let mut dists = NumericSymbolWriter::new(LZ_DISTANCE);
     let mut position = 0usize;
     let mut previous_len = 0;
     for &token in tokens {

@@ -200,7 +200,7 @@ fn large_models_block() -> anyhow::Result<()> {
     let mut file_parts = parts(&file)?;
     assert!(!file_parts.models.is_empty());
     let model = wide_model(512);
-    let raw_models: Vec<(usize, &[u8])> = (0..crate::streams::LAZY_STREAM_COUNT)
+    let raw_models: Vec<(usize, &[u8])> = (0..crate::streams::FIRST_NUMERIC_STREAM)
         .map(|stream| (stream, &model[..]))
         .collect();
     file_parts.models = crate::rans::write_models_block(&raw_models).body;

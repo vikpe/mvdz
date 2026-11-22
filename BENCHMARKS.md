@@ -1,6 +1,6 @@
 # mvdz benchmarks
 
-Compression ratios, speeds, memory and round trips of mvdz (format version 2), and of
+Compression ratios, speeds, memory and round trips of mvdz (format version 3), and of
 rc.4 (`master`, format version 1) under the same premise: 256 KiB segments
 (`-s 256K`), compression with its self-check, decompression with CRC checks only (rc.4's
 `--trusted`: this version never recomputes the SHA-256). MB = 10^6
@@ -43,31 +43,31 @@ demos:
 
 | format | size / raw | size / archive gzip |
 |---|---|---|
-| **mvdz** | **0.193** [0.190-0.197] | 0.326 |
+| **mvdz** | **0.194** [0.191-0.197] | 0.328 |
 | mvdz rc.4, `-s 256K` | 0.192 | |
 | archive gzip | 0.593 [0.581-0.603] | 1 |
 | gzip -9 | 0.566 [0.554-0.577] | 0.956 |
 | xz -9e | 0.429 [0.422-0.435] | 0.724 |
 | zstd -19 | 0.508 [0.498-0.517] | 0.858 |
 
-Projected onto the whole archive (72.0 GB as gzip): 23.5 GB. Unweighted, the 379
-demos (968,979,765 bytes raw) compress to 211,736,432 bytes (0.2185); the median demo
-to 0.241. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
+Projected onto the whole archive (72.0 GB as gzip): 23.6 GB. Unweighted, the 379
+demos (968,979,765 bytes raw) compress to 212,494,368 bytes (0.2193); the median demo
+to 0.244. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
 -9e.
 
-Against rc.4 at the same segment size: +0.9 % (raw DEFLATE instead of zstd for the blob
-streams, fixed-width integers).
+Against rc.4 at the same segment size: +1.1 % (the blob streams as LZ77 tokens coded
+with rANS instead of zstd, fixed-width integers).
 
 **By era** (year of the demo; weighted, 95 % intervals):
 
 | era | n | mvdz | gzip -9 | xz -9e | zstd -19 |
 |---|---|---|---|---|---|
-| up to 2006 | 127 | 0.262 [0.258-0.266] | 0.611 | 0.508 | 0.554 |
-| 2007-2010 | 95 | 0.238 [0.231-0.243] | 0.609 | 0.492 | 0.552 |
-| 2011-2020 | 49 | 0.251 [0.241-0.264] | 0.622 | 0.508 | 0.566 |
-| 2021-2022 | 19 | 0.180 [0.175-0.184] | 0.610 | 0.442 | 0.546 |
-| 2023-2024 | 43 | 0.180 [0.175-0.185] | 0.599 | 0.433 | 0.536 |
-| 2025-2026 | 45 | 0.156 [0.147-0.163] | 0.493 | 0.359 | 0.439 |
+| up to 2006 | 127 | 0.264 [0.260-0.269] | 0.611 | 0.508 | 0.554 |
+| 2007-2010 | 95 | 0.239 [0.232-0.244] | 0.609 | 0.492 | 0.552 |
+| 2011-2020 | 49 | 0.252 [0.242-0.264] | 0.622 | 0.508 | 0.566 |
+| 2021-2022 | 19 | 0.180 [0.176-0.185] | 0.610 | 0.442 | 0.546 |
+| 2023-2024 | 43 | 0.181 [0.176-0.185] | 0.599 | 0.433 | 0.536 |
+| 2025-2026 | 45 | 0.156 [0.147-0.164] | 0.493 | 0.359 | 0.439 |
 
 (One undated demo is not listed.) Current mvdsv records a snapshot every server frame
 (`sv_demofps 77`; about 62 a second in practice) where older demos mostly hold 20-27;
@@ -109,21 +109,22 @@ this version:
 
 | demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
 |---|---|---|---|---|
-| 14.2 MB (sample40) | 93 -> **35** MiB | 102 -> **42** MiB | 23 -> **5.6** MiB | 24 -> **7.6** MiB |
-| 6.2 MB (set8) | 49 -> **22** MiB | 57 -> **28** MiB | 13 -> **5.2** MiB | 15 -> **7.2** MiB |
-| 2.0 MB (set8) | 23 -> **13** MiB | 29 -> **17** MiB | 7.8 -> **4.6** MiB | 8.8 -> **6.6** MiB |
+| 14.2 MB (sample40) | 93 -> **33** MiB | 102 -> **41** MiB | 23 -> **5.9** MiB | 24 -> **8.1** MiB |
+| 6.2 MB (set8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.2** MiB | 15 -> **7.4** MiB |
+| 2.0 MB (set8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.5** MiB | 8.8 -> **6.2** MiB |
 
 Decompression streams: its memory is a few segments (at most 1 MiB raw each) however
 large the demo; rc.4's grows with the demo. Compression holds the demo and its walked
-segments: about 2.5 times the demo, 2.1 to 2.7 times less than rc.4.
+segments: about 2.3 times the demo for a large one, 1.9 to 2.8 times less than rc.4.
 
 ## Correctness
 
 * Round trips (`examples/sweep.rs`): every demo of stratified (379) and set8 (8), 987
   MB raw, compressed and decoded by both the whole-file decoder and the streaming
   `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
-* The test suite (`cargo nextest run --release`, 49 tests) with the set8 demos and the
-  FTE float demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
+* The Go encoder (`mvdz_go/`) writes the same bytes as the Rust one for all 387.
+* The test suite (`cargo nextest run`, 51 tests) with the set8 demos and the FTE float
+  demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
   `vectors/` are refused or decoded as `MANIFEST.tsv` records.
 * Fuzzing (`mvdz_rust/mvdz/fuzz/`: `decode`, `stream_reader`, `compress_rt`,
   `gen_rt`): not yet run on format version 2.

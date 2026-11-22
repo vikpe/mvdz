@@ -9,26 +9,26 @@ const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
 
 /// Tracked from the serverdata the generator writes, independently of the library.
 #[derive(Debug, Default)]
-pub struct Protocol {
+pub struct ProtocolState {
     pub fte: u32,
     mvd1: u32,
 }
 
-impl Protocol {
+impl ProtocolState {
     fn has_fte_float_coords(&self) -> bool {
         self.fte & FTE_PEXT_FLOAT_COORDS != 0
     }
-    pub fn coord(&self) -> usize {
+    pub fn coord_size(&self) -> usize {
         if self.has_fte_float_coords() || self.mvd1 & MVD_PEXT_1_FLOAT_COORDS != 0 {
             4
         } else {
             2
         }
     }
-    pub fn wide_coord(&self) -> usize {
+    pub fn wide_coord_size(&self) -> usize {
         if self.has_fte_float_coords() { 4 } else { 2 }
     }
-    pub fn angle(&self) -> usize {
+    pub fn angle_size(&self) -> usize {
         if self.has_fte_float_coords() { 2 } else { 1 }
     }
 }
@@ -75,7 +75,7 @@ fn push_string(out: &mut Vec<u8>, text: &[u8]) {
     out.push(0);
 }
 
-fn delta(chooser: &mut Chooser, protocol: &Protocol, out: &mut Vec<u8>, entity: u16) {
+fn delta(chooser: &mut Chooser, protocol: &ProtocolState, out: &mut Vec<u8>, entity: u16) {
     let high = chooser.u8() as u16 & 0x7f;
     let mut header = (high << 9) | (entity & 511);
     if header == 0 {
@@ -111,10 +111,10 @@ fn delta(chooser: &mut Chooser, protocol: &Protocol, out: &mut Vec<u8>, entity: 
     }
     for (origin_bit, angle_bit) in [(1 << 9, 1), (1 << 10, 1 << 12), (1 << 11, 1 << 1)] {
         if bits & origin_bit != 0 {
-            out.extend(chooser.bytes(protocol.coord()));
+            out.extend(chooser.bytes(protocol.coord_size()));
         }
         if bits & angle_bit != 0 {
-            out.extend(chooser.bytes(protocol.angle()));
+            out.extend(chooser.bytes(protocol.angle_size()));
         }
     }
     if more & 2 != 0 && protocol.fte & 8 != 0 {
@@ -131,9 +131,9 @@ fn delta(chooser: &mut Chooser, protocol: &Protocol, out: &mut Vec<u8>, entity: 
     }
 }
 
-fn command(chooser: &mut Chooser, protocol: &mut Protocol, out: &mut Vec<u8>) {
+fn command(chooser: &mut Chooser, protocol: &mut ProtocolState, out: &mut Vec<u8>) {
     let kind = chooser.below(40);
-    let coord_len = protocol.coord();
+    let coord_len = protocol.coord_size();
     match kind {
         0..=6 => {
             // playerinfo
@@ -342,7 +342,7 @@ fn command(chooser: &mut Chooser, protocol: &mut Protocol, out: &mut Vec<u8>) {
             // FTE spawnbaseline2 / spawnbaseline
             if chooser.below(2) == 0 {
                 out.push(22);
-                out.extend(chooser.bytes(6 + 3 * (coord_len + protocol.angle())));
+                out.extend(chooser.bytes(6 + 3 * (coord_len + protocol.angle_size())));
             } else {
                 out.push(66);
                 let entity = chooser.below(512) as u16;
@@ -358,11 +358,11 @@ fn command(chooser: &mut Chooser, protocol: &mut Protocol, out: &mut Vec<u8>) {
         }
         32 => {
             out.push(10);
-            out.extend(chooser.bytes(1 + 3 * protocol.angle()));
+            out.extend(chooser.bytes(1 + 3 * protocol.angle_size()));
         }
         33 => {
             out.push(30);
-            out.extend(chooser.bytes(3 * protocol.wide_coord() + 3 * protocol.angle()));
+            out.extend(chooser.bytes(3 * protocol.wide_coord_size() + 3 * protocol.angle_size()));
         }
         34 => {
             // a random command byte with random bytes
@@ -384,7 +384,7 @@ fn command(chooser: &mut Chooser, protocol: &mut Protocol, out: &mut Vec<u8>) {
                     push_string(out, b"m");
                 }
                 19 => out.extend(chooser.bytes(2 + 3 * coord_len)),
-                20 => out.extend(chooser.bytes(4 + 3 * (coord_len + protocol.angle()))),
+                20 => out.extend(chooser.bytes(4 + 3 * (coord_len + protocol.angle_size()))),
                 29 => out.extend(chooser.bytes(3 * coord_len + 3)),
                 _ => out.extend(chooser.bytes(2)),
             }
@@ -457,7 +457,7 @@ fn hidden(chooser: &mut Chooser, out: &mut Vec<u8>) {
 
 pub fn demo(bytes: &[u8]) -> Vec<u8> {
     let mut chooser = Chooser::new(bytes);
-    let mut protocol = Protocol::default();
+    let mut protocol = ProtocolState::default();
     let mut out = Vec::new();
     while !chooser.is_done() {
         let time_delta = if chooser.below(4) == 0 {

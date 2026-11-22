@@ -79,10 +79,11 @@ pub(crate) const DF_MODEL: u16 = 1 << 11;
 pub(crate) const DF_ORIGIN: u16 = 1 << 0;
 pub(crate) const DF_SKIN_NUM: u16 = 1 << 7;
 pub(crate) const DF_WEAPON_FRAME: u16 = 1 << 10;
+pub(crate) const ORIGIN_FLAGS: u16 = DF_ORIGIN | DF_ORIGIN << 1 | DF_ORIGIN << 2;
 
 /// Derived only from bytes already seen, so both directions agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Protocol {
+pub(crate) struct ProtocolState {
     pub(crate) fte: u32,
     pub(crate) fte2: u32,
     pub(crate) mvd1: u32,
@@ -90,7 +91,7 @@ pub(crate) struct Protocol {
     pub(crate) has_fte_float_coords: bool,
 }
 
-impl Protocol {
+impl ProtocolState {
     pub(crate) fn new(fte: u32, fte2: u32, mvd1: u32) -> Self {
         let mut protocol = Self {
             fte,
@@ -109,15 +110,15 @@ impl Protocol {
         self.has_fte_float_coords = self.fte & FTE_PEXT_FLOAT_COORDS != 0;
     }
     #[inline]
-    pub(crate) fn coord(&self) -> usize {
+    pub(crate) fn coord_size(&self) -> usize {
         if self.has_float_coords { 4 } else { 2 }
     }
     #[inline]
-    pub(crate) fn wide_coord(&self) -> usize {
+    pub(crate) fn wide_coord_size(&self) -> usize {
         if self.has_fte_float_coords { 4 } else { 2 }
     }
     #[inline]
-    pub(crate) fn angle(&self) -> usize {
+    pub(crate) fn angle_size(&self) -> usize {
         if self.has_fte_float_coords { 2 } else { 1 }
     }
 
@@ -204,13 +205,13 @@ impl Protocol {
                 if channel & SND_ATTENUATION != 0 {
                     skip(rest, 1)?;
                 }
-                skip(rest, 1 + 3 * self.coord())?;
+                skip(rest, 1 + 3 * self.coord_size())?;
             }
             SVC_PRINT => {
                 skip(rest, 1)?;
                 skip_cstr(rest)?;
             }
-            SVC_SET_ANGLE => skip(rest, 1 + 3 * self.angle())?,
+            SVC_SET_ANGLE => skip(rest, 1 + 3 * self.angle_size())?,
             SVC_SERVER_DATA => {
                 loop {
                     if read_u32(rest)? == PROTOCOL_VERSION {
@@ -229,27 +230,27 @@ impl Protocol {
                 skip_cstr(rest)?;
             }
             SVC_UPDATE_FRAGS => skip(rest, 3)?,
-            SVC_DAMAGE => skip(rest, 2 + 3 * self.coord())?,
-            SVC_SPAWN_STATIC => skip(rest, 4 + 3 * (self.coord() + self.angle()))?,
+            SVC_DAMAGE => skip(rest, 2 + 3 * self.coord_size())?,
+            SVC_SPAWN_STATIC => skip(rest, 4 + 3 * (self.coord_size() + self.angle_size()))?,
             SVC_FTE_SPAWN_STATIC_2 | SVC_FTE_SPAWN_BASELINE_2 => {
                 let word = u32::from(read_u16(rest)?);
-                self.delta_size(rest, word)?;
+                self.skip_entity_delta(rest, word)?;
             }
-            SVC_SPAWN_BASELINE => skip(rest, 2 + 4 + 3 * (self.coord() + self.angle()))?,
+            SVC_SPAWN_BASELINE => skip(rest, 2 + 4 + 3 * (self.coord_size() + self.angle_size()))?,
             SVC_TEMP_ENTITY => match read_u8(rest)? {
                 TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
-                    skip(rest, 2 + 6 * self.coord())?;
+                    skip(rest, 2 + 6 * self.coord_size())?;
                 }
                 TE_SPIKE | TE_SUPER_SPIKE | TE_EXPLOSION | TE_TAR_EXPLOSION | TE_WIZ_SPIKE
                 | TE_KNIGHT_SPIKE | TE_LAVA_SPLASH | TE_TELEPORT | TE_LIGHTNING_BLOOD => {
-                    skip(rest, 3 * self.coord())?;
+                    skip(rest, 3 * self.coord_size())?;
                 }
-                TE_GUNSHOT | TE_BLOOD => skip(rest, 1 + 3 * self.coord())?,
+                TE_GUNSHOT | TE_BLOOD => skip(rest, 1 + 3 * self.coord_size())?,
                 _ => return None,
             },
             SVC_SET_PAUSE | SVC_CD_TRACK | SVC_CHOKE_COUNT => skip(rest, 1)?,
-            SVC_SPAWN_STATIC_SOUND => skip(rest, 3 * self.coord() + 3)?,
-            SVC_INTERMISSION => skip(rest, 3 * self.wide_coord() + 3 * self.angle())?,
+            SVC_SPAWN_STATIC_SOUND => skip(rest, 3 * self.coord_size() + 3)?,
+            SVC_INTERMISSION => skip(rest, 3 * self.wide_coord_size() + 3 * self.angle_size())?,
             SVC_UPDATE_PING => skip(rest, 3)?,
             SVC_UPDATE_ENTER_TIME | SVC_UPDATE_STAT_LONG => skip(rest, 5)?,
             SVC_MUZZLE_FLASH | SVC_UPDATE_PL => skip(rest, 2)?,
@@ -270,7 +271,7 @@ impl Protocol {
                 skip(rest, 1)?;
                 for axis in 0..3 {
                     if flags & DF_ORIGIN << axis != 0 {
-                        skip(rest, self.coord())?;
+                        skip(rest, self.coord_size())?;
                     }
                 }
                 for axis in 0..3 {
@@ -312,7 +313,7 @@ impl Protocol {
                     if word == 0 {
                         break;
                     }
-                    self.delta_size(rest, word)?;
+                    self.skip_entity_delta(rest, word)?;
                 }
             }
             SVC_MAX_SPEED | SVC_ENT_GRAVITY => skip(rest, 4)?,
@@ -330,7 +331,7 @@ impl Protocol {
         Some(())
     }
 
-    fn delta_size(&self, rest: &mut &[u8], word: u32) -> Option<()> {
+    fn skip_entity_delta(&self, rest: &mut &[u8], word: u32) -> Option<()> {
         let mut bits = word & !511;
         let mut more = 0u32;
         if bits & U_MORE_BITS != 0 {
@@ -354,10 +355,10 @@ impl Protocol {
         }
         for (origin_flag, angle_flag) in ORIGIN_ANGLE_FLAGS {
             if bits & origin_flag != 0 {
-                skip(rest, self.coord())?;
+                skip(rest, self.coord_size())?;
             }
             if bits & angle_flag != 0 {
-                skip(rest, self.angle())?;
+                skip(rest, self.angle_size())?;
             }
         }
         if more & U_FTE_TRANS != 0 && self.fte & FTE_PEXT_TRANS != 0 {

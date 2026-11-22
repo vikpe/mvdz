@@ -261,7 +261,7 @@ func (walker *segmentWalker) escape() {
 		if hasMoreGroups {
 			sourceByte |= 0x80
 		}
-		lengthByte := walker.blobByte(streamEscapeLen, sourceByte)
+		lengthByte := walker.blobByte(streamEscapeLength, sourceByte)
 		length |= uint32(lengthByte&0x7f) << (7 * group)
 		if lengthByte < 0x80 {
 			break
@@ -329,8 +329,8 @@ func (walker *segmentWalker) playerInfo() {
 	frame := walker.codeSymbolResidual(streamPlayerFrame, frameContext, player.frame)
 
 	coordSize := walker.protocol.coordSize()
-	originCount := uint32(bits.OnesCount16(flags & 0x7))
-	angleCount := uint32(bits.OnesCount16(flags & 0x38))
+	originCount := uint32(bits.OnesCount16(flags & originFlags))
+	angleCount := uint32(bits.OnesCount16(flags & angleFlags))
 	offset := walker.reserve(originCount*coordSize + angleCount*2)
 	walker.records.playerInfos = append(walker.records.playerInfos, playerInfoRecord{
 		offset:         offset,
@@ -597,7 +597,7 @@ func (walker *segmentWalker) hiddenPayload() {
 			walker.fail("hidden block tag")
 			return
 		}
-		length := walker.codeBlobBytes(streamHiddenLen, 4)
+		length := walker.codeBlobBytes(streamHiddenLength, 4)
 		blockType := walker.codeBlobBytes(streamHiddenType, 2)
 		switch {
 		case blockType == hiddenDamageDone && length == 8:
@@ -718,8 +718,8 @@ func (walker *segmentWalker) peek32(offset uint32) uint32 {
 	return value
 }
 
-// Walker primitives, FORMAT.md section 4. The comments give the names used
-// there. The streams are the only part that depends on the direction.
+// Walker primitives, FORMAT.md section 4. The streams are the only part that
+// depends on the direction.
 
 func (walker *segmentWalker) fail(rule string) {
 	if walker.err == nil {
@@ -727,7 +727,7 @@ func (walker *segmentWalker) fail(rule string) {
 	}
 }
 
-// sym: sourceSymbol is the symbol an encoder codes.
+// sourceSymbol is the symbol an encoder codes.
 func (walker *segmentWalker) symbol(stream int, context uint16, sourceSymbol uint8) uint8 {
 	if walker.err != nil {
 		return 255
@@ -757,21 +757,19 @@ func (walker *segmentWalker) write16(value uint16) {
 	walker.write(uint8(value >> 8))
 }
 
-// b8
 func (walker *segmentWalker) codeSymbol(stream int, context uint16) uint8 {
 	value := walker.symbol(stream, context, walker.peek(0))
 	walker.write(value)
 	return value
 }
 
-// r8
 func (walker *segmentWalker) codeSymbolResidual(stream int, context uint16, prediction uint8) uint8 {
 	value := walker.symbol(stream, context, walker.peek(0)-prediction) + prediction
 	walker.write(value)
 	return value
 }
 
-// take: sourceByte is the byte an encoder puts.
+// sourceByte is the byte an encoder puts.
 func (walker *segmentWalker) blobByte(stream int, sourceByte uint8) uint8 {
 	if walker.err != nil {
 		return 0
@@ -784,21 +782,19 @@ func (walker *segmentWalker) blobByte(stream int, sourceByte uint8) uint8 {
 	return value[0]
 }
 
-// p8
 func (walker *segmentWalker) codeBlobByte(stream int) uint8 {
 	value := walker.blobByte(stream, walker.peek(0))
 	walker.write(value)
 	return value
 }
 
-// pr8
 func (walker *segmentWalker) codeBlobResidual(stream int, prediction uint8) uint8 {
 	value := walker.blobByte(stream, walker.peek(0)-prediction) + prediction
 	walker.write(value)
 	return value
 }
 
-// pn: returns the little-endian value of the bytes.
+// codeBlobBytes returns the little-endian value of the bytes.
 func (walker *segmentWalker) codeBlobBytes(stream int, count int) uint32 {
 	var value uint32
 	for index := range count {
@@ -807,7 +803,6 @@ func (walker *segmentWalker) codeBlobBytes(stream int, count int) uint32 {
 	return value
 }
 
-// blob
 func (walker *segmentWalker) copyBlob(stream int, count uint32) {
 	if walker.err != nil {
 		return
@@ -837,8 +832,8 @@ func (walker *segmentWalker) reserve(count uint32) uint32 {
 	return offset
 }
 
-// generic: the body is sized from the bytes that hold it, the blob stream's
-// when decoding and the payload's when encoding.
+// copyCommandBody sizes the body from the bytes that hold it, the blob
+// stream's when decoding and the payload's when encoding.
 func (walker *segmentWalker) copyCommandBody(stream int, command uint8) {
 	if walker.err != nil {
 		return

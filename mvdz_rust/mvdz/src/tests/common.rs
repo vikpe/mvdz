@@ -20,7 +20,7 @@ pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<Vec<u8>> {
 /// Every segment all tail: the encoder's fallback layout.
 pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
     use crate::segment::{ModelBuilder, cut_points, models_body, numerics, walk_tail};
-    let protocol = crate::protocol::Protocol::default();
+    let protocol = crate::protocol::ProtocolState::default();
     let walked_segments: Vec<_> = cut_points(src)
         .windows(2)
         .map(|cut| {
@@ -71,7 +71,7 @@ pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 /// Every segment stored: the encoder's last fallback, a file without models.
 pub(crate) fn all_stored(src: &[u8]) -> Vec<u8> {
-    let protocol = crate::protocol::Protocol::default();
+    let protocol = crate::protocol::ProtocolState::default();
     let segments = crate::segment::cut_points(src)
         .windows(2)
         .map(|cut| {

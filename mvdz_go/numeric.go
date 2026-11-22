@@ -86,7 +86,7 @@ func (groups *numericGroups) playerAngles(records []playerInfoRecord, axis int) 
 			if record.hasFloatCoords {
 				originSize = 4
 			}
-			originCount := uint32(bits.OnesCount16(record.flags & 0x7))
+			originCount := uint32(bits.OnesCount16(record.flags & originFlags))
 			earlierAngles := uint32(bits.OnesCount16((record.flags >> 3) & (1<<axis - 1)))
 			offset := record.offset + originSize*originCount + 2*earlierAngles
 			previousVelocity := int32(int16(track.previous - track.beforePrevious))

@@ -2,10 +2,15 @@
 //! group-local state and codes the residual; one code path for both directions.
 
 use crate::math::{div_round, grid_f32, on_grid, residual_bucket};
-use crate::protocol::{TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3};
-use crate::streams::{LZ_DIST, LZ_LEN, PE_F0, PE_OX, PI_AP, PI_F0, PI_OX, SND_O, TE_O, UC_A};
+use crate::protocol::{
+    DF_ANGLES, DF_ORIGIN, ORIGIN_FLAGS, TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3,
+};
+use crate::streams::{
+    ENTITY_FLOAT_ORIGIN, ENTITY_ORIGIN, LZ_DISTANCE, LZ_LENGTH, PLAYER_ANGLE, PLAYER_FLOAT_ORIGIN,
+    PLAYER_ORIGIN, SOUND_ORIGIN, TEMP_ENTITY_ORIGIN, USERCMD_ANGLE,
+};
 use crate::walker::{
-    NO_OFFSET, PE_FLOAT, PE_IN_PREVIOUS, PacketEntityRecord, PlayerInfoRecord, Records,
+    NO_OFFSET, PE_FLOAT, PE_IN_PREVIOUS, PacketEntityRecord, PlayerInfoRecord, RecordLists,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,19 +35,19 @@ pub(crate) fn numeric_context(stream: usize, context: &NumericContext) -> u32 {
     let features = &context.features;
     let clamped = |value: u8, max: u8| u32::from(value.min(max));
     match stream {
-        PI_OX..PI_AP => clamped(features[0], 19) | clamped(features[1], 19) << 5,
-        PI_AP..PE_OX => clamped(features[0], 23) | clamped(features[1], 23) << 5,
-        PE_OX..SND_O => {
+        PLAYER_ORIGIN..PLAYER_ANGLE => clamped(features[0], 19) | clamped(features[1], 19) << 5,
+        PLAYER_ANGLE..ENTITY_ORIGIN => clamped(features[0], 23) | clamped(features[1], 23) << 5,
+        ENTITY_ORIGIN..SOUND_ORIGIN => {
             clamped(features[0], 17) | clamped(features[1], 17) << 5 | u32::from(features[2]) << 10
         }
-        SND_O | TE_O => u32::from(features[0]) | u32::from(features[1]) << 4,
-        UC_A => {
+        SOUND_ORIGIN | TEMP_ENTITY_ORIGIN => u32::from(features[0]) | u32::from(features[1]) << 4,
+        USERCMD_ANGLE => {
             clamped(features[0], 23)
                 | clamped(features[1], 23) << 5
                 | clamped(features[2], 15) << 10
                 | u32::from(features[3]) << 14
         }
-        LZ_LEN | LZ_DIST => u32::from(features[0]),
+        LZ_LENGTH | LZ_DISTANCE => u32::from(features[0]),
         _ => clamped(features[0], 63) | u32::from(features[1]) << 6,
     }
 }
@@ -162,33 +167,37 @@ pub(crate) const GROUPS: [Group; 12] = [
 impl Group {
     pub(crate) fn streams(self) -> &'static [usize] {
         match self {
-            Self::PlayerOrigin(0) => &[PI_OX, PI_F0],
-            Self::PlayerOrigin(1) => &[PI_OX + 1, PI_F0 + 1],
-            Self::PlayerOrigin(_) => &[PI_OX + 2, PI_F0 + 2],
-            Self::PlayerAngle(0) => &[PI_AP],
-            Self::PlayerAngle(1) => &[PI_AP + 1],
-            Self::PlayerAngle(_) => &[PI_AP + 2],
-            Self::EntityOrigin(0) => &[PE_OX, PE_F0],
-            Self::EntityOrigin(1) => &[PE_OX + 1, PE_F0 + 1],
-            Self::EntityOrigin(_) => &[PE_OX + 2, PE_F0 + 2],
-            Self::UsercmdAngles => &[UC_A],
-            Self::Sound => &[SND_O],
-            Self::TempEntity => &[TE_O],
+            Self::PlayerOrigin(0) => &[PLAYER_ORIGIN, PLAYER_FLOAT_ORIGIN],
+            Self::PlayerOrigin(1) => &[PLAYER_ORIGIN + 1, PLAYER_FLOAT_ORIGIN + 1],
+            Self::PlayerOrigin(_) => &[PLAYER_ORIGIN + 2, PLAYER_FLOAT_ORIGIN + 2],
+            Self::PlayerAngle(0) => &[PLAYER_ANGLE],
+            Self::PlayerAngle(1) => &[PLAYER_ANGLE + 1],
+            Self::PlayerAngle(_) => &[PLAYER_ANGLE + 2],
+            Self::EntityOrigin(0) => &[ENTITY_ORIGIN, ENTITY_FLOAT_ORIGIN],
+            Self::EntityOrigin(1) => &[ENTITY_ORIGIN + 1, ENTITY_FLOAT_ORIGIN + 1],
+            Self::EntityOrigin(_) => &[ENTITY_ORIGIN + 2, ENTITY_FLOAT_ORIGIN + 2],
+            Self::UsercmdAngles => &[USERCMD_ANGLE],
+            Self::Sound => &[SOUND_ORIGIN],
+            Self::TempEntity => &[TEMP_ENTITY_ORIGIN],
         }
     }
 
-    pub(crate) fn run<const IS_ENCODE: bool, IO: NumericIo>(self, records: &Records, io: &mut IO) {
+    pub(crate) fn run<const IS_ENCODE: bool, IO: NumericIo>(
+        self,
+        records: &RecordLists,
+        io: &mut IO,
+    ) {
         match self {
             Self::PlayerOrigin(axis) => player_steps(records, io, |track, record, deltas, io| {
-                pi_origin_step::<IS_ENCODE, IO>(axis as usize, track, record, deltas, io, 0);
+                player_origin_step::<IS_ENCODE, IO>(axis as usize, track, record, deltas, io, 0);
             }),
             Self::PlayerAngle(axis) => player_steps(records, io, |track, record, deltas, io| {
-                pi_angle_step::<IS_ENCODE, IO>(axis as usize, track, record, deltas, io, 0);
+                player_angle_step::<IS_ENCODE, IO>(axis as usize, track, record, deltas, io, 0);
             }),
             Self::EntityOrigin(axis) => {
-                let mut tracks = vec![Track::default(); 2048];
+                let mut tracks = vec![AxisTrack::default(); 2048];
                 for record in &records.packet_entities {
-                    pe_origin_step::<IS_ENCODE, IO>(
+                    entity_origin_step::<IS_ENCODE, IO>(
                         axis as usize,
                         &mut tracks[(record.number & 2047) as usize],
                         record,
@@ -206,7 +215,7 @@ impl Group {
 
 /// One player's or entity's last values on one axis.
 #[derive(Debug, Clone, Copy, Default)]
-struct Track {
+struct AxisTrack {
     last: u16,
     previous: u16,
     before_previous: u16,
@@ -216,7 +225,7 @@ struct Track {
     float_residual_bits: i32,
 }
 
-impl Track {
+impl AxisTrack {
     #[inline(always)]
     fn velocity(&self) -> i32 {
         i32::from(self.last.wrapping_sub(self.previous).cast_signed())
@@ -294,11 +303,11 @@ fn time_deltas(frame_times: &mut (u32, u32), time: u32) -> TimeDeltas {
 
 /// Every player info record, each stepped on its player's track.
 fn player_steps<IO: NumericIo>(
-    records: &Records,
+    records: &RecordLists,
     io: &mut IO,
-    step: impl Fn(&mut Track, &PlayerInfoRecord, TimeDeltas, &mut IO),
+    step: impl Fn(&mut AxisTrack, &PlayerInfoRecord, TimeDeltas, &mut IO),
 ) {
-    let mut tracks = vec![Track::default(); 256];
+    let mut tracks = vec![AxisTrack::default(); 256];
     let mut frame_times = vec![(0u32, 0u32); 256];
     for record in &records.player_infos {
         let deltas = time_deltas(&mut frame_times[record.number as usize], record.time);
@@ -307,15 +316,15 @@ fn player_steps<IO: NumericIo>(
 }
 
 #[inline(always)]
-fn pi_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
+fn player_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     axis: usize,
-    track: &mut Track,
+    track: &mut AxisTrack,
     record: &PlayerInfoRecord,
     time_deltas: TimeDeltas,
     io: &mut IO,
     stream_index: usize,
 ) {
-    let is_sent = record.flags & (1 << axis) != 0;
+    let is_sent = record.flags & (DF_ORIGIN << axis) != 0;
     if record.has_float_coords {
         if is_sent {
             let offset = record.offset + 4 * (record.flags & ((1 << axis) - 1)).count_ones();
@@ -349,19 +358,19 @@ fn pi_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
 }
 
 #[inline(always)]
-fn pi_angle_step<const IS_ENCODE: bool, IO: NumericIo>(
+fn player_angle_step<const IS_ENCODE: bool, IO: NumericIo>(
     axis: usize,
-    track: &mut Track,
+    track: &mut AxisTrack,
     record: &PlayerInfoRecord,
     time_deltas: TimeDeltas,
     io: &mut IO,
     stream_index: usize,
 ) {
-    let value = if record.flags & (8 << axis) != 0 {
+    let value = if record.flags & (DF_ANGLES << axis) != 0 {
         let prediction = track.predict_time_scaled(time_deltas);
         let coord_width = if record.has_float_coords { 4 } else { 2 };
         let offset = record.offset
-            + coord_width * (record.flags & 7).count_ones()
+            + coord_width * (record.flags & ORIGIN_FLAGS).count_ones()
             + 2 * ((record.flags >> 3) & ((1 << axis) - 1)).count_ones();
         let context = NumericContext {
             features: [
@@ -383,9 +392,9 @@ fn pi_angle_step<const IS_ENCODE: bool, IO: NumericIo>(
 }
 
 #[inline(always)]
-fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
+fn entity_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     axis: usize,
-    track: &mut Track,
+    track: &mut AxisTrack,
     record: &PacketEntityRecord,
     io: &mut IO,
     stream_index: usize,
@@ -421,8 +430,8 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
 }
 
 /// FORMAT.md section 5.6: per player and axis, linear prediction from the last two grid values.
-fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
-    let mut tracks = vec![[Track::default(); 3]; 256];
+fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &RecordLists, io: &mut IO) {
+    let mut tracks = vec![[AxisTrack::default(); 3]; 256];
     for record in &records.usercmds {
         let player_tracks = &mut tracks[record.number as usize];
         for (axis, track) in player_tracks.iter_mut().enumerate() {
@@ -461,7 +470,7 @@ fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &
 }
 
 #[inline(always)]
-fn read_reference(bytes: &[u8], reference: u32) -> u16 {
+fn referenced(bytes: &[u8], reference: u32) -> u16 {
     if reference == NO_OFFSET {
         0
     } else {
@@ -469,10 +478,10 @@ fn read_reference(bytes: &[u8], reference: u32) -> u16 {
     }
 }
 
-fn sound_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
+fn sound_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &RecordLists, io: &mut IO) {
     for record in &records.sounds {
         for axis in 0..3u32 {
-            let prediction = read_reference(io.segment(), record.refs[axis as usize]);
+            let prediction = referenced(io.segment(), record.references[axis as usize]);
             let context = NumericContext {
                 features: [axis as u8 | record.kind << 2, record.number, 0, 0],
             };
@@ -481,7 +490,7 @@ fn sound_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &m
     }
 }
 
-fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
+fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &RecordLists, io: &mut IO) {
     let mut last = [0u16; 3];
     for record in &records.temp_entities {
         if matches!(
@@ -490,7 +499,7 @@ fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, 
         ) {
             let mut start = [0u16; 3];
             for axis in 0..3u32 {
-                let prediction = read_reference(io.segment(), record.refs[axis as usize]);
+                let prediction = referenced(io.segment(), record.references[axis as usize]);
                 let context = NumericContext {
                     features: [axis as u8 | 1 << 2, record.kind, 0, 0],
                 };

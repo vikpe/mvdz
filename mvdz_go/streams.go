@@ -1,70 +1,70 @@
 package mvdz
 
-// Stream ids, FORMAT.md section 3.2. The comments give the names used there.
+// Stream ids, FORMAT.md section 3.2: the names there with a stream prefix.
 const (
 	// Structural streams: rANS symbols, decoded by the walker.
-	streamTime              = 0  // time
-	streamType              = 1  // type
-	streamCommand           = 2  // cmd
-	streamPlayerFlags       = 3  // pi.flags
-	streamPlayerFrame       = 4  // pi.frame
-	streamPlayerWeaponFrame = 5  // pi.wframe
-	streamEntityGap         = 6  // pe.ent
-	streamEntityBits        = 7  // pe.bits
-	streamEntityMore        = 8  // pe.more
-	streamEntityAngle       = 9  // pe.a
-	streamStatIndex         = 10 // st.idx
-	streamStatValue         = 11 // st.val
-	streamSoundChannel      = 12 // snd.ch
-	streamSoundNumber       = 13 // snd.num
-	streamTempEntityType    = 14 // te.type
-	streamUsercmd           = 15 // uc
-	streamLzLit             = 16 // lz.lit: literal bytes of the blob tokens
+	streamTime              = 0
+	streamType              = 1
+	streamCommand           = 2
+	streamPlayerFlags       = 3
+	streamPlayerFrame       = 4
+	streamPlayerWeaponFrame = 5
+	streamEntityGap         = 6
+	streamEntityBits        = 7
+	streamEntityMore        = 8
+	streamEntityAngle       = 9
+	streamStatIndex         = 10
+	streamStatValue         = 11
+	streamSoundChannel      = 12
+	streamSoundNumber       = 13
+	streamTempEntityType    = 14
+	streamUsercmd           = 15
+	streamLzLiteral         = 16 // literal bytes of the blob tokens
 
 	// Numeric streams: rANS values, decoded by the numeric groups and the blob tokens.
 	// Origins and angles have one stream per axis: the id below plus the axis.
-	streamPlayerOrigin      = 17 // pi.ox, pi.oy, pi.oz
-	streamPlayerAngle       = 20 // pi.ap, pi.ay, pi.ar
-	streamEntityOrigin      = 23 // pe.ox, pe.oy, pe.oz
-	streamSoundOrigin       = 26 // snd.o
-	streamTempEntityOrigin  = 27 // te.o
-	streamPlayerFloatOrigin = 28 // pi.fx, pi.fy, pi.fz
-	streamEntityFloatOrigin = 31 // pe.fx, pe.fy, pe.fz
-	streamUsercmdAngle      = 34 // uc.a
-	streamLzLen             = 35 // lz.len: match lengths of the blob tokens, 0 for a literal
-	streamLzDist            = 36 // lz.dist: match distances of the blob tokens
+	streamPlayerOrigin      = 17
+	streamPlayerAngle       = 20
+	streamEntityOrigin      = 23
+	streamSoundOrigin       = 26
+	streamTempEntityOrigin  = 27
+	streamPlayerFloatOrigin = 28
+	streamEntityFloatOrigin = 31
+	streamUsercmdAngle      = 34
+	streamLzLength          = 35 // match lengths of the blob tokens, 0 for a literal
+	streamLzDistance        = 36 // match distances of the blob tokens
 
 	// Blob streams: plain bytes from the blob tokens, consumed by the walker.
-	streamMask            = 37 // mask
-	streamEscapeLen       = 38 // esclen
-	streamHiddenTag       = 39 // hid.tag
-	streamHiddenLen       = 40 // hid.len
-	streamHiddenType      = 41 // hid.type
-	streamHiddenDamage    = 42 // hid.dmg
-	streamPlayerNumber    = 43 // pi.num
-	streamPlayerModel     = 44 // pi.model
-	streamPlayerSkin      = 45 // pi.skin
-	streamPlayerEffects   = 46 // pi.eff
-	streamEntityHeader    = 47 // pe.hdr
-	streamEntityModel     = 48 // pe.model
-	streamEntityFrame     = 49 // pe.frame
-	streamEntityMisc      = 50 // pe.misc
-	streamStatLongIndex   = 51 // stl.idx
-	streamSoundMisc       = 52 // snd.misc
-	streamTempEntityMisc  = 53 // te.misc
-	streamPrintLevel      = 54 // pr.level
-	streamFrags           = 55 // frags
-	streamStatLongValue   = 56 // stl.val
-	streamRaw             = 57 // raw
-	streamTail            = 58 // tail
-	streamSet             = 59 // set
-	streamText            = 60 // text
-	streamPing            = 61 // ping
-	streamNails           = 62 // nails
-	streamHiddenMisc      = 63 // hid.misc
-	streamSoundFloat      = 64 // snd.f
-	streamTempEntityFloat = 65 // te.f
-	streamGeneric         = 66 // gen.c: the id is 66 plus the command byte
+	streamMask            = 37
+	streamEscapeLength    = 38
+	streamHiddenTag       = 39
+	streamHiddenLength    = 40
+	streamHiddenType      = 41
+	streamHiddenDamage    = 42
+	streamPlayerNumber    = 43
+	streamPlayerModel     = 44
+	streamPlayerSkin      = 45
+	streamPlayerEffects   = 46
+	streamEntityHeader    = 47
+	streamEntityModel     = 48
+	streamEntityFrame     = 49
+	streamEntityMisc      = 50
+	streamStatLongIndex   = 51
+	streamSoundMisc       = 52
+	streamTempEntityMisc  = 53
+	streamPrintLevel      = 54
+	streamFrags           = 55
+	streamStatLongValue   = 56
+	streamRaw             = 57
+	streamTail            = 58
+	streamSet             = 59
+	streamText            = 60
+	streamPing            = 61
+	streamNails           = 62
+	streamHiddenMisc      = 63
+	streamSoundFloat      = 64
+	streamTempEntityFloat = 65
+	streamGeneric         = 66 // the id is 66 plus the command byte
 
 	firstNumericStream = 17
 	firstBlobStream    = 37

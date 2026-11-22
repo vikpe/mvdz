@@ -14,7 +14,7 @@ fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Three `PE_ENT` symbols per two-byte entity word: a stream with more symbols than its
+/// Three `ENTITY_GAP` symbols per two-byte entity word: a stream with more symbols than its
 /// segment has bytes.
 #[test]
 fn a_stream_with_more_symbols_than_bytes_round_trips() -> anyhow::Result<()> {
@@ -125,15 +125,15 @@ fn unused_model_is_ignored() -> anyhow::Result<()> {
     let mut file_parts = parts(&file)?;
     let mut models = models_parts(&file_parts.models)?;
     anyhow::ensure!(
-        (models.entries.iter()).all(|entry| entry.stream != crate::streams::UC),
+        (models.entries.iter()).all(|entry| entry.stream != crate::streams::USERCMD),
         "the demo has no usercmd blocks"
     );
     let structural = (models.entries.iter())
-        .find(|entry| crate::streams::is_lazy(entry.stream))
+        .find(|entry| crate::streams::is_structural(entry.stream))
         .context("a structural stream's model")?
         .clone();
     models.entries.push(ModelEntry {
-        stream: crate::streams::UC,
+        stream: crate::streams::USERCMD,
         ..structural
     });
     models.entries.sort_by_key(|entry| entry.stream);

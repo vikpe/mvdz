@@ -74,6 +74,8 @@ const (
 	dfGib         = 1 << 9
 	dfWeaponFrame = 1 << 10
 	dfModel       = 1 << 11
+	originFlags   = dfOrigin | dfOrigin<<1 | dfOrigin<<2
+	angleFlags    = dfAngles | dfAngles<<1 | dfAngles<<2
 
 	// Bits of the entity word and its U_MORE_BITS byte.
 	uAngle1      = 1 << 0
@@ -261,8 +263,8 @@ func (protocol protocolState) commandBodySize(command uint8, body []byte) (uint3
 		fields.skip(1)
 		flags := fields.u16()
 		fields.skip(1)
-		originCount := uint32(bits.OnesCount16(flags & 0x7))
-		angleCount := uint32(bits.OnesCount16(flags & 0x38))
+		originCount := uint32(bits.OnesCount16(flags & originFlags))
+		angleCount := uint32(bits.OnesCount16(flags & angleFlags))
 		fields.skip(originCount*coord + angleCount*2)
 		fields.skip(uint32(bits.OnesCount16(flags & (dfModel | dfSkinNum | dfEffects | dfWeaponFrame))))
 	case svcNails:

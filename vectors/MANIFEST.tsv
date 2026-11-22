@@ -6,9 +6,9 @@ float-mvd1.normal.mvdz	987a33fe15b8a28516d14d408bb65e93c2560929d6324187be4a13aea
 float-fte.normal.mvdz	cc65ac2978f18dbaff61c0908a1ae6e9602fb928e7ac9a14874cd61298da7bc1	300000	the first 300000 bytes of stratified demo 03fc8ec2 (FTE float coordinates)
 escapes.normal.mvdz	d5b2a33c09feada00cfc69abdb0a3177f0fece11f22a4fcfbc993bb549453469	7128	synthetic demo with unknown commands and lying hidden blocks
 demoinfo-multi.normal.mvdz	4ef933ba44606f6528fa631849ed9bc26f6ea1957457ed25ac4bf1e3a5c1413d	1057792	synthetic demo carrying a 3-block KTX demoinfo twice, repeated to several segments
-random.normal.mvdz	2d2506480b05f18be895b70c6faeb3b52ad41b68438da3aa23da98961a145f89	3000	3000 random bytes (no frame: all tail)
-framed-as-tail.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	synthetic demo with demoinfo, written as all tail (the encoder's fallback layout)
-framed-as-stored.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	the same demo, written as a stored segment (the encoder's last fallback)
+random.normal.mvdz	2d2506480b05f18be895b70c6faeb3b52ad41b68438da3aa23da98961a145f89	3000	3000 random bytes (no frame: all tail), written by the unchecked entry point: rule 1 refuses them
+framed-as-tail.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	synthetic demo with demoinfo, forced to all tail (the encoder's fallback layout), models counted from the tail tokens only
+framed-as-stored.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	the same demo, forced to a stored segment (the encoder's last fallback), no models
 empty.normal.mvdz	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0	an empty demo
 usercmd.normal.mvdz	85598f84014a7db074614dc585a421db11e52ea0e2ff21aba59f80ee9f447cd3	29377	synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)
 usercmd.normal.segments.mvdz	b63058bd186b2d3732942c390e17c32b1c68731c08f8ff13fc22beb7a83a495b	1057572	the same, repeated to several segments
@@ -26,7 +26,7 @@ hostile-segment-length.mvdz	error: corrupt: segment size	-	the first segment pad
 hostile-models-size.mvdz	error: corrupt: models too large	-	a models block of 256 MiB declared in a few bytes
 hostile-models-missing.mvdz	error: corrupt: tables	-	the base file without its models block
 hostile-ucmd-grid.mvdz	error: corrupt: structure	-	a usercmd block whose grid flags symbol is 9
-hostile-ucmd-misc.mvdz	error: corrupt: structure	-	a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream
+hostile-ucmd-misc.mvdz	error: corrupt: structure	-	a usercmd block (type 1, 23 bytes) stored in HIDDEN_MISC, no USERCMD stream
 hostile-lz-distance.mvdz	error: corrupt: blob tokens	-	a match reaching 2 bytes back after 1 byte
 hostile-lz-overrun.mvdz	error: corrupt: blob tokens	-	a match of 9 bytes where 3 are left
 hostile-lz-short.mvdz	error: corrupt: blob tokens	-	tokens for 2 of the 4 blob bytes

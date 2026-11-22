@@ -8,7 +8,7 @@ use crate::format::{
 };
 use crate::parallel::{HAS_THREADS, par_map, thread_count};
 use crate::protocol::{
-    DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, Protocol, frame_len,
+    DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, ProtocolState, frame_len,
 };
 use crate::rans::FileModel;
 use crate::segment::{self, Numerics, Walked, cut_points};
@@ -58,7 +58,7 @@ pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
     if first_len <= head {
         return false;
     }
-    if segment::walk(&bytes[..first_len], Protocol::default())
+    if segment::walk(&bytes[..first_len], ProtocolState::default())
         .is_some_and(|(walked, _)| walked.unstructured_len() == 0)
     {
         return true;
@@ -86,21 +86,21 @@ struct FirstPass<'a> {
 #[derive(Debug)]
 struct SegmentPlan<'a> {
     raw: &'a [u8],
-    start_protocol: Protocol,
+    start_protocol: ProtocolState,
     is_walkable: bool,
 }
 
 /// A pass 1 walk of one segment.
 struct Counted {
-    start_protocol: Protocol,
-    end_protocol: Protocol,
+    start_protocol: ProtocolState,
+    end_protocol: ProtocolState,
     is_walkable: bool,
     /// All tail when the segment does not walk.
     walked: Walked,
     numerics: Numerics,
 }
 
-fn count_segment(raw: &[u8], start_protocol: Protocol) -> Counted {
+fn count_segment(raw: &[u8], start_protocol: ProtocolState) -> Counted {
     let (walked, end_protocol, is_walkable) = match segment::walk(raw, start_protocol) {
         Some((walked, end_protocol)) => (walked, end_protocol, true),
         None => (
@@ -123,7 +123,7 @@ fn count_segment(raw: &[u8], start_protocol: Protocol) -> Counted {
 /// the end protocol of the batch before, and the few that start in another protocol walked again.
 fn run_first_pass<'a>(segments: &[&'a [u8]], threads: usize) -> FirstPass<'a> {
     let mut model_builder = segment::ModelBuilder::default();
-    let mut protocol = Protocol::default();
+    let mut protocol = ProtocolState::default();
     let mut plans = Vec::with_capacity(segments.len());
     let mut first = 0;
     while first < segments.len() {
@@ -308,7 +308,7 @@ mod tests {
             file_models: Vec::new(),
             segments: vec![SegmentPlan {
                 raw: demo,
-                start_protocol: Protocol::default(),
+                start_protocol: ProtocolState::default(),
                 is_walkable: false,
             }],
         };

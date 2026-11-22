@@ -85,15 +85,15 @@ are in [BENCHMARKS.md](BENCHMARKS.md).
 
 | format | size / raw | decode, 1 process |
 |---|---|---|
-| mvdz, `-j 1` | 0.193 [0.190-0.197] | 81 MB/s |
-| mvdz, `-j 4` | 0.193 | 211 MB/s |
+| mvdz, `-j 1` | 0.194 [0.191-0.197] | 81 MB/s |
+| mvdz, `-j 4` | 0.194 | 211 MB/s |
 | gzip -9 | 0.566 | 144 MB/s |
 | xz -9e | 0.429 | 38 MB/s |
 | zstd -19 | 0.508 | 406 MB/s |
 
 The decode speeds of the last three rows are for `gzip -9`, `xz -9` and
 `zstd -19` files of the 8 demos. The archive's own gzip files are 0.593 of
-raw; the whole archive would take about 23.5 GB as mvdz.
+raw; the whole archive would take about 23.6 GB as mvdz.
 
 MB = 10^6 bytes of raw demo. Recent demos compress better: about 0.18 for
 2023-24 and 0.16 for 2025-26, against 0.24 to 0.26 before 2021. Current
@@ -229,7 +229,7 @@ directory, one file at a time at 4 threads and at 1, with criterion
 
 **Why not just compress the `.mvd` with zstd or xz?** On the same
 stratified sample, `zstd -19` gives 0.508 of raw and `xz -9e` 0.429,
-against 0.193 for mvdz: mvdz files are about 2.6 times smaller than
+against 0.194 for mvdz: mvdz files are about 2.6 times smaller than
 zstd -19 and 2.2 times smaller than xz -9e ([BENCHMARKS.md](BENCHMARKS.md)).
 A general-purpose compressor sees bytes; mvdz parses the demo, puts each
 field in its own stream and codes positions and angles as residuals

@@ -89,7 +89,7 @@ fn multi_demoinfo() -> Vec<u8> {
 /// Returns (models block body, transform body). The structural streams are coded under
 /// context 0; the blob bytes go through the tokens as the encoder's do.
 fn transform_body(
-    lazy: &[(usize, &[u8])],
+    structural: &[(usize, &[u8])],
     blobs: &[(usize, &[u8])],
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let blob_bytes: Vec<u8> = (blobs.iter())
@@ -98,18 +98,18 @@ fn transform_body(
     let blob_counts: Vec<(usize, usize)> =
         (blobs.iter()).map(|&(id, blob)| (id, blob.len())).collect();
     let tokens = crate::lz::tokens(&blob_bytes);
-    token_body(lazy, &blob_counts, &tokens, 0)
+    token_body(structural, &blob_counts, &tokens, 0)
 }
 
 /// As [`transform_body`], with the blob streams' counts and their tokens given.
 fn token_body(
-    lazy: &[(usize, &[u8])],
+    structural: &[(usize, &[u8])],
     blob_counts: &[(usize, usize)],
     tokens: &crate::lz::Tokens,
     tail: usize,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     use crate::rans;
-    use crate::streams::{LZ_DIST, LZ_LEN, LZ_LIT};
+    use crate::streams::{LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL};
     fn file_model(alphabet: usize, symbols: &[u8], contexts: &[u16]) -> rans::FileModel {
         let mut tally = rans::Tally::new(alphabet);
         tally.add(symbols, contexts);
@@ -118,21 +118,21 @@ fn token_body(
     const UNCODABLE: &str = "every symbol has a code";
     // (id, count, model, body)
     let mut coded: Vec<(usize, usize, rans::FileModel, Vec<u8>)> = Vec::new();
-    let structural = (lazy.iter())
+    let structural_with_literals = (structural.iter())
         .map(|&(id, symbols)| (id, symbols, vec![0u16; symbols.len()]))
         .chain([(
-            LZ_LIT,
+            LZ_LITERAL,
             &tokens.literals[..],
             tokens.literal_contexts.clone(),
         )]);
-    for (id, symbols, contexts) in structural {
+    for (id, symbols, contexts) in structural_with_literals {
         if !symbols.is_empty() {
             let model = file_model(256, symbols, &contexts);
             let body = rans::encode_bytes(symbols, &contexts, &model).context(UNCODABLE)?;
             coded.push((id, symbols.len(), model, body));
         }
     }
-    for (id, numeric) in [(LZ_LEN, &tokens.lens), (LZ_DIST, &tokens.dists)] {
+    for (id, numeric) in [(LZ_LENGTH, &tokens.lens), (LZ_DISTANCE, &tokens.dists)] {
         if !numeric.symbols.is_empty() {
             let model = file_model(rans::NUMERIC_ALPHABET, &numeric.symbols, &numeric.contexts);
             let body = rans::encode_num(numeric, &model).context(UNCODABLE)?;
@@ -284,20 +284,20 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     let one = one.0;
     let usercmd_segment = |usercmd: Option<&[u8]>, misc: Option<&[u8]>| {
         use crate::streams::*;
-        let mut lazy: Vec<(usize, &[u8])> = vec![(TIME, &[0]), (TYPE, &[3])];
+        let mut structural: Vec<(usize, &[u8])> = vec![(TIME, &[0]), (TYPE, &[3])];
         if let Some(usercmd) = usercmd {
-            lazy.push((UC, usercmd));
+            structural.push((USERCMD, usercmd));
         }
         let mut blobs: Vec<(usize, &[u8])> = vec![
             (MASK, &[0; 4]),
-            (HIDTAG, &[1, 2]),
-            (HIDLEN, &[23, 0, 0, 0]),
-            (HIDTYPE, &[1, 0]),
+            (HIDDEN_TAG, &[1, 2]),
+            (HIDDEN_LENGTH, &[23, 0, 0, 0]),
+            (HIDDEN_TYPE, &[1, 0]),
         ];
         if let Some(misc) = misc {
-            blobs.push((HIDMISC, misc));
+            blobs.push((HIDDEN_MISC, misc));
         }
-        one_segment(&one, &transform_body(&lazy, &blobs)?)
+        one_segment(&one, &transform_body(&structural, &blobs)?)
     };
     add(
         "ucmd-grid",
@@ -308,7 +308,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     add(
         "ucmd-misc",
         usercmd_segment(None, Some(&misc))?,
-        "a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream",
+        "a usercmd block (type 1, 23 bytes) stored in HIDDEN_MISC, no USERCMD stream",
     );
     blob_tokens(&mut add)?;
     models_block(&mut add)
@@ -407,9 +407,9 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         with_entries(&edited),
         "an entry of the models block repeated (the same stream id twice)",
     );
-    let lazy_entry = entries
+    let structural_entry = entries
         .iter()
-        .find(|entry| crate::streams::is_lazy(entry.stream))
+        .find(|entry| crate::streams::is_structural(entry.stream))
         .context("a structural stream's model")?;
     let numeric_at = entries
         .iter()
@@ -417,7 +417,7 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         .context("a numeric stream's model")?;
     let as_stream = |stream: usize| ModelEntry {
         stream,
-        ..lazy_entry.clone()
+        ..structural_entry.clone()
     };
     let mut edited = entries.clone();
     edited.push(as_stream(crate::streams::TEXT));
@@ -625,20 +625,20 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         "random.normal.mvdz",
         encode(&random)?,
         &random,
-        "3000 random bytes (no frame: all tail)",
+        "3000 random bytes (no frame: all tail), written by the unchecked entry point: rule 1 refuses them",
     );
     let framed = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     add(
         "framed-as-tail.mvdz",
         all_tail(&framed)?,
         &framed,
-        "synthetic demo with demoinfo, written as all tail (the encoder's fallback layout)",
+        "synthetic demo with demoinfo, forced to all tail (the encoder's fallback layout), models counted from the tail tokens only",
     );
     add(
         "framed-as-stored.mvdz",
         all_stored(&framed),
         &framed,
-        "the same demo, written as a stored segment (the encoder's last fallback)",
+        "the same demo, forced to a stored segment (the encoder's last fallback), no models",
     );
     add("empty.normal.mvdz", encode(b"")?, b"", "an empty demo");
     let usercmd = usercmd_demo();

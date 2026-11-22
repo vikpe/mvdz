@@ -123,7 +123,7 @@ func startsLikeDemo(demo []byte) bool {
 		return false
 	}
 	streams, _, isWalked := collectStreams(demo[:firstLen], protocolState{})
-	hasEscape := !isWalked || len(streams.blobs[streamEscapeLen]) > 0
+	hasEscape := !isWalked || len(streams.blobs[streamEscapeLength]) > 0
 	if !hasEscape {
 		return true
 	}
@@ -213,7 +213,7 @@ func fitModelsBlock(models *fileModels) {
 		}
 		largest := -1
 		for stream, model := range models {
-			isBlobTokenModel := stream == streamLzLit || stream == streamLzLen || stream == streamLzDist
+			isBlobTokenModel := stream == streamLzLiteral || stream == streamLzLength || stream == streamLzDistance
 			if model == nil || isBlobTokenModel {
 				continue
 			}

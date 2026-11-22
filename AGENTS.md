@@ -3,10 +3,11 @@
 You are assisting with **mvdz**, a lossless compressor and file format for QuakeWorld
 MVD demos (`.mvd`, Quake 1). An `.mvdz` file decodes back to the exact original bytes.
 
-The project consists of the format specification (`FORMAT.md`), a Rust workspace
-(`mvdz_rust/`: library `mvdz/`, command-line tool `mvdz_cli/`, fuzz targets `fuzz/`),
-benchmarks (`benchmarks/`, `BENCHMARKS.md`, `scripts/`) and `SIMPLIFY.md` with the
-status and working rules of the ongoing work.
+The project consists of the format specification (`FORMAT.md`) with its test vectors
+(`vectors/`), a Rust workspace (`mvdz_rust/`: library `mvdz/` with fuzz targets in
+`mvdz/fuzz/`, command-line tool `mvdz_cli/`), a Go package (`mvdz_go/`, standard library
+only; `gofmt`, `go vet`, `go test`) and benchmarks (`benchmarks/`, `BENCHMARKS.md`,
+`scripts/`). The Rust and Go encoders write the same bytes.
 
 ## Before working on a task
 

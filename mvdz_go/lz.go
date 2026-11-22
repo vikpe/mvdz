@@ -83,17 +83,17 @@ func lzCode(data []byte, tokens []lzToken, streams *segmentStreams) {
 	previousLen := 0
 	for _, token := range tokens {
 		lengthContext := lzBucketContext(previousLen)
-		streams.collected[streamLzLen] = append(streams.collected[streamLzLen], codedValue{lengthContext, int32(token.length)})
+		streams.collected[streamLzLength] = append(streams.collected[streamLzLength], codedValue{lengthContext, int32(token.length)})
 		if token.length == 0 {
 			previousByte := uint8(0)
 			if position > 0 {
 				previousByte = data[position-1]
 			}
-			streams.collected[streamLzLit] = append(streams.collected[streamLzLit], codedValue{uint16(previousByte), int32(token.literal)})
+			streams.collected[streamLzLiteral] = append(streams.collected[streamLzLiteral], codedValue{uint16(previousByte), int32(token.literal)})
 			position++
 		} else {
 			distanceContext := lzBucketContext(token.length)
-			streams.collected[streamLzDist] = append(streams.collected[streamLzDist], codedValue{distanceContext, int32(token.distance)})
+			streams.collected[streamLzDistance] = append(streams.collected[streamLzDistance], codedValue{distanceContext, int32(token.distance)})
 			position += token.length
 		}
 		previousLen = token.length
@@ -105,7 +105,7 @@ func lzExpand(streams *segmentStreams, blobTotal int) ([]byte, error) {
 	blobBytes := make([]byte, 0, blobTotal)
 	previousLen := 0
 	for len(blobBytes) < blobTotal {
-		codedLen, isDecoded := streams.residual(streamLzLen, lzBucketContext(previousLen), 0)
+		codedLen, isDecoded := streams.residual(streamLzLength, lzBucketContext(previousLen), 0)
 		if !isDecoded || codedLen < 0 {
 			return nil, corrupt("blob tokens")
 		}
@@ -115,13 +115,13 @@ func lzExpand(streams *segmentStreams, blobTotal int) ([]byte, error) {
 			if len(blobBytes) > 0 {
 				previousByte = blobBytes[len(blobBytes)-1]
 			}
-			literal, isDecoded := streams.symbol(streamLzLit, uint16(previousByte), 0)
+			literal, isDecoded := streams.symbol(streamLzLiteral, uint16(previousByte), 0)
 			if !isDecoded {
 				return nil, corrupt("blob tokens")
 			}
 			blobBytes = append(blobBytes, literal)
 		} else {
-			codedDistance, isDecoded := streams.residual(streamLzDist, lzBucketContext(length), 0)
+			codedDistance, isDecoded := streams.residual(streamLzDistance, lzBucketContext(length), 0)
 			distance := int(codedDistance)
 			isInside := isDecoded && distance >= 1 && distance <= len(blobBytes) && length <= blobTotal-len(blobBytes)
 			if !isInside {

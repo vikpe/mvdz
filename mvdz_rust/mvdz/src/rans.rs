@@ -8,7 +8,7 @@ use crate::math::{bucket, log2_fixed, normalize, quantize, quantized_weight};
 use crate::memory::try_with_capacity;
 use crate::numeric::{NumericContext, numeric_context};
 use crate::parallel::par_map;
-use crate::streams::{STREAM_COUNT, is_lazy, is_numeric};
+use crate::streams::{STREAM_COUNT, is_numeric, is_structural};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const SCALE: u32 = 12;
@@ -192,21 +192,13 @@ fn select(tally: &Tally, table_cost: TableCost) -> Counts {
         (tally.alphabet_size, &tally.row_of, &tally.rows, &tally.keys);
     let row =
         |context: u32| &rows[row_of[context as usize] as usize * alphabet_size..][..alphabet_size];
-    // selection order is part of the output: most frequent context first
-    let totals: Vec<u32> = keys
-        .iter()
-        .map(|&context| row(context).iter().sum())
-        .collect();
-    let mut order: Vec<usize> = (0..keys.len()).collect();
-    order.sort_by_key(|&index| (std::cmp::Reverse(totals[index]), keys[index]));
-    let keys: Vec<u32> = order.iter().map(|&index| keys[index]).collect();
     let mut own: Vec<u32> = Vec::new();
     let mut fallback = tally.global.clone();
     // the contexts not taken as own, summed: the fallback of the next pass
     let mut rest = vec![0u32; alphabet_size];
     for pass in 0..2 {
         own.clear();
-        for &context in &keys {
+        for &context in keys {
             let counts = row(context);
             let present = counts.iter().filter(|&&count| count > 0).count() as u64;
             let table_bits = (table_cost.base + table_cost.per_symbol * present) << 16;
@@ -220,9 +212,6 @@ fn select(tally: &Tally, table_cost: TableCost) -> Counts {
             }
         }
         if pass == 0 {
-            if rest.iter().all(|&count| count == 0) {
-                break;
-            }
             fallback = std::mem::replace(&mut rest, vec![0u32; alphabet_size]);
         }
     }
@@ -731,7 +720,7 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
         if entries.last().is_some_and(|previous| stream <= previous.0) {
             return Err(corrupt);
         }
-        let alphabet_size = if is_lazy(stream) {
+        let alphabet_size = if is_structural(stream) {
             256
         } else if is_numeric(stream) {
             NUMERIC_ALPHABET
@@ -1045,7 +1034,7 @@ impl<'a> NumericDecoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streams::PI_OX;
+    use crate::streams::PLAYER_ORIGIN;
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
@@ -1131,14 +1120,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut writer = NumericSymbolWriter::new(PI_OX);
+        let mut writer = NumericSymbolWriter::new(PLAYER_ORIGIN);
         for (context, value) in &values {
             writer.push(*context, *value);
         }
         let num = writer.finish();
         let (file_model, model) = models(&num.symbols, &num.contexts, NUMERIC_ALPHABET)?;
         let body = encode_num(&num, &file_model).context("every symbol has a code")?;
-        let mut decoder = NumericDecoder::new(PI_OX, &body, values.len(), &model)?;
+        let mut decoder = NumericDecoder::new(PLAYER_ORIGIN, &body, values.len(), &model)?;
         for &(context, value) in &values {
             assert_eq!(decoder.get(context), Some(value));
         }
