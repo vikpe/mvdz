@@ -9,7 +9,7 @@ raw demo) without decoding.
 
 It comes as a command-line tool and a Rust library, and builds for
 WebAssembly. The format is specified in [FORMAT.md](FORMAT.md), precisely
-enough to write an independent decoder, and `mvdz_rust/mvdz/tests/vectors/` holds valid
+enough to write an independent decoder, and `vectors/` holds valid
 and hostile test files. The work now is the specification and this Rust
 implementation; implementations in C, Go and other languages follow once
 the format is settled.

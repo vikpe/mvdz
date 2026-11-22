@@ -8,7 +8,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_mvdz");
 
 fn vector(name: &str) -> anyhow::Result<Vec<u8>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../mvdz/tests/vectors")
+        .join("../../vectors")
         .join(name);
     Ok(std::fs::read(path)?)
 }
@@ -64,7 +64,7 @@ fn non_demos_are_refused() -> anyhow::Result<()> {
 
 #[test]
 fn closed_stdout_is_quiet() -> anyhow::Result<()> {
-    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mvdz/tests/vectors");
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vectors");
     let duel = vectors.join("duel.normal.mvdz");
     let dir = temp_dir("pipe")?;
     let raw = dir.join("duel.mvd");

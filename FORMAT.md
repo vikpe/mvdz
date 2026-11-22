@@ -12,7 +12,7 @@ independent decoder, and, with section 8 and Appendix A, an encoder whose
 files the reference accepts. The reference implementation is the Rust
 crate `mvdz_rust/mvdz`; sections cite the code they describe as
 `file.rs:item`, so a porter can cross-check. Test vectors are in
-`mvdz_rust/mvdz/tests/vectors/` (see `MANIFEST.tsv`): every valid vector
+`vectors/` (see `MANIFEST.tsv`): every valid vector
 must decode to its recorded SHA-256 and every hostile vector must be
 refused. The manifest records the reference's error for each hostile
 vector; another decoder must refuse the file and should report the same

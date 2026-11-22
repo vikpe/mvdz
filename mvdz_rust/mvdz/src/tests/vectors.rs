@@ -1,4 +1,4 @@
-//! Cross-implementation golden vectors (`tests/vectors`, `MANIFEST.tsv`).
+//! Cross-implementation golden vectors (`vectors/` at the repo root, `MANIFEST.tsv`).
 //! `MVDZ_WRITE_VECTORS=1` rewrites them instead of checking them.
 
 use super::common::*;
@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
 fn dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vectors")
 }
 
 fn manifest() -> anyhow::Result<Vec<Vec<String>>> {

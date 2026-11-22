@@ -124,7 +124,7 @@ segments: about 2.5 times the demo, 2.1 to 2.7 times less than rc.4.
   `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
 * The test suite (`cargo nextest run --release`, 49 tests) with the set8 demos and the
   FTE float demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
-  `mvdz_rust/mvdz/tests/vectors/` are refused or decoded as `MANIFEST.tsv` records.
+  `vectors/` are refused or decoded as `MANIFEST.tsv` records.
 * Fuzzing (`mvdz_rust/mvdz/fuzz/`: `decode`, `stream_reader`, `compress_rt`,
   `gen_rt`): not yet run on format version 2.
 
