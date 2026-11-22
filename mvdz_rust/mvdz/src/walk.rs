@@ -49,16 +49,13 @@ pub(crate) const PE_WIDE: u16 = 256;
 #[repr(C)]
 pub(crate) struct PacketEntityRecord {
     pub(crate) offset: u32,
-    pub(crate) time: u32,
     pub(crate) number: u16,
     pub(crate) bits: u16,
-    pub(crate) model: u8,
-    pub(crate) update_bits: u8, // U_* bits 9..15 of the entity word
 }
 
 impl PacketEntityRecord {
     #[inline]
-    pub(crate) fn origin_offsets(&self) -> [u32; 3] {
+    pub(crate) fn origin_offsets(self) -> [u32; 3] {
         let coord_width = if self.bits & PE_FLOAT != 0 { 4 } else { 2 };
         let angle_width = if self.bits & PE_WIDE != 0 { 2 } else { 1 };
         let mut offset = self.offset;
@@ -932,11 +929,8 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
         let record = PacketEntityRecord {
             offset: self.offset as u32,
-            time: self.time,
             number: number as u16,
             bits: record_bits,
-            model: state.model,
-            update_bits: (word >> 9) as u8,
         };
         let coord_width = self.proto.coord();
         for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {

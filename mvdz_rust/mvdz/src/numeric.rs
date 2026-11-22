@@ -10,7 +10,7 @@ use crate::walk::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
 pub(crate) struct NumericContext {
-    pub(crate) features: [u8; 6],
+    pub(crate) features: [u8; 4],
 }
 
 pub(crate) trait NumericIo {
@@ -32,9 +32,7 @@ pub(crate) fn numeric_context(stream: usize, context: &NumericContext) -> u32 {
         PI_OX..PI_AP => clamped(features[0], 19) | clamped(features[1], 19) << 5,
         PI_AP..PE_OX => clamped(features[0], 23) | clamped(features[1], 23) << 5,
         PE_OX..SND_O => {
-            clamped(features[0], 17)
-                | clamped(features[1], 17) << 5
-                | u32::from(features[3] & 1) << 10
+            clamped(features[0], 17) | clamped(features[1], 17) << 5 | u32::from(features[2]) << 10
         }
         SND_O | TE_O => u32::from(features[0]) | u32::from(features[1]) << 4,
         UC_A => {
@@ -97,11 +95,6 @@ fn div_round(dividend: i32, divisor: i32) -> i32 {
 
 /// Frame intervals are clamped so the scaled velocity fits 32 bits.
 pub(crate) const TIME_DELTA_MAX: i32 = 32767;
-
-#[inline(always)]
-fn time_delta_feature(time_delta: i32) -> u8 {
-    time_delta.clamp(0, 63).cast_unsigned() as u8
-}
 
 /// 0 outside `bytes`.
 #[inline(always)]
@@ -267,7 +260,6 @@ struct Track {
     float_last_bits: u32,
     float_previous_bits: u32,
     float_residual_bits: i32,
-    last_time: u32,
 }
 
 impl Track {
@@ -319,14 +311,7 @@ impl Track {
             .float_last_bits
             .wrapping_add(self.float_last_bits.wrapping_sub(self.float_previous_bits));
         let context = NumericContext {
-            features: [
-                residual_bucket(self.float_residual_bits),
-                axis as u8,
-                0,
-                0,
-                0,
-                0,
-            ],
+            features: [residual_bucket(self.float_residual_bits), axis as u8, 0, 0],
         };
         let (value, residual) =
             code_u32::<IS_ENCODE, IO>(offset, prediction, io, stream_index, context);
@@ -341,13 +326,6 @@ impl Track {
 struct TimeDeltas {
     now: i32,
     previous: i32,
-}
-
-impl TimeDeltas {
-    #[inline(always)]
-    fn change(self) -> u8 {
-        ((self.now - self.previous).clamp(-3, 3) + 3).cast_unsigned() as u8
-    }
 }
 
 #[inline(always)]
@@ -400,9 +378,7 @@ fn pi_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
                 features: [
                     residual_bucket(track.residual),
                     residual_bucket(track.velocity()),
-                    time_delta_feature(time_deltas.now),
-                    (record.flags & 7) as u8,
-                    time_deltas.change(),
+                    0,
                     0,
                 ],
             };
@@ -437,9 +413,7 @@ fn pi_angle_step<const IS_ENCODE: bool, IO: NumericIo>(
             features: [
                 residual_bucket(track.residual),
                 residual_bucket(track.previous_velocity()),
-                time_delta_feature(time_deltas.now),
-                ((record.flags >> 3) & 7) as u8,
-                time_deltas.change(),
+                0,
                 0,
             ],
         };
@@ -462,8 +436,6 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     io: &mut IO,
     stream_index: usize,
 ) {
-    let time_delta_now = record.time.wrapping_sub(track.last_time).cast_signed();
-    track.last_time = record.time;
     let is_sent = record.bits & (1 << (2 * axis)) != 0;
     if is_sent {
         let offset = record.origin_offsets()[axis];
@@ -477,9 +449,7 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
                 features: [
                     residual_bucket(track.residual),
                     residual_bucket(velocity),
-                    record.model,
-                    in_previous_bit | (record.update_bits & 7) << 1,
-                    time_delta_feature(time_delta_now),
+                    in_previous_bit,
                     0,
                 ],
             };
@@ -514,8 +484,6 @@ fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &
                     residual_bucket(velocity),
                     residual_bucket(track.previous_velocity()),
                     axis as u8,
-                    0,
-                    0,
                 ],
             };
             let value = if IS_ENCODE {
@@ -552,7 +520,7 @@ fn sound_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &m
         for axis in 0..3u32 {
             let prediction = read_reference(io.segment(), record.refs[axis as usize]);
             let context = NumericContext {
-                features: [axis as u8 | record.kind << 2, record.number, 0, 0, 0, 0],
+                features: [axis as u8 | record.kind << 2, record.number, 0, 0],
             };
             code_u16::<IS_ENCODE, IO>(record.offset + 2 * axis, prediction, io, 0, context);
         }
@@ -570,7 +538,7 @@ fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, 
             for axis in 0..3u32 {
                 let prediction = read_reference(io.segment(), record.refs[axis as usize]);
                 let context = NumericContext {
-                    features: [axis as u8 | 1 << 2, record.kind, 0, 0, 0, 0],
+                    features: [axis as u8 | 1 << 2, record.kind, 0, 0],
                 };
                 start[axis as usize] =
                     code_u16::<IS_ENCODE, IO>(record.offset + 2 * axis, prediction, io, 0, context)
@@ -578,7 +546,7 @@ fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, 
             }
             for axis in 0..3u32 {
                 let context = NumericContext {
-                    features: [axis as u8 | 2 << 2, record.kind, 0, 0, 0, 0],
+                    features: [axis as u8 | 2 << 2, record.kind, 0, 0],
                 };
                 last[axis as usize] = code_u16::<IS_ENCODE, IO>(
                     record.offset + 6 + 2 * axis,
@@ -592,7 +560,7 @@ fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, 
         } else {
             for axis in 0..3u32 {
                 let context = NumericContext {
-                    features: [axis as u8, record.kind, 0, 0, 0, 0],
+                    features: [axis as u8, record.kind, 0, 0],
                 };
                 last[axis as usize] = code_u16::<IS_ENCODE, IO>(
                     record.offset + 2 * axis,

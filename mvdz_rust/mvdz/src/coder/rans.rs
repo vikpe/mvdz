@@ -1093,7 +1093,7 @@ mod tests {
             .map(|index| {
                 (
                     NumericContext {
-                        features: [(index % 5).cast_unsigned() as u8, 0, 0, 0, 0, 0],
+                        features: [(index % 5).cast_unsigned() as u8, 0, 0, 0],
                     },
                     (index * 37) % 2001 - 1000,
                 )
