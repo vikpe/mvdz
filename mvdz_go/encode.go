@@ -48,21 +48,16 @@ func encodeAny(demo []byte) ([]byte, error) {
 		protocol = endProtocol
 		_, segmentDurationMs := scanFrames(segment)
 		durationMs += uint64(segmentDurationMs)
-		codedSegments = binary.LittleEndian.AppendUint32(codedSegments, uint32(len(coded)))
-		codedSegments = binary.LittleEndian.AppendUint32(codedSegments, uint32(len(segment)))
-		codedSegments = binary.LittleEndian.AppendUint32(codedSegments, segmentDurationMs)
-		codedSegments = binary.LittleEndian.AppendUint32(codedSegments, crc32.ChecksumIEEE(segment))
-		codedSegments = append(codedSegments, coded...)
+		codedSegments = appendSegment(codedSegments, segment, segmentDurationMs, coded)
 	}
 
-	// FORMAT.md section 2.1
-	file := []byte("MVDZ")
-	file = binary.LittleEndian.AppendUint32(file, formatVersion)
-	file = binary.LittleEndian.AppendUint64(file, uint64(len(demo)))
-	file = binary.LittleEndian.AppendUint64(file, durationMs)
-	file = binary.LittleEndian.AppendUint32(file, crc32.ChecksumIEEE(demo))
-	digest := sha256.Sum256(demo)
-	file = append(file, digest[:]...)
+	header := Header{
+		Size:       uint64(len(demo)),
+		DurationMs: durationMs,
+		Crc32:      crc32.ChecksumIEEE(demo),
+		Sha256:     sha256.Sum256(demo),
+	}
+	file := appendHeader(nil, header)
 	file = appendModelsBlock(file, models, &isModelUsed)
 	file = append(file, codedSegments...)
 
