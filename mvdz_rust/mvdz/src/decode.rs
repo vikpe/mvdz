@@ -216,10 +216,16 @@ impl<R: Read> Decoder<R> {
             decode_segment(layout, body, *header, &mut bytes)?;
             Ok(bytes)
         });
-        for result in decoded {
+        for ((header, _), result) in segments.iter().zip(decoded) {
             match result {
                 Ok(segment) => {
-                    self.demo_crc32.update(&segment);
+                    // checked against the segment's bytes: the demo's CRC-32 follows
+                    // from the segments' without hashing the bytes again
+                    self.demo_crc32
+                        .combine(&crc32fast::Hasher::new_with_initial_len(
+                            header.crc32,
+                            u64::from(header.raw_len),
+                        ));
                     self.ready.push_back(segment);
                 }
                 Err(error) => {

@@ -1466,6 +1466,9 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
 14. **The models are read once per file**, when the layout is read, and the same
     read-only models serve every segment (the reference shares them between threads).
     Their memory counts once against a cap, not per segment.
+15. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
+    CRC-32s and lengths (zlib's `crc32_combine`), as the reference does
+    (`decode.rs:Decoder::decode_batch`). Hashing the output again gives the same value.
 
 ---------------------------------------------------------------------------
 
