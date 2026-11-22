@@ -23,6 +23,10 @@ var compressedVectors = map[string]bool{
 	"empty.normal.mvdz":            false,
 	"usercmd.normal.mvdz":          true,
 	"usercmd.normal.segments.mvdz": true,
+	"commands.normal.mvdz":         true,
+	"protocol-change.normal.mvdz":  true,
+	"oversized-frame.normal.mvdz":  true,
+	"entity-words.normal.mvdz":     true,
 }
 
 func TestEncodeVectors(test *testing.T) {

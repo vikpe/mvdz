@@ -310,8 +310,172 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         usercmd_segment(None, Some(&misc))?,
         "a usercmd block (type 1, 23 bytes) stored in HIDDEN_MISC, no USERCMD stream",
     );
+    let mut edited = file_parts.clone();
+    let mut segment = segment_header_bytes(u32::try_from(MAX_SEGMENT_RAW)?, 0, 0);
+    segment.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
+    edited.header.size_bytes = MAX_SEGMENT_RAW;
+    edited.segments = vec![segment];
+    add(
+        "segment-declared",
+        edited.build(),
+        "a segment declaring 1 MiB of demo in 9 bytes",
+    );
+    add(
+        "header-short",
+        base[..30].to_vec(),
+        "the first 30 bytes of the header",
+    );
+    add("header-tiny", b"MVDZ\x03".to_vec(), "magic and one byte");
+    let mut edited_file = base;
+    edited_file[3] = b'X';
+    add("magic", edited_file, "the magic `MVDX`");
     blob_tokens(&mut add)?;
+    stream_table(&mut add)?;
     models_block(&mut add)
+}
+
+/// The transform header and bodies of a segment (FORMAT.md section 3.1).
+#[derive(Clone)]
+struct StreamTable {
+    /// fte, fte2, mvd1, tail
+    fields: [usize; 4],
+    stream_count: usize,
+    /// (id, count, body length; None for a blob stream)
+    entries: Vec<(usize, usize, Option<usize>)>,
+    bodies: Vec<u8>,
+}
+
+impl StreamTable {
+    fn parse(transform: &[u8]) -> anyhow::Result<Self> {
+        use crate::fields::read_usize;
+        let mut rest = transform;
+        let mut next = || read_usize(&mut rest).context("a transform header field");
+        let fields = [next()?, next()?, next()?, next()?];
+        let stream_count = next()?;
+        let mut entries = Vec::new();
+        for _ in 0..stream_count {
+            let id = next()?;
+            let count = next()?;
+            let len = if crate::streams::is_blob(id) {
+                None
+            } else {
+                Some(next()?)
+            };
+            entries.push((id, count, len));
+        }
+        Ok(Self {
+            fields,
+            stream_count,
+            entries,
+            bodies: rest.to_vec(),
+        })
+    }
+
+    fn build(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for field in self.fields.into_iter().chain([self.stream_count]) {
+            put_usize(&mut out, field);
+        }
+        for &(id, count, len) in &self.entries {
+            put_usize(&mut out, id);
+            put_usize(&mut out, count);
+            if let Some(len) = len {
+                put_usize(&mut out, len);
+            }
+        }
+        out.extend_from_slice(&self.bodies);
+        out
+    }
+}
+
+/// One-segment files whose stream table breaks a rule of FORMAT.md section 3.1.
+fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
+    let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
+    let file_parts = parts(&compress(&demo)?)?;
+    anyhow::ensure!(file_parts.segments.len() == 1, "one segment");
+    let segment = &file_parts.segments[0];
+    let table = StreamTable::parse(&segment[SEGMENT_FIELDS_LEN..])?;
+    let raw_len = demo.len();
+    let with_table = |table: &StreamTable| {
+        let mut edited = file_parts.clone();
+        edited.segments[0] = [&segment[..SEGMENT_FIELDS_LEN], &table.build()].concat();
+        edited.build()
+    };
+    let blob_at: Vec<usize> = (0..table.entries.len())
+        .filter(|&index| table.entries[index].2.is_none())
+        .collect();
+    let last_blob = *blob_at.last().context("a blob stream")?;
+    let mut edited = table.clone();
+    edited.stream_count = 323;
+    add(
+        "table-count",
+        with_table(&edited),
+        "a stream table declaring 323 streams",
+    );
+    let mut edited = table.clone();
+    edited.entries[last_blob].0 = crate::streams::STREAM_COUNT;
+    add(
+        "table-id",
+        with_table(&edited),
+        "a blob stream with id 322, past the last",
+    );
+    let mut edited = table.clone();
+    edited.entries[last_blob].0 = table.entries[blob_at[blob_at.len() - 2]].0;
+    add(
+        "table-dup-id",
+        with_table(&edited),
+        "the last blob stream's id set to the one before it (the same id twice)",
+    );
+    let mut edited = table.clone();
+    edited.entries[0].1 = 2 * raw_len + 17;
+    add(
+        "table-count-limit",
+        with_table(&edited),
+        "the first stream's count one over 2 * raw_len + 16",
+    );
+    let blob_total: usize = blob_at.iter().map(|&index| table.entries[index].1).sum();
+    let mut edited = table.clone();
+    edited.entries[last_blob].1 += 2 * raw_len + 1 - blob_total;
+    add(
+        "table-blob-total",
+        with_table(&edited),
+        "the last blob stream's count raised so the blob counts sum to 2 * raw_len + 1",
+    );
+    let mut edited = table.clone();
+    edited.fields[3] = raw_len + 1;
+    add("table-tail", with_table(&edited), "a tail of raw_len + 1");
+    let mut edited = table.clone();
+    edited.bodies.push(0);
+    add(
+        "table-trailing",
+        with_table(&edited),
+        "one byte after the last stream body",
+    );
+    let mut edited = table.clone();
+    let (first, second) = (blob_at[0], blob_at[1]);
+    edited.entries[first].1 -= 1;
+    edited.entries[second].1 += 1;
+    add(
+        "blob-split",
+        with_table(&edited),
+        "the first two blob streams' counts moved by one byte: the same blob bytes, split differently",
+    );
+    let mut edited = table.clone();
+    edited.entries[0].1 -= 1;
+    add(
+        "stream-short",
+        with_table(&edited),
+        "the first stream's count one lower than the walk needs",
+    );
+    let mut edited = table;
+    let rans_len = u32::from_le_bytes(edited.bodies[..4].try_into()?);
+    edited.bodies[..4].copy_from_slice(&(rans_len + 1).to_le_bytes());
+    add(
+        "rans-odd",
+        with_table(&edited),
+        "the first stream body's rans_len raised by one, to an odd length",
+    );
+    Ok(())
 }
 
 /// Four bytes of tail, with tokens no encoder writes.
@@ -354,6 +518,17 @@ fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> 
         "stored-len",
         stored(&demo[..3])?,
         "a stored segment of 4 bytes holding 3",
+    );
+    let mut body = Vec::new();
+    // fte, fte2, mvd1, tail; no stream
+    for field in [0, 0, 0, demo.len() - 1, 0] {
+        put_usize(&mut body, field);
+    }
+    body.extend_from_slice(demo);
+    add(
+        "stored-tail",
+        one_segment(demo, &(Vec::new(), body))?,
+        "a stored segment whose tail is raw_len - 1",
     );
     Ok(())
 }
@@ -562,6 +737,268 @@ fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every frame type, every command the sizer knows (FORMAT.md section 4.2) and the
+/// playerinfo, packet-entity, sound and temp-entity forms, first without and then with
+/// FTE extensions. The walk escapes nothing.
+fn commands_demo() -> Vec<u8> {
+    const FTE_EXTENSIONS: u32 = 1 << 3 | 1 << 19; // FTE_PEXT_TRANS, FTE_PEXT_COLOR_MOD
+    let coords = |x: i16, y: i16, z: i16| [x, y, z].map(i16::to_le_bytes).concat();
+    let entity_word = |bits: u16, number: u16| (bits | number).to_le_bytes();
+    let server_data = |extensions: &[&[u8]]| {
+        let mut parts: Vec<&[u8]> = extensions.to_vec();
+        let tail = [
+            28u32.to_le_bytes().to_vec(),
+            1u32.to_le_bytes().to_vec(),
+            c_string("qw"),
+            0u32.to_le_bytes().to_vec(),
+            c_string("commands"),
+            vec![0; 40],
+        ];
+        parts.extend(tail.iter().map(Vec::as_slice));
+        message(11, &parts)
+    };
+    let list = |command: u8, names: &[&str]| {
+        let mut parts = vec![vec![0u8]];
+        parts.extend(names.iter().map(|name| c_string(name)));
+        parts.push(vec![0]);
+        parts.push(vec![0]);
+        message(
+            command,
+            &parts.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        )
+    };
+    let mut demo = Demo(Vec::new());
+    demo.frame(
+        0,
+        6,
+        &[
+            server_data(&[]),
+            list(
+                45,
+                &["maps/dm4.bsp", "progs/player.mdl", "progs/rocket.mdl"],
+            ),
+            list(46, &["weapons/r_exp3.wav"]),
+            message(22, &[&[2, 0, 2, 0, 0, 0, 0], &[0; 8]]),
+            message(20, &[&[2, 0, 0, 0], &[0; 9]]),
+            message(29, &[&[0; 6], &[1, 255, 1]]),
+            message(12, &[&[0], &c_string("abcdefg")]),
+            message(32, &[&[4]]),
+            message(40, &[&[0], &7u32.to_le_bytes(), &c_string("\\name\\alice")]),
+            message(51, &[&[0], &c_string("team"), &c_string("red")]),
+            message(52, &[&c_string("maxfps"), &c_string("77")]),
+            message(49, &[&320f32.to_le_bytes()]),
+            message(50, &[&1f32.to_le_bytes()]),
+        ]
+        .concat(),
+    );
+    // DEM_SET, DEM_MULTIPLE with a player mask, DEM_SINGLE, DEM_STATS, DEM_READ
+    demo.0.extend_from_slice(&[0, 2]);
+    demo.0.extend_from_slice(&[1, 0, 0, 0, 2, 0, 0, 0]);
+    let multiple = message(8, &[&[2], &c_string("to players 0 and 2\n")]);
+    demo.0.extend_from_slice(&[0, 3]);
+    demo.0.extend_from_slice(&0b101u32.to_le_bytes());
+    demo.0
+        .extend_from_slice(&(multiple.len() as u32).to_le_bytes());
+    demo.0.extend_from_slice(&multiple);
+    demo.frame(0, 1 << 3 | 4, &message(26, &[&c_string("single\n")]));
+    demo.frame(
+        0,
+        2 << 3 | 5,
+        &[
+            message(3, &[&[6, 100]]),
+            message(38, &[&[7], &200u32.to_le_bytes()]),
+        ]
+        .concat(),
+    );
+    demo.frame(
+        0,
+        1,
+        &[message(1, &[]), message(10, &[&[0, 1, 2, 3]])].concat(),
+    );
+    for frame in 0..60u8 {
+        let step = i16::from(frame);
+        let mut payload = Vec::new();
+        for player in 0..3u8 {
+            let mut flags: u16 = 0b111 | 0b111 << 3; // DF_ORIGIN, DF_ANGLES
+            flags |= [1 << 11, 1 << 7, 1 << 6, 1 << 10][usize::from(frame % 4)];
+            if frame % 17 == 3 {
+                flags |= 1 << 8 | 1 << 9 | 1 << 12 | 1 << 15; // dead, gib, rare bits
+            }
+            let mut fields = vec![player];
+            fields.extend_from_slice(&flags.to_le_bytes());
+            fields.push(frame % 6);
+            fields.extend(coords(step * 8 + i16::from(player) * 100, -step * 3, 24));
+            for angle in [step * 91, step * 7, 0i16] {
+                fields.extend_from_slice(&angle.to_le_bytes());
+            }
+            fields.push(frame);
+            payload.extend(message(42, &[&fields]));
+        }
+        let command = if frame % 2 == 0 { 47 } else { 48 };
+        let mut entities = if command == 48 {
+            vec![frame]
+        } else {
+            Vec::new()
+        };
+        // entity 1: every field; 2: frame only; 300 (a gap over 255): origins; 511: removed
+        let all_bits: u16 = 1 << 15 | 1 << 13 | 1 << 12 | 0b111 << 9;
+        entities.extend_from_slice(&entity_word(all_bits, 1));
+        entities.push(0b11_1111); // U_ANGLE_1, U_ANGLE_3, U_MODEL, U_COLOR_MAP, U_SKIN, U_EFFECTS
+        entities.extend_from_slice(&[2, frame % 8, 1, 2, 3]);
+        for axis in 0..3u8 {
+            entities.extend_from_slice(&(step * i16::from(axis + 1)).to_le_bytes());
+            entities.push(frame.wrapping_mul(axis + 3));
+        }
+        entities.extend_from_slice(&entity_word(1 << 13, 2));
+        entities.push(frame % 3);
+        entities.extend_from_slice(&entity_word(0b111 << 9, 300));
+        entities.extend(coords(step, step * 2, 16));
+        entities.extend_from_slice(&entity_word(1 << 14, 511));
+        entities.extend_from_slice(&[0, 0]);
+        payload.push(command);
+        payload.extend(entities);
+        let sound_entity: u16 = [1, 100, 600][usize::from(frame % 3)];
+        let channel = sound_entity << 3
+            | u16::from(frame % 8)
+            | u16::from(frame % 2) << 15
+            | u16::from(frame % 3 == 0) << 14;
+        let mut sound = channel.to_le_bytes().to_vec();
+        if channel & 1 << 15 != 0 {
+            sound.push(200);
+        }
+        if channel & 1 << 14 != 0 {
+            sound.push(64);
+        }
+        sound.push(frame % 4);
+        sound.extend(coords(step * 8, 0, 24));
+        payload.extend(message(6, &[&sound]));
+        let kind = frame % 14;
+        let mut temp_entity = vec![kind];
+        match kind {
+            5 | 6 | 9 => {
+                let entity: u16 = if frame % 28 < 14 { 2 } else { 400 };
+                temp_entity.extend_from_slice(&entity.to_le_bytes());
+                temp_entity.extend(coords(step, 0, 24));
+                temp_entity.extend(coords(step + 300, 40, 24));
+            }
+            2 | 12 => {
+                temp_entity.push(frame % 5 + 1);
+                temp_entity.extend(coords(step, step, 0));
+            }
+            _ => temp_entity.extend(coords(step, -step, 8)),
+        }
+        payload.extend(message(23, &[&temp_entity]));
+        payload.extend(message(3, &[&[frame % 4, frame]]));
+        demo.frame(13, 6, &payload);
+    }
+    demo.frame(
+        0,
+        6,
+        &[
+            message(14, &[&[0, 5, 0]]),
+            message(36, &[&[0, 40, 0]]),
+            message(37, &[&[0], &1f32.to_le_bytes()]),
+            message(53, &[&[0, 3]]),
+            message(39, &[&[1, 0]]),
+            message(19, &[&[10, 20], &coords(1, 2, 3)]),
+            message(43, &[&[2], &[1; 12]]),
+            message(54, &[&[1], &[2; 7]]),
+            message(44, &[&[3]]),
+            message(41, &[&4i16.to_le_bytes(), &[50], &[9; 4]]),
+            message(41, &[&(-1i16).to_le_bytes(), &[0]]),
+            message(24, &[&[1]]),
+            message(27, &[]),
+            message(28, &[]),
+            message(34, &[]),
+            message(35, &[]),
+            message(8, &[&[1], &c_string("print\n")]),
+            message(9, &[&c_string("stuff\n")]),
+            message(31, &[&c_string("finale")]),
+            message(30, &[&coords(1, 2, 3), &[4, 5, 6]]),
+        ]
+        .concat(),
+    );
+    let fte = FTE_EXTENSIONS.to_le_bytes();
+    demo.frame(0, 6, &server_data(&[b"FTEX", &fte]));
+    for frame in 0..20u8 {
+        let mut entities = vec![47];
+        // U_MORE_BITS, U_ORIGIN_1; more: U_FTE_EVEN_MORE; even more: every FTE field, the
+        // entity number + 512 + 1024, and a yet-more byte with U_FTE_COLOR_MOD
+        entities.extend_from_slice(&entity_word(1 << 15 | 1 << 9, 7));
+        entities.push(1 << 7);
+        entities.push(0b1110_1111);
+        entities.push(1 << 2);
+        entities.extend_from_slice(&[3, 1]);
+        entities.extend_from_slice(&i16::from(frame).to_le_bytes());
+        entities.extend_from_slice(&[128, 16, 4, 255, 128, 0]);
+        entities.extend_from_slice(&[0, 0]);
+        let mut fte_static = vec![21];
+        fte_static.extend_from_slice(&entity_word(1 << 15 | 1 << 13, 9));
+        fte_static.push(1 << 7);
+        fte_static.push(0b0000_0110);
+        fte_static.extend_from_slice(&[frame, 128, 16]);
+        let mut fte_baseline = vec![66];
+        fte_baseline.extend_from_slice(&entity_word(1 << 15, 10));
+        fte_baseline.push(1 << 7 | 1 << 2);
+        fte_baseline.push(1 << 3);
+        fte_baseline.push(1);
+        demo.frame(13, 6, &[entities, fte_static, fte_baseline].concat());
+    }
+    demo.frame(5, 6, &message(2, &[&c_string("EndOfDemo")]));
+    demo.0
+}
+
+fn protocol_change_demo() -> Vec<u8> {
+    let small = synthetic(&[(0, "{}")], false);
+    let copies = 3 * crate::segment::SEGMENT_TARGET_RAW / (2 * small.len());
+    let mut demo = Demo(small.repeat(copies));
+    let server_data = message(
+        crate::protocol::SVC_SERVER_DATA,
+        &[
+            b"FTE2",
+            &(1u32 << 30).to_le_bytes(),
+            &crate::protocol::PROTOCOL_VERSION.to_le_bytes(),
+            &1u32.to_le_bytes(),
+            &c_string("qw"),
+            &0u32.to_le_bytes(),
+            &c_string("changed"),
+            &[0; 40],
+        ],
+    );
+    demo.frame(0, 6, &server_data);
+    demo.0.extend_from_slice(&small.repeat(2 * copies));
+    demo.0
+}
+
+fn oversized_frame_demo() -> Vec<u8> {
+    let max_segment = MAX_SEGMENT_RAW as usize;
+    let mut demo = Demo(synthetic(&[], false));
+    demo.frame(0, 1, &vec![1u8; max_segment + max_segment / 2]);
+    demo.0.extend_from_slice(&synthetic(&[], false));
+    demo.0
+}
+
+fn entity_words_demo() -> Vec<u8> {
+    let mut demo = Demo(synthetic(&[], false));
+    let mut packet = vec![crate::protocol::SVC_PACKET_ENTITIES];
+    for index in 0..120_000u32 {
+        packet.extend_from_slice(&((511 - index % 511) as u16).to_le_bytes());
+    }
+    packet.extend_from_slice(&[0, 0]);
+    demo.frame(5, crate::protocol::DEM_ALL, &packet);
+    demo.0.extend_from_slice(&synthetic(&[], false));
+    demo.0
+}
+
+#[test]
+fn commands_demo_is_walked() -> anyhow::Result<()> {
+    let demo = commands_demo();
+    let file = compress(&demo)?;
+    assert_eq!(unstructured_len(&file)?, 0);
+    assert_eq!(decompress(&file, 1)?, demo);
+    Ok(())
+}
+
 /// None without the sample demos.
 fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let sources = || {
@@ -654,6 +1091,34 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         encode(&usercmd_segments)?,
         &usercmd_segments,
         "the same, repeated to several segments",
+    );
+    let commands = commands_demo();
+    add(
+        "commands.normal.mvdz",
+        encode(&commands)?,
+        &commands,
+        "synthetic demo with every frame type, every command of the sizer, the playerinfo, packet-entity, sound and temp-entity forms, then FTE entity extensions",
+    );
+    let protocol_change = protocol_change_demo();
+    add(
+        "protocol-change.normal.mvdz",
+        encode(&protocol_change)?,
+        &protocol_change,
+        "synthetic demo whose second segment announces FTE2 extensions: later segments start from the changed protocol (rule 3)",
+    );
+    let oversized = oversized_frame_demo();
+    add(
+        "oversized-frame.normal.mvdz",
+        encode(&oversized)?,
+        &oversized,
+        "synthetic demo with a 1.5 MiB frame of nops: the rest is cut every 2^20 bytes (rule 2)",
+    );
+    let entity_words = entity_words_demo();
+    add(
+        "entity-words.normal.mvdz",
+        encode(&entity_words)?,
+        &entity_words,
+        "synthetic demo with a packet of 120000 entity words, 3 ENTITY_GAP symbols per 2 bytes",
     );
     hostile(&mut vectors)?;
     Ok(Some(vectors))

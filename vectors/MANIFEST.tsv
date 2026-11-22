@@ -12,6 +12,10 @@ framed-as-stored.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08
 empty.normal.mvdz	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0	an empty demo
 usercmd.normal.mvdz	85598f84014a7db074614dc585a421db11e52ea0e2ff21aba59f80ee9f447cd3	29377	synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)
 usercmd.normal.segments.mvdz	b63058bd186b2d3732942c390e17c32b1c68731c08f8ff13fc22beb7a83a495b	1057572	the same, repeated to several segments
+commands.normal.mvdz	aa06f3fca58ac614172aaca8ef682f12760f51d3971606d9ebafb2d561441c2c	8325	synthetic demo with every frame type, every command of the sizer, the playerinfo, packet-entity, sound and temp-entity forms, then FTE entity extensions
+protocol-change.normal.mvdz	0438eaa02a0979e8749064c9289bb972b9a08effa87d567cfec2384118668e5d	1171152	synthetic demo whose second segment announces FTE2 extensions: later segments start from the changed protocol (rule 3)
+oversized-frame.normal.mvdz	1b288c91b2bcc9b890c8054158b344709b0c3b4e78e02ac85ae382cd1bf9c143	1583826	synthetic demo with a 1.5 MiB frame of nops: the rest is cut every 2^20 bytes (rule 2)
+entity-words.normal.mvdz	43588cc355d1a081c754764a230937f62dd647e19cdfbe02c99fa478a83d9cd4	250965	synthetic demo with a packet of 120000 entity words, 3 ENTITY_GAP symbols per 2 bytes
 hostile-base-cut.mvdz	error: corrupt: incomplete file	-	the base file (a synthetic demo repeated to several segments) without its last 10 bytes
 hostile-trailing-byte.mvdz	error: corrupt: trailing bytes	-	one byte after the last segment
 hostile-header-size.mvdz	error: corrupt: incomplete file	-	the header's size + 1
@@ -27,10 +31,25 @@ hostile-models-size.mvdz	error: corrupt: models too large	-	a models block of 25
 hostile-models-missing.mvdz	error: corrupt: tables	-	the base file without its models block
 hostile-ucmd-grid.mvdz	error: corrupt: structure	-	a usercmd block whose grid flags symbol is 9
 hostile-ucmd-misc.mvdz	error: corrupt: structure	-	a usercmd block (type 1, 23 bytes) stored in HIDDEN_MISC, no USERCMD stream
+hostile-segment-declared.mvdz	error: corrupt: segment header	-	a segment declaring 1 MiB of demo in 9 bytes
+hostile-header-short.mvdz	error: corrupt: truncated header	-	the first 30 bytes of the header
+hostile-header-tiny.mvdz	error: corrupt: truncated header	-	magic and one byte
+hostile-magic.mvdz	error: not an MVDZ file	-	the magic `MVDX`
 hostile-lz-distance.mvdz	error: corrupt: blob tokens	-	a match reaching 2 bytes back after 1 byte
 hostile-lz-overrun.mvdz	error: corrupt: blob tokens	-	a match of 9 bytes where 3 are left
 hostile-lz-short.mvdz	error: corrupt: blob tokens	-	tokens for 2 of the 4 blob bytes
 hostile-stored-len.mvdz	error: corrupt: stored segment	-	a stored segment of 4 bytes holding 3
+hostile-stored-tail.mvdz	error: corrupt: stored segment	-	a stored segment whose tail is raw_len - 1
+hostile-table-count.mvdz	error: corrupt: stream count	-	a stream table declaring 323 streams
+hostile-table-id.mvdz	error: corrupt: stream id	-	a blob stream with id 322, past the last
+hostile-table-dup-id.mvdz	error: corrupt: duplicate stream	-	the last blob stream's id set to the one before it (the same id twice)
+hostile-table-count-limit.mvdz	error: corrupt: stream count	-	the first stream's count one over 2 * raw_len + 16
+hostile-table-blob-total.mvdz	error: corrupt: blob streams	-	the last blob stream's count raised so the blob counts sum to 2 * raw_len + 1
+hostile-table-tail.mvdz	error: corrupt: tail length	-	a tail of raw_len + 1
+hostile-table-trailing.mvdz	error: corrupt: stream bodies	-	one byte after the last stream body
+hostile-blob-split.mvdz	error: corrupt: structure	-	the first two blob streams' counts moved by one byte: the same blob bytes, split differently
+hostile-stream-short.mvdz	error: corrupt: unconsumed stream data	-	the first stream's count one lower than the walk needs
+hostile-rans-odd.mvdz	error: corrupt: rans stream	-	the first stream body's rans_len raised by one, to an odd length
 hostile-tables-no-entry.mvdz	error: corrupt: stream without a model	-	the models block without the entry of a stream the segments code with rANS
 hostile-tables-missing.mvdz	error: corrupt: stream without a model	-	an empty models block: rANS streams without a model
 hostile-tables-order.mvdz	error: corrupt: tables	-	two entries of the models block swapped (stream ids not increasing)
