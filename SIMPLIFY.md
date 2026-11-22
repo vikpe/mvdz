@@ -19,7 +19,7 @@ Tests (`cargo nextest run --release`): 49 pass, none fail.
   so continue through it without stopping.
 - Plan until Viktor says to implement. Decisions are his: recommend, number the options,
   each suggestion as a table with the current and the proposed solution side by side.
-- Every change follows `~/dev/slipgate/AGENTS.md` and `~/dev/slipgate/rust/AGENTS.md`.
+- Every change follows `AGENTS.md` and `mvdz_rust/AGENTS.md`.
   Before declaring done: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D
   warnings`, `cargo nextest run --release --no-fail-fast`, `cargo +nightly fuzz build`.
 - No `unsafe` (`unsafe_code = "forbid"`). Simplicity is a high priority.
