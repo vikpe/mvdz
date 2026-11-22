@@ -2,7 +2,7 @@
 
 use super::common::*;
 use crate::Error;
-use crate::fields::put_u32;
+use crate::fields::put_usize;
 use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
@@ -187,13 +187,13 @@ fn model_amplification() -> anyhow::Result<()> {
         let rest = &proof_of_concept[at + header_len..];
         let mut models = Vec::new();
         for field in [1, 0, header.len()] {
-            put_u32(&mut models, field);
+            put_usize(&mut models, field);
         }
         models.extend_from_slice(header);
         // fte, fte2, mvd1, tail; one entry (id 0, count, length); no blob body
         let mut body = Vec::new();
         for field in [0, 0, 0, 0, 1, 0, demo.len(), rest.len(), 0] {
-            put_u32(&mut body, field);
+            put_usize(&mut body, field);
         }
         body.extend_from_slice(rest);
         let mut segment = segment_header_bytes(
@@ -285,10 +285,10 @@ fn large_models_block() -> anyhow::Result<()> {
     let lazy: Vec<usize> = (0..crate::streams::LAZY_STREAM_COUNT)
         .filter(|&stream| crate::streams::is_lazy(stream))
         .collect();
-    put_u32(&mut models, lazy.len());
+    put_usize(&mut models, lazy.len());
     for stream in lazy {
-        put_u32(&mut models, stream);
-        put_u32(&mut models, model.len());
+        put_usize(&mut models, stream);
+        put_usize(&mut models, model.len());
         models.extend_from_slice(&model);
     }
     file_parts.models = models;

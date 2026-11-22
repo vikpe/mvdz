@@ -85,10 +85,7 @@ impl Drop for Charge {
 }
 
 pub(crate) fn try_zeroed(len: usize) -> Result<Vec<u8>> {
-    let mut buffer = Vec::new();
-    buffer
-        .try_reserve_exact(len)
-        .map_err(|_| Error::MemoryLimit("out of memory"))?;
+    let mut buffer = try_with_capacity(len)?;
     buffer.resize(len, 0);
     Ok(buffer)
 }

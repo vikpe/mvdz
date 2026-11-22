@@ -2,7 +2,7 @@
 //! `MVDZ_WRITE_VECTORS=1` rewrites them instead of checking them.
 
 use super::common::*;
-use crate::fields::put_u32;
+use crate::fields::put_usize;
 use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
@@ -109,9 +109,9 @@ fn amplifying_model(table_count: u32) -> Vec<u8> {
     }
     let header = encoder.finish();
     let mut body = Vec::new();
-    put_u32(&mut body, header.len());
+    put_usize(&mut body, header.len());
     body.extend_from_slice(&header);
-    put_u32(&mut body, 16);
+    put_usize(&mut body, 16);
     body.extend_from_slice(&[0; 16]);
     body
 }
@@ -144,17 +144,17 @@ fn transform_body(
     let mut body = Vec::new();
     // fte, fte2, mvd1, tail; the number of streams
     for field in [0, 0, 0, 0, lazy.len() + blobs.len()] {
-        put_u32(&mut body, field);
+        put_usize(&mut body, field);
     }
     for (id, count, stream_body) in lazy {
         for field in [*id, *count, stream_body.len()] {
-            put_u32(&mut body, field);
+            put_usize(&mut body, field);
         }
     }
     let mut blob_bytes = Vec::new();
     for (id, blob) in blobs {
-        put_u32(&mut body, *id);
-        put_u32(&mut body, blob.len());
+        put_usize(&mut body, *id);
+        put_usize(&mut body, blob.len());
         blob_bytes.extend_from_slice(blob);
     }
     let deflated = if blob_bytes.is_empty() {
@@ -162,7 +162,7 @@ fn transform_body(
     } else {
         crate::deflate::compress(&blob_bytes)
     };
-    put_u32(&mut body, deflated.len());
+    put_usize(&mut body, deflated.len());
     for (_, _, stream_body) in lazy {
         body.extend_from_slice(stream_body);
     }
@@ -256,9 +256,8 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         edited.build(),
         "the second segment twice",
     );
-    let segment_header = parse_segment_header(&file_parts.segments[1])?;
     let mut edited = file_parts.clone();
-    edited.segments[1][segment_header.coded_offset - 2] ^= 0x10;
+    edited.segments[1][SEGMENT_FIELDS_LEN - 2] ^= 0x10;
     add(
         "segment-crc",
         edited.build(),

@@ -4,10 +4,10 @@
 use super::rc::{IntModel, RangeDecoder, RangeEncoder};
 use crate::budget::{Budget, Charge, try_with_capacity};
 use crate::error::{Error, Result};
-use crate::fields::{put_u32, read_length_prefixed, read_usize};
-use crate::numeric::NumericContext;
+use crate::fields::{put_usize, read_length_prefixed, read_usize};
+use crate::numeric::{NumericContext, bucket, numeric_context};
 use crate::parallel::par_map;
-use crate::streams::{PE_OX, PI_AP, PI_OX, SND_O, STREAM_COUNT, TE_O, UC_A, is_lazy, is_numeric};
+use crate::streams::{STREAM_COUNT, is_lazy, is_numeric};
 use std::sync::Arc;
 
 pub(crate) const SCALE: u32 = 12;
@@ -275,9 +275,7 @@ impl Counts {
         let mut own_rows = Vec::new();
         for index in 0..self.own.len() {
             if is_dropped[index] {
-                for (rest_count, &symbol_count) in self.rest.iter_mut().zip(row(index)) {
-                    *rest_count += symbol_count;
-                }
+                add_counts(&mut self.rest, row(index));
             } else {
                 own.push(self.own[index]);
                 own_rows.extend_from_slice(row(index));
@@ -285,6 +283,12 @@ impl Counts {
         }
         self.own = own;
         self.own_rows = own_rows;
+    }
+}
+
+fn add_counts(into: &mut [u32], counts: &[u32]) {
+    for (total, &count) in into.iter_mut().zip(counts) {
+        *total += count;
     }
 }
 
@@ -305,9 +309,10 @@ fn select(tally: &Tally) -> Counts {
     let keys: Vec<u32> = order.iter().map(|&index| keys[index]).collect();
     let mut own: Vec<u32> = Vec::new();
     let mut fallback = tally.global.clone();
+    // the contexts not taken as own, summed: the fallback of the next pass
+    let mut rest = vec![0u32; alphabet_size];
     for pass in 0..2 {
         own.clear();
-        let mut rest = vec![0u32; alphabet_size];
         for &context in &keys {
             let counts = row(context);
             let present = f64::from(counts.iter().filter(|&&count| count > 0).count() as u32);
@@ -316,32 +321,17 @@ fn select(tally: &Tally) -> Counts {
             if own_cost < cross_bits(counts, &fallback) {
                 own.push(context);
             } else {
-                for symbol in 0..alphabet_size {
-                    rest[symbol] += counts[symbol];
-                }
+                add_counts(&mut rest, counts);
             }
         }
         if pass == 0 {
             if rest.iter().all(|&count| count == 0) {
                 break;
             }
-            fallback = rest;
+            fallback = std::mem::replace(&mut rest, vec![0u32; alphabet_size]);
         }
     }
     own.sort_unstable();
-    let mut is_own = vec![false; row_of.len()];
-    for &context in &own {
-        is_own[context as usize] = true;
-    }
-    let mut rest = vec![0u32; alphabet_size];
-    for &context in &keys {
-        if !is_own[context as usize] {
-            let counts = row(context);
-            for symbol in 0..alphabet_size {
-                rest[symbol] += counts[symbol];
-            }
-        }
-    }
     let mut own_rows = Vec::with_capacity(own.len() * alphabet_size);
     for &context in &own {
         own_rows.extend_from_slice(row(context));
@@ -378,7 +368,18 @@ fn build_model(counts: &Counts) -> Model {
     }
 }
 
+/// A quantized count is coded under the fallback's count of the symbol (17: no fallback) and
+/// the count of the symbol before, each capped at 16.
 const QUANTIZED_CONTEXTS: usize = 17 * 18;
+const ALPHABET_CONTEXT: usize = QUANTIZED_CONTEXTS;
+const OWN_COUNT_CONTEXT: usize = QUANTIZED_CONTEXTS + 1;
+const CONTEXT_DELTA_CONTEXT: usize = QUANTIZED_CONTEXTS + 2;
+const HEADER_CONTEXT_COUNT: usize = QUANTIZED_CONTEXTS + 8;
+
+fn table_context(fallback: Option<&[u32]>, symbol: usize, previous: u32) -> usize {
+    let fallback_context = fallback.map_or(17, |fallback| fallback[symbol].min(16)) as usize;
+    fallback_context * 17 + previous.min(16) as usize
+}
 
 fn write_table(
     encoder: &mut RangeEncoder,
@@ -388,10 +389,9 @@ fn write_table(
 ) {
     let mut previous = 0u32;
     for (symbol, &quantized) in table.iter().enumerate() {
-        let fallback_context = fallback.map_or(17, |fallback| fallback[symbol].min(16)) as usize;
         int_model.put(
             encoder,
-            fallback_context * 17 + previous.min(16) as usize,
+            table_context(fallback, symbol, previous),
             quantized,
         );
         previous = quantized;
@@ -406,12 +406,11 @@ fn read_table(
 ) -> Vec<u32> {
     let mut table = vec![0u32; alphabet_size];
     let mut previous = 0u32;
-    for symbol in 0..alphabet_size {
-        let fallback_context = fallback.map_or(17, |fallback| fallback[symbol].min(16)) as usize;
-        table[symbol] = int_model
-            .get(decoder, fallback_context * 17 + previous.min(16) as usize)
+    for (symbol, quantized) in table.iter_mut().enumerate() {
+        *quantized = int_model
+            .get(decoder, table_context(fallback, symbol, previous))
             .min(160);
-        previous = table[symbol];
+        previous = *quantized;
     }
     table
 }
@@ -419,11 +418,11 @@ fn read_table(
 /// The header and the binary decisions it takes.
 fn write_model(model: &Model) -> (Vec<u8>, u64) {
     let mut encoder = RangeEncoder::new();
-    let mut int_model = IntModel::new(QUANTIZED_CONTEXTS + 8);
-    int_model.put(&mut encoder, QUANTIZED_CONTEXTS, model.alphabet_size as u32);
+    let mut int_model = IntModel::new(HEADER_CONTEXT_COUNT);
+    int_model.put(&mut encoder, ALPHABET_CONTEXT, model.alphabet_size as u32);
     int_model.put(
         &mut encoder,
-        QUANTIZED_CONTEXTS + 1,
+        OWN_COUNT_CONTEXT,
         (model.tables.len() - 1) as u32,
     );
     let fallback = model.tables[0].quantized.clone();
@@ -432,7 +431,7 @@ fn write_model(model: &Model) -> (Vec<u8>, u64) {
     for (index, &context) in model.own.iter().enumerate() {
         int_model.put(
             &mut encoder,
-            QUANTIZED_CONTEXTS + 2,
+            CONTEXT_DELTA_CONTEXT,
             if index == 0 {
                 context
             } else {
@@ -506,9 +505,9 @@ fn read_model_header(
         .saturating_mul(DECISIONS_PER_BYTE)
         .saturating_add(DECISIONS_BASE);
     let mut decoder = RangeDecoder::new(header);
-    let mut int_model = IntModel::new(QUANTIZED_CONTEXTS + 8);
-    let alphabet_size = int_model.get(&mut decoder, QUANTIZED_CONTEXTS) as usize;
-    let own_count = int_model.get(&mut decoder, QUANTIZED_CONTEXTS + 1) as usize;
+    let mut int_model = IntModel::new(HEADER_CONTEXT_COUNT);
+    let alphabet_size = int_model.get(&mut decoder, ALPHABET_CONTEXT) as usize;
+    let own_count = int_model.get(&mut decoder, OWN_COUNT_CONTEXT) as usize;
     if alphabet_size != required_alphabet_size || own_count > 65535 {
         return Err(corrupt);
     }
@@ -523,7 +522,7 @@ fn read_model_header(
         if decoder.decisions > max_decisions {
             return Err(corrupt);
         }
-        let context_delta = int_model.get(&mut decoder, QUANTIZED_CONTEXTS + 2);
+        let context_delta = int_model.get(&mut decoder, CONTEXT_DELTA_CONTEXT);
         if index > 0 && context_delta == 0 {
             return Err(corrupt);
         }
@@ -593,33 +592,9 @@ pub(crate) fn read_model(
         } else if let Some(symbol) = table.single_symbol {
             ENTRY_SINGLE | u32::from(symbol)
         } else if present.len() <= SEARCH_MAX {
-            let offset = model.pool.len() as u32;
-            model.pool.push(0);
-            for &symbol in &present {
-                model.pool.push(table.cumulative[symbol + 1] as u16);
-            }
-            for _ in present.len()..16 * chunks {
-                model.pool.push(0x7fff);
-            }
-            for &symbol in &present {
-                model.pool.push(symbol as u16);
-            }
-            for _ in present.len()..16 * chunks {
-                model.pool.push(0);
-            }
-            offset
+            model.push_search_table(&table, &present)
         } else {
-            let offset = model.luts.len() as u32;
-            model.luts.resize(model.luts.len() + FREQ_TOTAL as usize, 0);
-            let lut = &mut model.luts[offset as usize..];
-            for &symbol in &present {
-                for slot in table.cumulative[symbol]..table.cumulative[symbol + 1] {
-                    lut[slot as usize] = symbol as u32
-                        | table.freq[symbol] << 8
-                        | (slot - table.cumulative[symbol]) << 20;
-                }
-            }
-            ENTRY_LUT | offset
+            model.push_lut(&table, &present)
         };
         entries.push(entry);
     }
@@ -644,6 +619,36 @@ impl DecoderModel {
             luts: Vec::new(),
             _charge: None,
         }
+    }
+    /// The entry of a table with at most [`SEARCH_MAX`] symbols: its offset in `pool`.
+    fn push_search_table(&mut self, table: &Table, present: &[usize]) -> u32 {
+        let width = 16 * self.chunks;
+        let offset = self.pool.len() as u32;
+        self.pool.push(0);
+        for &symbol in present {
+            self.pool.push(table.cumulative[symbol + 1] as u16);
+        }
+        self.pool.resize(offset as usize + 1 + width, 0x7fff);
+        for &symbol in present {
+            self.pool.push(symbol as u16);
+        }
+        self.pool.resize(offset as usize + 1 + 2 * width, 0);
+        offset
+    }
+    /// The entry of a wider table: `ENTRY_LUT` and its offset in `luts`. Each slot holds
+    /// the symbol, its frequency and the slot's offset into it.
+    fn push_lut(&mut self, table: &Table, present: &[usize]) -> u32 {
+        let offset = self.luts.len();
+        self.luts.resize(offset + FREQ_TOTAL as usize, 0);
+        let lut = &mut self.luts[offset..];
+        for &symbol in present {
+            for slot in table.cumulative[symbol]..table.cumulative[symbol + 1] {
+                lut[slot as usize] = symbol as u32
+                    | table.freq[symbol] << 8
+                    | (slot - table.cumulative[symbol]) << 20;
+            }
+        }
+        ENTRY_LUT | offset as u32
     }
     #[inline(always)]
     fn entry(&self, context: u32) -> u32 {
@@ -813,17 +818,12 @@ fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Vec<u8> {
     encoder.finish()
 }
 
-fn put_body(out: &mut Vec<u8>, model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) {
+fn pack_body(model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) -> Vec<u8> {
     let body = rans_encode(model, symbols, contexts);
-    out.reserve(body.len() + extra.len() + 4);
-    put_u32(out, body.len());
+    let mut out = Vec::with_capacity(body.len() + extra.len() + 4);
+    put_usize(&mut out, body.len());
     out.extend_from_slice(&body);
     out.extend_from_slice(extra);
-}
-
-fn pack_body(model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_body(&mut out, model, symbols, contexts, extra);
     out
 }
 
@@ -909,8 +909,8 @@ fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Mod
     if !rest.is_empty() {
         return Err(corrupt);
     }
-    let built = par_map(threads, entries.len(), |index| {
-        read_model(entries[index].2, entries[index].1, budget)
+    let built = par_map(threads, &entries, |&(_, alphabet_size, header)| {
+        read_model(header, alphabet_size, budget)
     });
     let mut models: Models = vec![None; STREAM_COUNT];
     for (entry, model) in entries.iter().zip(built) {
@@ -928,21 +928,52 @@ pub(crate) fn encode_bytes(symbols: &[u8], contexts: &[u16], file_model: &FileMo
     pack_body(&file_model.model, symbols, contexts, &[])
 }
 
+/// `count` symbols of one stream body under one model.
 #[derive(Debug)]
-pub(crate) struct ByteDecoder<'a> {
+struct SymbolDecoder<'a> {
     model: Arc<DecoderModel>,
     decoder: RansDecoder<'a>,
     count: usize,
     used: usize,
 }
 
-impl<'a> ByteDecoder<'a> {
-    pub(crate) fn empty() -> Self {
-        ByteDecoder {
+impl<'a> SymbolDecoder<'a> {
+    fn empty() -> Self {
+        SymbolDecoder {
             model: Arc::new(DecoderModel::empty()),
             decoder: RansDecoder::finished_empty(),
             count: 0,
             used: 0,
+        }
+    }
+    fn new(rans: &'a [u8], count: usize, file_model: &Arc<DecoderModel>) -> Self {
+        SymbolDecoder {
+            model: file_model.clone(),
+            decoder: RansDecoder::new(rans),
+            count,
+            used: 0,
+        }
+    }
+    #[inline(always)]
+    fn get(&mut self, context_key: u32) -> Option<u32> {
+        self.used += 1;
+        let entry = self.model.entry(context_key);
+        self.model.decode(&mut self.decoder, entry)
+    }
+    fn is_done(&self) -> bool {
+        self.used == self.count && self.decoder.is_finished()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ByteDecoder<'a> {
+    symbols: SymbolDecoder<'a>,
+}
+
+impl<'a> ByteDecoder<'a> {
+    pub(crate) fn empty() -> Self {
+        ByteDecoder {
+            symbols: SymbolDecoder::empty(),
         }
     }
     pub(crate) fn new(
@@ -955,64 +986,21 @@ impl<'a> ByteDecoder<'a> {
             return Err(Error::Corrupt("rans stream"));
         }
         Ok(ByteDecoder {
-            model: file_model.clone(),
-            decoder: RansDecoder::new(unpacked.rans),
-            count,
-            used: 0,
+            symbols: SymbolDecoder::new(unpacked.rans, count, file_model),
         })
     }
     #[inline(always)]
     pub(crate) fn get(&mut self, context: u32) -> Option<u8> {
-        self.used += 1;
-        let entry = self.model.entry(byte_context(context));
-        self.model
-            .decode(&mut self.decoder, entry)
+        self.symbols
+            .get(byte_context(context))
             .map(|symbol| symbol as u8)
     }
     pub(crate) fn is_done(&self) -> bool {
-        self.used == self.count && self.decoder.is_finished()
+        self.symbols.is_done()
     }
 }
 
 pub(crate) const NUMERIC_ALPHABET: usize = 65;
-
-#[inline(always)]
-pub(crate) fn numeric_context(stream: usize, context: &NumericContext) -> u32 {
-    let features = &context.features;
-    let clamped = |value: u8, max: u8| u32::from(value.min(max));
-    match stream {
-        PI_OX..=50 => clamped(features[0], 19) | clamped(features[1], 19) << 5,
-        PI_AP..=53 => clamped(features[0], 23) | clamped(features[1], 23) << 5,
-        PE_OX..=56 => {
-            clamped(features[0], 17)
-                | clamped(features[1], 17) << 5
-                | u32::from(features[3] & 1) << 10
-        }
-        SND_O | TE_O => u32::from(features[0]) | u32::from(features[1]) << 4,
-        UC_A => {
-            clamped(features[0], 23)
-                | clamped(features[1], 23) << 5
-                | clamped(features[2], 15) << 10
-                | u32::from(features[3]) << 14
-        }
-        _ => clamped(features[0], 63) | u32::from(features[1]) << 6,
-    }
-}
-
-#[inline(always)]
-fn bucket(value: i32) -> (u16, u32, u32) {
-    let magnitude = value.unsigned_abs();
-    if magnitude == 0 {
-        return (0, 0, 0);
-    }
-    let width = magnitude.bit_width();
-    let symbol = 2 * width - 1 + u32::from(value < 0);
-    (
-        symbol as u16,
-        width - 1,
-        magnitude & ((1u32 << (width - 1)) - 1),
-    )
-}
 
 #[derive(Debug, Default)]
 pub(crate) struct BitWriter {
@@ -1148,22 +1136,16 @@ pub(crate) fn encode_num(num: &NumericSymbols, file_model: &FileModel) -> Vec<u8
 #[derive(Debug)]
 pub(crate) struct NumericDecoder<'a> {
     stream: usize,
-    model: Arc<DecoderModel>,
-    decoder: RansDecoder<'a>,
+    symbols: SymbolDecoder<'a>,
     bits: BitReader<'a>,
-    count: usize,
-    used: usize,
 }
 
 impl<'a> NumericDecoder<'a> {
     pub(crate) fn empty() -> Self {
         NumericDecoder {
             stream: 0,
-            model: Arc::new(DecoderModel::empty()),
-            decoder: RansDecoder::finished_empty(),
+            symbols: SymbolDecoder::empty(),
             bits: BitReader::new(&[]),
-            count: 0,
-            used: 0,
         }
     }
     pub(crate) fn new(
@@ -1175,18 +1157,13 @@ impl<'a> NumericDecoder<'a> {
         let unpacked = unpack(body)?;
         Ok(NumericDecoder {
             stream,
-            model: file_model.clone(),
-            decoder: RansDecoder::new(unpacked.rans),
+            symbols: SymbolDecoder::new(unpacked.rans, count, file_model),
             bits: BitReader::new(unpacked.extra),
-            count,
-            used: 0,
         })
     }
     #[inline(always)]
     pub(crate) fn get(&mut self, context: NumericContext) -> Option<i32> {
-        self.used += 1;
-        let entry = self.model.entry(numeric_context(self.stream, &context));
-        let symbol = self.model.decode(&mut self.decoder, entry)?;
+        let symbol = self.symbols.get(numeric_context(self.stream, &context))?;
         if symbol > 64 {
             return None;
         }
@@ -1202,13 +1179,14 @@ impl<'a> NumericDecoder<'a> {
         })
     }
     pub(crate) fn is_done(&self) -> bool {
-        self.used == self.count && self.decoder.is_finished() && self.bits.is_finished()
+        self.symbols.is_done() && self.bits.is_finished()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::streams::PI_OX;
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 

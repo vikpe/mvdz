@@ -5,8 +5,8 @@ use crate::coder::rans::FileModel;
 use crate::decode::{DemoCheck, decode_segment, scan_layout};
 use crate::error::{Error, Result};
 use crate::format::{
-    Header, MAX_SEGMENT_CODED, MAX_SEGMENTS, SEGMENT_FIELDS_LEN, header_bytes, models_block,
-    segment_block, segment_header_bytes,
+    Header, MAX_SEGMENT_CODED, MAX_SEGMENTS, header_bytes, models_block, segment_block,
+    segment_header_bytes,
 };
 use crate::parallel::{HAS_THREADS, par_map, thread_count};
 use crate::proto::{DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, Proto, frame_len};
@@ -137,6 +137,21 @@ struct FirstPass {
     durations_ms: Vec<u64>,
 }
 
+impl FirstPass {
+    /// Every segment stored as it is.
+    fn all_tail(segments: &[&[u8]]) -> Self {
+        Self {
+            file_models: Vec::new(),
+            start_protos: vec![Proto::default(); segments.len()],
+            is_walkable: vec![false; segments.len()],
+            durations_ms: segments
+                .iter()
+                .map(|segment| frame_scan(segment).duration_ms)
+                .collect(),
+        }
+    }
+}
+
 /// A pass 1 walk of one segment.
 struct Counted {
     start_proto: Proto,
@@ -165,38 +180,29 @@ fn count_segment(raw: &[u8], start_proto: Proto) -> Counted {
 /// Pass 1 (FORMAT.md section 8) keeps only counts; pass 2 walks again. A segment starts in
 /// the proto the one before ends in, so the segments of a batch are walked in parallel from
 /// the end proto of the batch before, and the few that start in another proto walked again.
-fn run_first_pass(src: &[u8], cuts: &[usize], threads: usize) -> FirstPass {
-    let segment_count = cuts.len() - 1;
-    let segment_bytes = |index: usize| &src[cuts[index]..cuts[index + 1]];
+fn run_first_pass(segments: &[&[u8]], threads: usize) -> FirstPass {
     let model_builder = segment::ModelBuilder::default();
     let mut proto = Proto::default();
-    let mut first_pass = FirstPass {
-        file_models: Vec::new(),
-        start_protos: Vec::with_capacity(segment_count),
-        is_walkable: Vec::with_capacity(segment_count),
-        durations_ms: (0..segment_count)
-            .map(|index| frame_scan(segment_bytes(index)).duration_ms)
-            .collect(),
-    };
+    let mut first_pass = FirstPass::all_tail(segments);
     let mut first = 0;
-    while first < segment_count {
+    while first < segments.len() {
         // the first segment alone: it sets the proto of most demos
         let batch_len = if first == 0 {
             1
         } else {
-            threads.min(segment_count - first)
+            threads.min(segments.len() - first)
         };
         let batch_proto = proto;
-        let mut batch = par_map(threads, batch_len, |batch_index| {
-            count_segment(segment_bytes(first + batch_index), batch_proto)
+        let mut batch = par_map(threads, &segments[first..first + batch_len], |&raw| {
+            count_segment(raw, batch_proto)
         });
-        for (batch_index, counted) in batch.iter_mut().enumerate() {
+        for (index, counted) in (first..).zip(batch.iter_mut()) {
             if counted.start_proto != proto {
-                *counted = count_segment(segment_bytes(first + batch_index), proto);
+                *counted = count_segment(segments[index], proto);
             }
             proto = counted.end_proto;
-            first_pass.start_protos.push(counted.start_proto);
-            first_pass.is_walkable.push(counted.walked.is_some());
+            first_pass.start_protos[index] = counted.start_proto;
+            first_pass.is_walkable[index] = counted.walked.is_some();
         }
         let segments: Vec<(&Walked, &Numerics)> = batch
             .iter()
@@ -208,19 +214,6 @@ fn run_first_pass(src: &[u8], cuts: &[usize], threads: usize) -> FirstPass {
     }
     first_pass.file_models = model_builder.models(threads);
     first_pass
-}
-
-pub(crate) fn transform_body(
-    raw: &[u8],
-    walked: &Walked,
-    numerics: &Numerics,
-    duration_ms: u64,
-    model_ids: &mut Vec<usize>,
-    file_models: &[Option<FileModel>],
-) -> Option<Vec<u8>> {
-    let mut body = segment_header_bytes(raw.len() as u32, duration_ms as u32, crc32fast::hash(raw));
-    body.extend_from_slice(&segment::encode(walked, numerics, model_ids, file_models)?);
-    ((body.len() - SEGMENT_FIELDS_LEN) as u64 <= MAX_SEGMENT_CODED).then_some(body)
 }
 
 /// Threads never change the file written.
@@ -240,23 +233,20 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
     } else {
         cut_points(src)
     };
-    let segment_count = cuts.len() - 1;
-    if segment_count > MAX_SEGMENTS {
+    let segments: Vec<&[u8]> = cuts
+        .iter()
+        .zip(&cuts[1..])
+        .map(|(&start, &end)| &src[start..end])
+        .collect();
+    if segments.len() > MAX_SEGMENTS {
         return Err(Error::DemoTooLarge);
     }
     let hashes = || (crc32fast::hash(src), <[u8; 32]>::from(Sha256::digest(src)));
     let first_pass_or_all_tail = || {
         if is_all_tail {
-            FirstPass {
-                file_models: Vec::new(),
-                start_protos: vec![Proto::default(); segment_count],
-                is_walkable: vec![false; segment_count],
-                durations_ms: (0..segment_count)
-                    .map(|index| frame_scan(&src[cuts[index]..cuts[index + 1]]).duration_ms)
-                    .collect(),
-            }
+            FirstPass::all_tail(&segments)
         } else {
-            run_first_pass(src, &cuts, threads)
+            run_first_pass(&segments, threads)
         }
     };
     let (first_pass, (crc, sha256)) = if threads > 1 && HAS_THREADS {
@@ -273,37 +263,30 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
         crc32: crc,
         sha256,
     };
-    let mut bodies = code_segments(src, &cuts, &first_pass, threads)?;
+    let mut bodies = code_segments(&segments, &first_pass, threads)?;
     let file_models = &first_pass.file_models;
     let self_check_error = || Error::Internal("the encoder's output does not decode to its input");
     let mut fallbacks = 0;
     loop {
-        let (out, mut info) = assemble(&header, file_models, &bodies);
+        let (out, mut stats) = assemble(&header, file_models, &bodies);
         // the container itself does not decode: nothing to fall back to
-        let is_failing =
-            failing_segments(&out, src, &cuts, threads).ok_or_else(self_check_error)?;
+        let is_failing = failing_segments(&out, &segments, threads).ok_or_else(self_check_error)?;
         if !is_failing.contains(&true) {
-            info.self_check_fallbacks = fallbacks;
-            return Ok((out, info));
+            stats.self_check_fallbacks = fallbacks;
+            return Ok((out, stats));
         }
-        for index in (0..segment_count).filter(|&index| is_failing[index]) {
+        for index in (0..segments.len()).filter(|&index| is_failing[index]) {
             if bodies[index].is_all_tail {
                 return Err(self_check_error());
             }
-            bodies[index] = tail_body(src, &cuts, &first_pass, index)?;
+            bodies[index] = tail_body(segments[index], &first_pass, index)?;
             fallbacks += 1;
         }
     }
 }
 
-fn code_segments(
-    src: &[u8],
-    cuts: &[usize],
-    first_pass: &FirstPass,
-    threads: usize,
-) -> Result<Vec<Body>> {
-    let bodies = par_map(threads, cuts.len() - 1, |index| {
-        let raw = &src[cuts[index]..cuts[index + 1]];
+fn code_segments(segments: &[&[u8]], first_pass: &FirstPass, threads: usize) -> Result<Vec<Body>> {
+    let bodies = par_map(threads, segments.iter().enumerate(), |(index, &raw)| {
         let walked = first_pass.is_walkable[index]
             .then(|| segment::walk(raw, first_pass.start_protos[index]))
             .flatten();
@@ -318,13 +301,12 @@ fn code_segments(
         {
             return Ok(body);
         }
-        tail_body(src, cuts, first_pass, index)
+        tail_body(raw, first_pass, index)
     });
     bodies.into_iter().collect()
 }
 
-fn tail_body(src: &[u8], cuts: &[usize], first_pass: &FirstPass, index: usize) -> Result<Body> {
-    let raw = &src[cuts[index]..cuts[index + 1]];
+fn tail_body(raw: &[u8], first_pass: &FirstPass, index: usize) -> Result<Body> {
     let walked = segment::walk_tail(raw, first_pass.start_protos[index]);
     Body::new(raw, &walked, first_pass.durations_ms[index], &[], true)
 }
@@ -347,15 +329,12 @@ impl Body {
     ) -> Result<Self> {
         let numerics = segment::numerics(raw, walked);
         let mut model_ids = Vec::new();
-        let bytes = transform_body(
-            raw,
-            walked,
-            &numerics,
-            duration_ms,
-            &mut model_ids,
-            file_models,
-        )
-        .ok_or(Error::Internal("a segment that cannot be coded"))?;
+        let mut bytes =
+            segment_header_bytes(raw.len() as u32, duration_ms as u32, crc32fast::hash(raw));
+        let coded = segment::encode(walked, &numerics, &mut model_ids, file_models)
+            .filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)
+            .ok_or(Error::Internal("a segment that cannot be coded"))?;
+        bytes.extend_from_slice(&coded);
         Ok(Self {
             bytes,
             is_all_tail,
@@ -382,36 +361,36 @@ fn assemble(
     } else {
         models_block(&mut out, &segment::models_body(file_models, &ids));
     }
-    let mut info = EncodeStats::default();
+    let mut stats = EncodeStats::default();
     for body in bodies {
         segment_block(&mut out, &body.bytes);
-        info.unstructured_len += body.unstructured_len;
+        stats.unstructured_len += body.unstructured_len;
     }
-    (out, info)
+    (out, stats)
 }
 
 /// Never holds the decoded demo whole.
 pub(crate) fn failing_segments(
     file: &[u8],
-    src: &[u8],
-    cuts: &[usize],
+    segments: &[&[u8]],
     threads: usize,
 ) -> Option<Vec<bool>> {
     let budget = Budget::unlimited();
     let layout = scan_layout(file, threads, &budget).ok()?;
-    let segment_count = layout.segments.len();
-    if segment_count != cuts.len() - 1 {
+    if layout.segments.len() != segments.len() {
         return None;
     }
-    let timings = par_map(threads, segment_count, |index| {
-        let (span, header) = &layout.segments[index];
-        let want = &src[cuts[index]..cuts[index + 1]];
-        let mut dst = vec![0u8; want.len()];
-        let body = file.get(span.body_range()?)?;
-        decode_segment(&layout, body, header, &mut dst, &budget)
-            .ok()
-            .filter(|_| dst == want)
-    });
+    let timings = par_map(
+        threads,
+        layout.segments.iter().zip(segments),
+        |((span, header), &want)| {
+            let mut dst = vec![0u8; want.len()];
+            let body = span.body(file)?;
+            decode_segment(&layout, body, header, &mut dst, &budget)
+                .ok()
+                .filter(|_| dst == want)
+        },
+    );
     let is_failing: Vec<bool> = timings.iter().map(std::option::Option::is_none).collect();
     if is_failing.iter().any(|&is_failed| is_failed) {
         return Some(is_failing);
@@ -419,10 +398,8 @@ pub(crate) fn failing_segments(
     // every segment decoded to the input, so check over it; a failure here is not
     // fixable by falling back
     let mut check = DemoCheck::default();
-    for (index, timing) in timings.into_iter().enumerate() {
-        check
-            .segment(&src[cuts[index]..cuts[index + 1]], timing?)
-            .ok()?;
+    for (timing, &want) in timings.into_iter().zip(segments) {
+        check.segment(want, timing?).ok()?;
     }
     check.finish(&layout).ok()?;
     Some(is_failing)

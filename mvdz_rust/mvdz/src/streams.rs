@@ -94,5 +94,5 @@ pub(crate) fn is_numeric(id: usize) -> bool {
 }
 #[inline]
 pub(crate) fn is_blob(id: usize) -> bool {
-    is_plain(id) || (RAW..STREAM_COUNT).contains(&id) && !(TEF + 1..GEN_BASE).contains(&id)
+    is_plain(id) || (RAW..=TEF).contains(&id) || (GEN_BASE..STREAM_COUNT).contains(&id)
 }

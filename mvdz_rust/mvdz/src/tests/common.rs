@@ -376,10 +376,10 @@ pub(crate) fn models_entries(body: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)
 
 pub(crate) fn models_body(entries: &[(usize, Vec<u8>)]) -> Vec<u8> {
     let mut body = Vec::new();
-    crate::fields::put_u32(&mut body, entries.len());
+    crate::fields::put_usize(&mut body, entries.len());
     for (stream, model) in entries {
-        crate::fields::put_u32(&mut body, *stream);
-        crate::fields::put_u32(&mut body, model.len());
+        crate::fields::put_usize(&mut body, *stream);
+        crate::fields::put_usize(&mut body, model.len());
         body.extend_from_slice(model);
     }
     body

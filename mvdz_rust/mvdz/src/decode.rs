@@ -28,17 +28,23 @@ pub struct Decoder<R: Read> {
     input: R,
     layout: Layout,
     next_offset: u64,
-    current: Vec<u8>,
-    current_charge: Option<Charge>,
+    current: Option<Decoded>,
+    /// Into `current`.
     at: usize,
-    ready: VecDeque<(Vec<u8>, Charge)>,
+    ready: VecDeque<Decoded>,
     /// Met after the segments in `ready`; reported once they are read.
     deferred_error: Option<Error>,
     is_done: bool,
     failure: Option<Error>,
     threads: usize,
     budget: Budget,
-    check: Option<DemoCheck>,
+    check: DemoCheck,
+}
+
+#[derive(Debug)]
+struct Decoded {
+    bytes: Vec<u8>,
+    _charge: Charge,
 }
 
 impl<R: Read> Decoder<R> {
@@ -65,24 +71,14 @@ impl<R: Read> Decoder<R> {
 
     pub(crate) fn with_max_memory(mut input: R, threads: usize, max_memory: u64) -> Result<Self> {
         let mut header = [0u8; HEADER_LEN];
-        let mut filled = 0;
-        while filled < HEADER_LEN {
-            match input.read(&mut header[filled..]) {
-                Ok(0) => break,
-                Ok(read) => filled += read.min(HEADER_LEN - filled),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
+        let filled = read_up_to(&mut input, &mut header)?;
         let budget = Budget::new(max_memory);
         let layout = Layout::new(&header[..filled], &budget)?;
-        let check = Some(DemoCheck::default());
         Ok(Self {
             input,
             layout,
             next_offset: HEADER_LEN as u64,
-            current: Vec::new(),
-            current_charge: None,
+            current: None,
             at: 0,
             ready: VecDeque::new(),
             deferred_error: None,
@@ -90,26 +86,28 @@ impl<R: Read> Decoder<R> {
             failure: None,
             threads,
             budget,
-            check,
+            check: DemoCheck::default(),
         })
     }
 
     pub(crate) fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.check_failed()?;
-        while self.at == self.current.len() && !self.is_done {
-            if let Err(error) = self.advance() {
-                self.failure = Some(error);
-                self.current = Vec::new();
-                self.current_charge = None;
-                self.ready.clear();
-                self.at = 0;
-                return Err(error);
-            }
+        if let Err(error) = self.advance() {
+            self.failure = Some(error);
+            self.current = None;
+            self.ready.clear();
+            self.at = 0;
+            return Err(error);
         }
-        let len = buf.len().min(self.current.len() - self.at);
-        buf[..len].copy_from_slice(&self.current[self.at..self.at + len]);
+        let current = self.current_bytes();
+        let len = buf.len().min(current.len() - self.at);
+        buf[..len].copy_from_slice(&current[self.at..self.at + len]);
         self.at += len;
         Ok(len)
+    }
+
+    fn current_bytes(&self) -> &[u8] {
+        self.current.as_ref().map_or(&[], |decoded| &decoded.bytes)
     }
 
     fn check_failed(&self) -> Result<()> {
@@ -119,19 +117,14 @@ impl<R: Read> Decoder<R> {
         }
     }
 
+    /// `None` at the end of the input.
     fn read_len(&mut self) -> Result<Option<u64>> {
         let mut field = [0u8; LEN_FIELD_LEN];
-        let mut filled = 0;
-        while filled < LEN_FIELD_LEN {
-            match self.input.read(&mut field[filled..]) {
-                Ok(0) if filled == 0 => return Ok(None),
-                Ok(0) => return bad("incomplete file"),
-                Ok(read) => filled += read.min(LEN_FIELD_LEN - filled),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error.into()),
-            }
+        match read_up_to(&mut self.input, &mut field)? {
+            0 => Ok(None),
+            LEN_FIELD_LEN => Ok(Some(u64::from(u32::from_le_bytes(field)))),
+            _ => bad("incomplete file"),
         }
-        Ok(len_field(&field))
     }
 
     fn read_body(&mut self, len: u64) -> Result<(Vec<u8>, Charge)> {
@@ -179,19 +172,19 @@ impl<R: Read> Decoder<R> {
             }
         }
         let (layout, budget) = (&self.layout, &self.budget);
-        let decoded = par_map(self.threads, segments.len(), |index| {
-            let (header, body, _) = &segments[index];
+        let decoded = par_map(self.threads, &segments, |(header, body, _)| {
             let charge = budget.alloc(u64::from(header.raw_len))?;
-            let mut out = try_zeroed(header.raw_len as usize)?;
-            let scan = decode_segment(layout, body, header, &mut out, budget)?;
-            Ok((out, charge, scan))
+            let mut bytes = try_zeroed(header.raw_len as usize)?;
+            let scan = decode_segment(layout, body, header, &mut bytes, budget)?;
+            Ok((bytes, charge, scan))
         });
         for result in decoded {
-            let checked = result.and_then(|(out, charge, scan)| {
-                if let Some(check) = self.check.as_mut() {
-                    check.segment(&out, scan)?;
-                }
-                Ok((out, charge))
+            let checked = result.and_then(|(bytes, charge, scan)| {
+                self.check.segment(&bytes, scan)?;
+                Ok(Decoded {
+                    bytes,
+                    _charge: charge,
+                })
             });
             match checked {
                 Ok(segment) => self.ready.push_back(segment),
@@ -205,17 +198,14 @@ impl<R: Read> Decoder<R> {
         Ok(())
     }
 
+    /// Until `current` has unread bytes or the demo is done.
     fn advance(&mut self) -> Result<()> {
-        while !self.is_done && self.at == self.current.len() {
-            if let Some((out, charge)) = self.ready.pop_front() {
-                self.current = out;
-                self.current_charge = Some(charge);
-                self.at = 0;
+        while !self.is_done && self.at == self.current_bytes().len() {
+            self.current = self.ready.pop_front();
+            self.at = 0;
+            if self.current.is_some() {
                 continue;
             }
-            self.current = Vec::new();
-            self.current_charge = None;
-            self.at = 0;
             if let Some(error) = self.deferred_error.take() {
                 return Err(error);
             }
@@ -238,18 +228,11 @@ impl<R: Read> Decoder<R> {
             }
             if self.layout.is_complete() {
                 let mut one = [0u8; 1];
-                loop {
-                    match self.input.read(&mut one) {
-                        Ok(0) => break,
-                        Ok(_) => return bad("trailing bytes"),
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                        Err(error) => return Err(error.into()),
-                    }
+                if read_up_to(&mut self.input, &mut one)? != 0 {
+                    return bad("trailing bytes");
                 }
                 self.layout.finish()?;
-                if let Some(check) = self.check.take() {
-                    check.finish(&self.layout)?;
-                }
+                std::mem::take(&mut self.check).finish(&self.layout)?;
                 self.is_done = true;
                 break;
             }
@@ -263,6 +246,20 @@ impl<R: Read> Read for Decoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         Ok(self.read_demo(buf)?)
     }
+}
+
+/// Fills `buf` until it is full or the input ends; returns the count.
+fn read_up_to(input: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match input.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read.min(buf.len() - filled),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
 }
 
 fn bytes_at(file: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
@@ -332,7 +329,7 @@ pub(crate) fn decode_segment(
         return bad("segment length");
     }
     let coded = body
-        .get(header.coded_offset..)
+        .get(SEGMENT_FIELDS_LEN..)
         .ok_or(Error::Corrupt("segment header"))?;
     let transform_header = segment::parse_transform_header(coded, dst.len())?;
     segment::decode(coded, &transform_header, dst, models_block, budget)?;
@@ -386,24 +383,21 @@ pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result
     let size = layout.header.size_bytes;
     let _charge = budget.alloc(size)?;
     let mut out = try_zeroed(usize::try_from(size).map_err(|_| Error::MemoryLimit("demo size"))?)?;
-    let segment_count = layout.segments.len();
-    let mut slices: Vec<std::sync::Mutex<&mut [u8]>> = Vec::with_capacity(segment_count);
+    let mut slices: Vec<&mut [u8]> = Vec::with_capacity(layout.segments.len());
     let mut rest: &mut [u8] = &mut out;
     for (_, header) in &layout.segments {
         let (slice, after) = rest.split_at_mut(header.raw_len as usize);
-        slices.push(std::sync::Mutex::new(slice));
+        slices.push(slice);
         rest = after;
     }
-    let results = par_map(threads, segment_count, |index| {
-        let (span, header) = &layout.segments[index];
-        let body = span
-            .body_range()
-            .and_then(|range| file.get(range))
-            .ok_or(Error::Corrupt("truncated"))?;
-        let mut dst = slices[index].lock().map_err(|_| Error::Internal("lock"))?;
-        decode_segment(&layout, body, header, &mut dst, &budget)
-    });
-    drop(slices);
+    let results = par_map(
+        threads,
+        layout.segments.iter().zip(slices),
+        |((span, header), dst)| {
+            let body = span.body(file).ok_or(Error::Corrupt("truncated"))?;
+            decode_segment(&layout, body, header, dst, &budget)
+        },
+    );
     let mut check = DemoCheck::default();
     let mut at = 0usize;
     for (result, (_, header)) in results.into_iter().zip(&layout.segments) {

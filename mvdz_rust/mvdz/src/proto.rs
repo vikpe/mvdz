@@ -1,6 +1,8 @@
 //! `svc_*` body sizes as mvdsv `sv_ents.c` and ezquake `cl_parse.c` write them. A mis-sized
 //! command stays lossless: both directions size it alike.
 
+use crate::fields::{le32, read_u8, read_u16, read_u32, skip, skip_cstr};
+
 pub(crate) const PROTOCOL_VERSION: u32 = 28;
 
 pub(crate) const FTE_PEXT_COLOR_MOD: u32 = 1 << 19;
@@ -42,18 +44,24 @@ pub(crate) const TE_LIGHTNING_1: u8 = 5;
 pub(crate) const TE_LIGHTNING_2: u8 = 6;
 pub(crate) const TE_LIGHTNING_3: u8 = 9;
 
-pub(crate) const U_ANGLE_1: u32 = 1 << 0;
-pub(crate) const U_ANGLE_2: u32 = 1 << 12;
-pub(crate) const U_ANGLE_3: u32 = 1 << 1;
+const U_ANGLE_1: u32 = 1 << 0;
+const U_ANGLE_2: u32 = 1 << 12;
+const U_ANGLE_3: u32 = 1 << 1;
 pub(crate) const U_COLOR_MAP: u32 = 1 << 3;
 pub(crate) const U_EFFECTS: u32 = 1 << 5;
 pub(crate) const U_FRAME: u32 = 1 << 13;
 pub(crate) const U_MODEL: u32 = 1 << 2;
 pub(crate) const U_MORE_BITS: u32 = 1 << 15;
-pub(crate) const U_ORIGIN_1: u32 = 1 << 9;
-pub(crate) const U_ORIGIN_2: u32 = 1 << 10;
-pub(crate) const U_ORIGIN_3: u32 = 1 << 11;
+const U_ORIGIN_1: u32 = 1 << 9;
+const U_ORIGIN_2: u32 = 1 << 10;
+const U_ORIGIN_3: u32 = 1 << 11;
 pub(crate) const U_SKIN: u32 = 1 << 4;
+/// By axis.
+pub(crate) const ORIGIN_ANGLE_FLAGS: [(u32, u32); 3] = [
+    (U_ORIGIN_1, U_ANGLE_1),
+    (U_ORIGIN_2, U_ANGLE_2),
+    (U_ORIGIN_3, U_ANGLE_3),
+];
 
 pub(crate) const U_FTE_COLOR_MOD: u32 = 1 << 10;
 pub(crate) const U_FTE_ENTITY_DBL: u32 = 1 << 5;
@@ -117,18 +125,14 @@ impl Proto {
         const PROTOCOL_VERSION_FTE: u32 = u32::from_le_bytes(*b"FTEX");
         const PROTOCOL_VERSION_FTE_2: u32 = u32::from_le_bytes(*b"FTE2");
         const PROTOCOL_VERSION_MVD_1: u32 = u32::from_le_bytes(*b"MVD1");
-        let mut offset = 0;
-        while offset + 4 <= body.len() {
-            let protocol = le32(&body[offset..]);
-            offset += 4;
+        let mut rest = body;
+        while let Some(protocol) = read_u32(&mut rest) {
             if protocol == PROTOCOL_VERSION {
                 break;
             }
-            if offset + 4 > body.len() {
+            let Some(extensions) = read_u32(&mut rest) else {
                 break;
-            }
-            let extensions = le32(&body[offset..]);
-            offset += 4;
+            };
             match protocol {
                 PROTOCOL_VERSION_FTE => self.fte = extensions,
                 PROTOCOL_VERSION_FTE_2 => self.fte2 = extensions,
@@ -141,19 +145,16 @@ impl Proto {
 
     /// Excludes the command byte.
     pub(crate) fn command_body_size(&self, command: u8, body: &[u8]) -> Option<usize> {
-        let mut cursor = Cursor {
-            buf: body,
-            offset: 0,
-        };
-        self.size_inner(command, &mut cursor)?;
-        Some(cursor.offset)
+        let mut rest = body;
+        self.size_inner(command, &mut rest)?;
+        Some(body.len() - rest.len())
     }
 
     #[expect(
         clippy::match_same_arms,
         reason = "one arm per message layout, in svc order"
     )]
-    fn size_inner(&self, command: u8, cursor: &mut Cursor) -> Option<()> {
+    fn size_inner(&self, command: u8, rest: &mut &[u8]) -> Option<()> {
         const SVC_BIG_KICK: u8 = 35;
         const SVC_CD_TRACK: u8 = 32;
         const SVC_CHOKE_COUNT: u8 = 44;
@@ -193,243 +194,186 @@ impl Proto {
 
         match command {
             SVC_NOP | SVC_KILLED_MONSTER | SVC_FOUND_SECRET | SVC_SMALL_KICK | SVC_BIG_KICK => {}
-            SVC_DISCONNECT | SVC_STUFF_TEXT | SVC_CENTER_PRINT | SVC_FINALE => cursor.str()?,
-            SVC_UPDATE_STAT => cursor.skip(2)?,
+            SVC_DISCONNECT | SVC_STUFF_TEXT | SVC_CENTER_PRINT | SVC_FINALE => skip_cstr(rest)?,
+            SVC_UPDATE_STAT => skip(rest, 2)?,
             SVC_SOUND => {
-                let channel = cursor.u16()?;
+                let channel = read_u16(rest)?;
                 if channel & SND_VOLUME != 0 {
-                    cursor.skip(1)?;
+                    skip(rest, 1)?;
                 }
                 if channel & SND_ATTENUATION != 0 {
-                    cursor.skip(1)?;
+                    skip(rest, 1)?;
                 }
-                cursor.skip(1 + 3 * self.coord())?;
+                skip(rest, 1 + 3 * self.coord())?;
             }
             SVC_PRINT => {
-                cursor.skip(1)?;
-                cursor.str()?;
+                skip(rest, 1)?;
+                skip_cstr(rest)?;
             }
-            SVC_SET_ANGLE => cursor.skip(1 + 3 * self.angle())?,
+            SVC_SET_ANGLE => skip(rest, 1 + 3 * self.angle())?,
             SVC_SERVER_DATA => {
                 loop {
-                    if cursor.u32()? == PROTOCOL_VERSION {
+                    if read_u32(rest)? == PROTOCOL_VERSION {
                         break;
                     }
-                    cursor.skip(4)?;
+                    skip(rest, 4)?;
                 }
-                cursor.skip(4)?;
-                cursor.str()?;
-                cursor.skip(4)?;
-                cursor.str()?;
-                cursor.skip(40)?;
+                skip(rest, 4)?;
+                skip_cstr(rest)?;
+                skip(rest, 4)?;
+                skip_cstr(rest)?;
+                skip(rest, 40)?;
             }
             SVC_LIGHT_STYLE => {
-                cursor.skip(1)?;
-                cursor.str()?;
+                skip(rest, 1)?;
+                skip_cstr(rest)?;
             }
-            SVC_UPDATE_FRAGS => cursor.skip(3)?,
-            SVC_DAMAGE => cursor.skip(2 + 3 * self.coord())?,
-            SVC_SPAWN_STATIC => cursor.skip(4 + 3 * (self.coord() + self.angle()))?,
+            SVC_UPDATE_FRAGS => skip(rest, 3)?,
+            SVC_DAMAGE => skip(rest, 2 + 3 * self.coord())?,
+            SVC_SPAWN_STATIC => skip(rest, 4 + 3 * (self.coord() + self.angle()))?,
             SVC_FTE_SPAWN_STATIC_2 | SVC_FTE_SPAWN_BASELINE_2 => {
-                let word = u32::from(cursor.u16()?);
-                self.delta_size(cursor, word)?;
+                let word = u32::from(read_u16(rest)?);
+                self.delta_size(rest, word)?;
             }
-            SVC_SPAWN_BASELINE => cursor.skip(2 + 4 + 3 * (self.coord() + self.angle()))?,
-            SVC_TEMP_ENTITY => match cursor.u8()? {
+            SVC_SPAWN_BASELINE => skip(rest, 2 + 4 + 3 * (self.coord() + self.angle()))?,
+            SVC_TEMP_ENTITY => match read_u8(rest)? {
                 TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
-                    cursor.skip(2 + 6 * self.coord())?;
+                    skip(rest, 2 + 6 * self.coord())?;
                 }
                 TE_SPIKE | TE_SUPER_SPIKE | TE_EXPLOSION | TE_TAR_EXPLOSION | TE_WIZ_SPIKE
                 | TE_KNIGHT_SPIKE | TE_LAVA_SPLASH | TE_TELEPORT | TE_LIGHTNING_BLOOD => {
-                    cursor.skip(3 * self.coord())?;
+                    skip(rest, 3 * self.coord())?;
                 }
-                TE_GUNSHOT | TE_BLOOD => cursor.skip(1 + 3 * self.coord())?,
+                TE_GUNSHOT | TE_BLOOD => skip(rest, 1 + 3 * self.coord())?,
                 _ => return None,
             },
-            SVC_SET_PAUSE | SVC_CD_TRACK | SVC_CHOKE_COUNT => cursor.skip(1)?,
-            SVC_SPAWN_STATIC_SOUND => cursor.skip(3 * self.coord() + 3)?,
-            SVC_INTERMISSION => cursor.skip(3 * self.wide_coord() + 3 * self.angle())?,
-            SVC_UPDATE_PING => cursor.skip(3)?,
-            SVC_UPDATE_ENTER_TIME | SVC_UPDATE_STAT_LONG => cursor.skip(5)?,
-            SVC_MUZZLE_FLASH | SVC_UPDATE_PL => cursor.skip(2)?,
+            SVC_SET_PAUSE | SVC_CD_TRACK | SVC_CHOKE_COUNT => skip(rest, 1)?,
+            SVC_SPAWN_STATIC_SOUND => skip(rest, 3 * self.coord() + 3)?,
+            SVC_INTERMISSION => skip(rest, 3 * self.wide_coord() + 3 * self.angle())?,
+            SVC_UPDATE_PING => skip(rest, 3)?,
+            SVC_UPDATE_ENTER_TIME | SVC_UPDATE_STAT_LONG => skip(rest, 5)?,
+            SVC_MUZZLE_FLASH | SVC_UPDATE_PL => skip(rest, 2)?,
             SVC_UPDATE_USER_INFO => {
-                cursor.skip(5)?;
-                cursor.str()?;
+                skip(rest, 5)?;
+                skip_cstr(rest)?;
             }
             SVC_DOWNLOAD => {
-                let size = cursor.u16()?.cast_signed();
-                cursor.skip(1)?;
+                let size = read_u16(rest)?.cast_signed();
+                skip(rest, 1)?;
                 if size > 0 {
-                    cursor.skip(size.cast_unsigned() as usize)?;
+                    skip(rest, size.cast_unsigned() as usize)?;
                 }
             }
             SVC_PLAYER_INFO => {
-                cursor.skip(1)?;
-                let flags = cursor.u16()?;
-                cursor.skip(1)?;
+                skip(rest, 1)?;
+                let flags = read_u16(rest)?;
+                skip(rest, 1)?;
                 for axis in 0..3 {
                     if flags & DF_ORIGIN << axis != 0 {
-                        cursor.skip(self.coord())?;
+                        skip(rest, self.coord())?;
                     }
                 }
                 for axis in 0..3 {
                     if flags & DF_ANGLES << axis != 0 {
-                        cursor.skip(2)?;
+                        skip(rest, 2)?;
                     }
                 }
                 for flag in [DF_MODEL, DF_SKIN_NUM, DF_EFFECTS, DF_WEAPON_FRAME] {
                     if flags & flag != 0 {
-                        cursor.skip(1)?;
+                        skip(rest, 1)?;
                     }
                 }
             }
             SVC_NAILS => {
-                let count = cursor.u8()? as usize;
-                cursor.skip(6 * count)?;
+                let count = read_u8(rest)? as usize;
+                skip(rest, 6 * count)?;
             }
             SVC_NAILS_2 => {
-                let count = cursor.u8()? as usize;
-                cursor.skip(7 * count)?;
+                let count = read_u8(rest)? as usize;
+                skip(rest, 7 * count)?;
             }
             SVC_MODEL_LIST | SVC_SOUND_LIST => {
-                cursor.skip(1)?;
+                skip(rest, 1)?;
                 loop {
-                    let start = cursor.offset;
-                    cursor.str()?;
-                    if cursor.offset == start + 1 {
+                    let before = rest.len();
+                    skip_cstr(rest)?;
+                    if before - rest.len() == 1 {
                         break;
                     }
                 }
-                cursor.skip(1)?;
+                skip(rest, 1)?;
             }
             SVC_PACKET_ENTITIES | SVC_DELTA_PACKET_ENTITIES => {
                 if command == SVC_DELTA_PACKET_ENTITIES {
-                    cursor.skip(1)?;
+                    skip(rest, 1)?;
                 }
                 loop {
-                    let word = u32::from(cursor.u16()?);
+                    let word = u32::from(read_u16(rest)?);
                     if word == 0 {
                         break;
                     }
-                    self.delta_size(cursor, word)?;
+                    self.delta_size(rest, word)?;
                 }
             }
-            SVC_MAX_SPEED | SVC_ENT_GRAVITY => cursor.skip(4)?,
+            SVC_MAX_SPEED | SVC_ENT_GRAVITY => skip(rest, 4)?,
             SVC_SET_INFO => {
-                cursor.skip(1)?;
-                cursor.str()?;
-                cursor.str()?;
+                skip(rest, 1)?;
+                skip_cstr(rest)?;
+                skip_cstr(rest)?;
             }
             SVC_SERVER_INFO => {
-                cursor.str()?;
-                cursor.str()?;
+                skip_cstr(rest)?;
+                skip_cstr(rest)?;
             }
             _ => return None,
         }
         Some(())
     }
 
-    fn delta_size(&self, cursor: &mut Cursor, word: u32) -> Option<()> {
+    fn delta_size(&self, rest: &mut &[u8], word: u32) -> Option<()> {
         let mut bits = word & !511;
         let mut more = 0u32;
         if bits & U_MORE_BITS != 0 {
-            bits |= u32::from(cursor.u8()?);
+            bits |= u32::from(read_u8(rest)?);
         }
         if bits & U_FTE_EVEN_MORE != 0 && self.fte != 0 {
-            more = u32::from(cursor.u8()?);
+            more = u32::from(read_u8(rest)?);
             if more & U_FTE_YET_MORE != 0 {
-                more |= u32::from(cursor.u8()?) << 8;
+                more |= u32::from(read_u8(rest)?) << 8;
             }
         }
         if bits & U_MODEL != 0 {
-            cursor.skip(1)?;
+            skip(rest, 1)?;
         } else if more & U_FTE_MODEL_DBL != 0 {
-            cursor.skip(2)?;
+            skip(rest, 2)?;
         }
         for flag in [U_FRAME, U_COLOR_MAP, U_SKIN, U_EFFECTS] {
             if bits & flag != 0 {
-                cursor.skip(1)?;
+                skip(rest, 1)?;
             }
         }
-        for (origin_flag, angle_flag) in [
-            (U_ORIGIN_1, U_ANGLE_1),
-            (U_ORIGIN_2, U_ANGLE_2),
-            (U_ORIGIN_3, U_ANGLE_3),
-        ] {
+        for (origin_flag, angle_flag) in ORIGIN_ANGLE_FLAGS {
             if bits & origin_flag != 0 {
-                cursor.skip(self.coord())?;
+                skip(rest, self.coord())?;
             }
             if bits & angle_flag != 0 {
-                cursor.skip(self.angle())?;
+                skip(rest, self.angle())?;
             }
         }
         if more & U_FTE_TRANS != 0 && self.fte & FTE_PEXT_TRANS != 0 {
-            cursor.skip(1)?;
+            skip(rest, 1)?;
         }
         if more & U_FTE_SCALE != 0 {
-            cursor.skip(1)?;
+            skip(rest, 1)?;
         }
         if more & U_FTE_FATNESS != 0 {
-            cursor.skip(1)?;
+            skip(rest, 1)?;
         }
         if more & U_FTE_COLOR_MOD != 0 && self.fte & FTE_PEXT_COLOR_MOD != 0 {
-            cursor.skip(3)?;
+            skip(rest, 3)?;
         }
         Some(())
     }
-}
-
-#[derive(Debug)]
-struct Cursor<'a> {
-    buf: &'a [u8],
-    offset: usize,
-}
-
-impl Cursor<'_> {
-    #[inline]
-    fn skip(&mut self, count: usize) -> Option<()> {
-        if count > self.buf.len() - self.offset {
-            return None;
-        }
-        self.offset += count;
-        Some(())
-    }
-    #[inline]
-    fn u8(&mut self) -> Option<u8> {
-        let value = *self.buf.get(self.offset)?;
-        self.offset += 1;
-        Some(value)
-    }
-    #[inline]
-    fn u16(&mut self) -> Option<u16> {
-        if self.buf.len() - self.offset < 2 {
-            return None;
-        }
-        let value = u16::from_le_bytes([self.buf[self.offset], self.buf[self.offset + 1]]);
-        self.offset += 2;
-        Some(value)
-    }
-    #[inline]
-    fn u32(&mut self) -> Option<u32> {
-        if self.buf.len() - self.offset < 4 {
-            return None;
-        }
-        let value = le32(&self.buf[self.offset..]);
-        self.offset += 4;
-        Some(value)
-    }
-    #[inline]
-    fn str(&mut self) -> Option<()> {
-        let rest = &self.buf[self.offset..];
-        let len = rest.iter().position(|&byte| byte == 0)?;
-        self.offset += len + 1;
-        Some(())
-    }
-}
-
-#[inline]
-pub(crate) fn le32(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(*bytes.first_chunk().expect("caller checked 4 bytes"))
 }
 
 /// Includes the frame header.

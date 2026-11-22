@@ -1,24 +1,26 @@
 //! The structural walker, one routine both ways. Numeric fields are only reserved and
 //! listed in [`Records`]; `numeric.rs` fills them in after the walk.
 
+use crate::budget::Charge;
+use crate::fields::{le16, le32};
 use crate::proto::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
-    DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS, Proto,
-    SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT, SVC_DAMAGE, SVC_DELTA_PACKET_ENTITIES,
-    SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES, SVC_PLAYER_INFO, SVC_PRINT, SVC_SERVER_DATA,
-    SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT, SVC_TEMP_ENTITY, SVC_UPDATE_ENTER_TIME,
-    SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_PL, SVC_UPDATE_STAT, SVC_UPDATE_STAT_LONG,
-    TE_BLOOD, TE_GUNSHOT, TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3, U_ANGLE_1, U_ANGLE_2,
-    U_ANGLE_3, U_COLOR_MAP, U_EFFECTS, U_FRAME, U_FTE_COLOR_MOD, U_FTE_ENTITY_DBL,
-    U_FTE_ENTITY_DBL_2, U_FTE_EVEN_MORE, U_FTE_FATNESS, U_FTE_MODEL_DBL, U_FTE_SCALE, U_FTE_TRANS,
-    U_FTE_YET_MORE, U_MODEL, U_MORE_BITS, U_ORIGIN_1, U_ORIGIN_2, U_ORIGIN_3, U_SKIN, frame_len,
-    le32,
+    DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS,
+    ORIGIN_ANGLE_FLAGS, Proto, SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT, SVC_DAMAGE,
+    SVC_DELTA_PACKET_ENTITIES, SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES, SVC_PLAYER_INFO,
+    SVC_PRINT, SVC_SERVER_DATA, SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT, SVC_TEMP_ENTITY,
+    SVC_UPDATE_ENTER_TIME, SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_PL, SVC_UPDATE_STAT,
+    SVC_UPDATE_STAT_LONG, TE_BLOOD, TE_GUNSHOT, TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3,
+    U_COLOR_MAP, U_EFFECTS, U_FRAME, U_FTE_COLOR_MOD, U_FTE_ENTITY_DBL, U_FTE_ENTITY_DBL_2,
+    U_FTE_EVEN_MORE, U_FTE_FATNESS, U_FTE_MODEL_DBL, U_FTE_SCALE, U_FTE_TRANS, U_FTE_YET_MORE,
+    U_MODEL, U_MORE_BITS, U_SKIN, frame_len,
 };
 use crate::streams::{
     CMD, ESCLEN, FRAGS, GEN_BASE, HIDDMG, HIDLEN, HIDMISC, HIDTAG, HIDTYPE, MASK, NAILS, PE_A,
     PE_BITS, PE_ENT, PE_FRAME, PE_HDR, PE_MISC, PE_MODEL, PE_MORE, PI_EFF, PI_FLAGS, PI_FRAME,
     PI_MODEL, PI_NUM, PI_SKIN, PI_WFRAME, PING, PR_LEVEL, RAW, SET, SND_CH, SND_MISC, SND_NUM,
-    SNDF, ST_IDX, ST_VAL, STL_IDX, STL_VAL, TAIL, TE_MISC, TE_TYPE, TEF, TEXT, TIME, TYPE, UC,
+    SNDF, ST_IDX, ST_VAL, STL_IDX, STL_VAL, STREAM_COUNT, TAIL, TE_MISC, TE_TYPE, TEF, TEXT, TIME,
+    TYPE, UC, UC_MIN_SYMBOLS,
 };
 
 pub(crate) const NO_OFFSET: u32 = u32::MAX;
@@ -105,13 +107,14 @@ pub(crate) struct RecordList<T> {
 }
 
 impl<T> RecordList<T> {
-    pub(crate) fn fixed(capacity: usize) -> crate::error::Result<Self> {
+    fn fixed(capacity: usize, charge: &mut Charge) -> crate::error::Result<Self> {
+        charge.grow((capacity * std::mem::size_of::<T>()) as u64)?;
         Ok(Self {
             records: crate::budget::try_with_capacity(capacity)?,
             capacity,
         })
     }
-    pub(crate) fn growable(reserve: usize) -> Self {
+    fn growable(reserve: usize) -> Self {
         Self {
             records: Vec::with_capacity(reserve),
             capacity: usize::MAX,
@@ -149,19 +152,18 @@ impl Records {
             usercmds: RecordList::growable(0),
         }
     }
+    /// Sized by the symbol counts of the streams that hold one symbol per record, and charged
+    /// to `charge`.
     pub(crate) fn fixed(
-        player_infos: usize,
-        packet_entities: usize,
-        sounds: usize,
-        temp_entities: usize,
-        usercmds: usize,
+        stream_counts: &[usize; STREAM_COUNT],
+        charge: &mut Charge,
     ) -> crate::error::Result<Self> {
         Ok(Self {
-            player_infos: RecordList::fixed(player_infos)?,
-            packet_entities: RecordList::fixed(packet_entities)?,
-            sounds: RecordList::fixed(sounds)?,
-            temp_entities: RecordList::fixed(temp_entities)?,
-            usercmds: RecordList::fixed(usercmds)?,
+            player_infos: RecordList::fixed(stream_counts[PI_NUM], charge)?,
+            packet_entities: RecordList::fixed(stream_counts[PE_BITS], charge)?,
+            sounds: RecordList::fixed(stream_counts[SND_NUM], charge)?,
+            temp_entities: RecordList::fixed(stream_counts[TE_TYPE], charge)?,
+            usercmds: RecordList::fixed(stream_counts[UC] / UC_MIN_SYMBOLS, charge)?,
         })
     }
 }
@@ -196,13 +198,13 @@ struct EntityState {
 
 #[derive(Debug)]
 pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
-    pub(crate) src: &'a [u8],
+    src: &'a [u8],
     dst: &'a mut [u8],
-    pub(crate) offset: usize,
+    offset: usize,
     pub(crate) has_error: bool,
     pub(crate) io: IO,
     pub(crate) proto: Proto,
-    pub(crate) records: &'a mut Records,
+    records: &'a mut Records,
     players: Box<[PlayerState; 256]>,
     entities: Box<[EntityState; 2048]>,
     stats: Box<[[u8; 256]; 32]>,
@@ -225,7 +227,23 @@ pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     previous_entity_gap: u8,
     usercmd_previous_players: [u8; 2],
     usercmds: Box<[UsercmdState; 256]>,
-    pub(crate) end_time_ms: u32,
+}
+
+impl<'a, IO: SymbolIo> Walker<'a, true, IO> {
+    pub(crate) fn encoder(src: &'a [u8], records: &'a mut Records, io: IO, proto: Proto) -> Self {
+        Self::new(src, &mut [], records, io, proto)
+    }
+}
+
+impl<'a, IO: SymbolIo> Walker<'a, false, IO> {
+    pub(crate) fn decoder(
+        dst: &'a mut [u8],
+        records: &'a mut Records,
+        io: IO,
+        proto: Proto,
+    ) -> Self {
+        Self::new(&[], dst, records, io, proto)
+    }
 }
 
 impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
@@ -233,7 +251,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         clippy::large_stack_arrays,
         reason = "fixed-size tables keep byte-indexed lookups free of bounds checks"
     )]
-    pub(crate) fn new(
+    fn new(
         src: &'a [u8],
         dst: &'a mut [u8],
         records: &'a mut Records,
@@ -270,7 +288,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             previous_entity_gap: 0,
             usercmd_previous_players: [0; 2],
             usercmds: Box::new([UsercmdState::default(); 256]),
-            end_time_ms: 0,
         }
     }
 
@@ -302,6 +319,20 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             self.has_error = true;
         }
         self.offset += 1;
+    }
+
+    #[inline(always)]
+    fn write_u16(&mut self, value: u16) {
+        let [low, high] = value.to_le_bytes();
+        self.write_byte(low);
+        self.write_byte(high);
+    }
+
+    /// The origin fields of player `entity` (1-based), if it is one.
+    fn player_refs(&self, entity: usize) -> Option<[u32; 3]> {
+        (1..=32)
+            .contains(&entity)
+            .then(|| self.player_origin_offsets[entity - 1])
     }
 
     #[inline(always)]
@@ -435,7 +466,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
             let tail_len = self.src.len() - self.offset;
             self.copy_blob(TAIL, tail_len);
-            self.end_time_ms = self.time;
             tail_len
         } else {
             let stop = self.dst.len().saturating_sub(tail);
@@ -446,7 +476,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 self.has_error = true;
             }
             self.copy_blob(TAIL, tail);
-            self.end_time_ms = self.time;
             tail
         }
     }
@@ -729,10 +758,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 let bit15_byte = u16::from(self.io.byte(PI_FLAGS, 0x200, 0));
                 changed |= (rare_byte & 0xf) << 6 | (rare_byte >> 4) << 11 | (bit15_byte & 1) << 15;
             }
-            let flags = changed ^ previous;
-            let [low, high] = flags.to_le_bytes();
-            self.write_byte(low);
-            self.write_byte(high);
+            self.write_u16(changed ^ previous);
             changed
         };
         changed ^ previous
@@ -755,15 +781,13 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         let origin_count = (flags & ORIGIN_FLAGS).count_ones() as usize;
         let angle_count = (flags & ANGLE_FLAGS).count_ones() as usize;
         let offset = self.reserve(origin_count * coord_width + angle_count * 2);
-        if !self.records.player_infos.push(PlayerInfoRecord {
+        self.has_error |= !self.records.player_infos.push(PlayerInfoRecord {
             offset,
             time: self.time,
             flags,
             number,
             has_float_coords: self.proto.has_float_coords,
-        }) {
-            self.has_error = true;
-        }
+        });
         let mut origin_offset = offset;
         for (axis, axis_offset) in self.player_origin_offsets[number as usize]
             .iter_mut()
@@ -836,7 +860,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                     self.has_error = true;
                     return;
                 }
-                word = u16::from_le_bytes([self.src[self.offset], self.src[self.offset + 1]]);
+                word = le16(&self.src[self.offset..]);
                 self.offset += 2;
                 if word == 0 {
                     self.io.byte(PE_ENT, entity_context, 0);
@@ -866,8 +890,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                     gap |= i32::from(self.io.byte(PE_ENT, 2 << 12, 0)) << 8;
                 }
                 if gap == 0 {
-                    self.write_byte(0);
-                    self.write_byte(0);
+                    self.write_u16(0);
                     break;
                 }
                 entity = ((previous_entity + gap) & 511).cast_unsigned() as usize;
@@ -883,9 +906,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                     self.has_error = true;
                     break;
                 }
-                let [low, high] = word.to_le_bytes();
-                self.write_byte(low);
-                self.write_byte(high);
+                self.write_u16(word);
             }
             let entity_number = i32::from(word & 511);
             self.previous_entity_gap = (entity_number - previous_entity)
@@ -942,14 +963,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             self.blob_byte(PE_MISC);
         }
         let mut record_bits = 0u16;
-        for (axis, (origin_flag, angle_flag)) in [
-            (U_ORIGIN_1, U_ANGLE_1),
-            (U_ORIGIN_2, U_ANGLE_2),
-            (U_ORIGIN_3, U_ANGLE_3),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {
             if bits & origin_flag != 0 {
                 record_bits |= 1 << (2 * axis);
             }
@@ -975,14 +989,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             update_bits: (word >> 9) as u8,
         };
         let coord_width = self.proto.coord();
-        for (axis, (origin_flag, angle_flag)) in [
-            (U_ORIGIN_1, U_ANGLE_1),
-            (U_ORIGIN_2, U_ANGLE_2),
-            (U_ORIGIN_3, U_ANGLE_3),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {
             if bits & origin_flag != 0 {
                 let offset = self.reserve(coord_width);
                 self.entity_origin_offsets[number][axis] = offset;
@@ -1003,9 +1010,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 }
             }
         }
-        if !self.records.packet_entities.push(record) {
-            self.has_error = true;
-        }
+        self.has_error |= !self.records.packet_entities.push(record);
         if more & U_FTE_TRANS != 0 && self.proto.fte & FTE_PEXT_TRANS != 0 {
             self.blob_byte(PE_MISC);
         }
@@ -1036,22 +1041,20 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             self.copy_blob(SNDF, 12);
             return;
         }
-        let (refs, kind) = if (1..=32).contains(&entity) {
-            (self.player_origin_offsets[entity - 1], 1)
+        let (refs, kind) = if let Some(refs) = self.player_refs(entity) {
+            (refs, 1)
         } else if entity < 2048 {
             (self.entity_origin_offsets[entity], 2)
         } else {
             ([NO_OFFSET; 3], 0)
         };
         let offset = self.reserve(6);
-        if !self.records.sounds.push(SoundRecord {
+        self.has_error |= !self.records.sounds.push(SoundRecord {
             offset,
             refs,
             kind,
             number: sound_number,
-        }) {
-            self.has_error = true;
-        }
+        });
     }
 
     fn temp_entity(&mut self) {
@@ -1076,45 +1079,22 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
             return;
         }
-        match kind {
+        let (refs, len) = match kind {
             TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
                 let entity = self.blob_le(TE_MISC, 2) as usize;
-                let refs = if (1..=32).contains(&entity) {
-                    self.player_origin_offsets[entity - 1]
-                } else {
-                    [NO_OFFSET; 3]
-                };
-                let offset = self.reserve(12);
-                if !self
-                    .records
-                    .temp_entities
-                    .push(TempEntityRecord { offset, refs, kind })
-                {
-                    self.has_error = true;
-                }
+                (self.player_refs(entity).unwrap_or([NO_OFFSET; 3]), 12)
             }
             TE_GUNSHOT | TE_BLOOD => {
                 self.blob_byte(TE_MISC);
-                let offset = self.reserve(6);
-                if !self.records.temp_entities.push(TempEntityRecord {
-                    offset,
-                    refs: [NO_OFFSET; 3],
-                    kind,
-                }) {
-                    self.has_error = true;
-                }
+                ([NO_OFFSET; 3], 6)
             }
-            _ => {
-                let offset = self.reserve(6);
-                if !self.records.temp_entities.push(TempEntityRecord {
-                    offset,
-                    refs: [NO_OFFSET; 3],
-                    kind,
-                }) {
-                    self.has_error = true;
-                }
-            }
-        }
+            _ => ([NO_OFFSET; 3], 6),
+        };
+        let offset = self.reserve(len);
+        self.has_error |= !self
+            .records
+            .temp_entities
+            .push(TempEntityRecord { offset, refs, kind });
     }
 
     /// `dem_multiple` with mask 0: blocks of [u32 len][u16 type][len bytes].
@@ -1206,14 +1186,12 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 }
             }
         }
-        if grid != 0
-            && !self.records.usercmds.push(UsercmdRecord {
+        if grid != 0 {
+            self.has_error |= !self.records.usercmds.push(UsercmdRecord {
                 pitch_offset: offset,
                 number: player,
                 grid_axes: grid,
-            })
-        {
-            self.has_error = true;
+            });
         }
         for (axis, axis_move) in state.moves.iter_mut().enumerate() {
             let low = self.coded_byte(

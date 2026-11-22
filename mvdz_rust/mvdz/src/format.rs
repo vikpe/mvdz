@@ -3,12 +3,13 @@
 use crate::budget::{Budget, Charge};
 use crate::coder::rans::ModelsBlock;
 use crate::error::{Error, Result, bad};
-use crate::fields::read_u32;
+use crate::fields::{put_u32, put_usize, read_array, read_u32, read_u64};
 
 pub(crate) const MAGIC: &[u8; 4] = b"MVDZ";
 pub(crate) const VERSION: u32 = 2;
 pub(crate) const HEADER_LEN: usize = 64;
 pub(crate) const LEN_FIELD_LEN: usize = 4;
+pub(crate) const SEGMENT_FIELDS_LEN: usize = 4 + 4 + 4;
 
 pub(crate) const MAX_SEGMENT_RAW: u64 = 1 << 20;
 /// Twice [`MAX_SEGMENT_RAW`]: far above any segment the encoder writes.
@@ -62,21 +63,19 @@ pub(crate) fn header_bytes(header: &Header) -> [u8; HEADER_LEN] {
 }
 
 pub(crate) fn parse_header(bytes: &[u8]) -> Result<Header> {
-    if bytes.first_chunk() != Some(MAGIC) {
+    let mut rest = bytes;
+    if read_array(&mut rest) != Some(MAGIC) {
         return Err(Error::NotMvdz);
     }
-    let version = bytes.get(4..).and_then(<[u8]>::first_chunk);
-    if version.is_some_and(|version| u32::from_le_bytes(*version) != VERSION) {
+    if read_u32(&mut rest).is_some_and(|version| version != VERSION) {
         return Err(Error::UnsupportedVersion);
     }
-    let field = |at: usize| {
-        let value = bytes.get(at..).and_then(<[u8]>::first_chunk)?;
-        Some(u64::from_le_bytes(*value))
-    };
-    let sha256 = bytes.get(32..).and_then(<[u8]>::first_chunk);
-    let (Some(size_bytes), Some(duration_ms), Some(crc32), Some(sha256)) =
-        (field(8), field(16), field(24), sha256)
-    else {
+    let (Some(size_bytes), Some(duration_ms), Some(crc32), Some(sha256)) = (
+        read_u64(&mut rest),
+        read_u64(&mut rest),
+        read_u64(&mut rest),
+        read_array::<32>(&mut rest),
+    ) else {
         return bad("truncated header");
     };
     let Ok(crc32) = u32::try_from(crc32) else {
@@ -91,19 +90,17 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<Header> {
 }
 
 pub(crate) fn models_block(out: &mut Vec<u8>, body: &[u8]) {
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    put_usize(out, body.len());
     out.extend_from_slice(body);
 }
 
 pub(crate) fn segment_block(out: &mut Vec<u8>, body: &[u8]) {
-    out.extend_from_slice(&((body.len() - SEGMENT_FIELDS_LEN) as u32).to_le_bytes());
+    put_usize(out, body.len() - SEGMENT_FIELDS_LEN);
     out.extend_from_slice(body);
 }
 
-pub(crate) fn len_field(bytes: &[u8]) -> Option<u64> {
-    Some(u64::from(u32::from_le_bytes(
-        bytes.get(..LEN_FIELD_LEN)?.try_into().ok()?,
-    )))
+pub(crate) fn len_field(mut bytes: &[u8]) -> Option<u64> {
+    read_u32(&mut bytes).map(u64::from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,8 +116,8 @@ impl SegmentSpan {
     pub(crate) fn end(&self) -> u64 {
         self.body_offset() + self.body_len
     }
-    pub(crate) fn body_range(&self) -> Option<std::ops::Range<usize>> {
-        Some(usize::try_from(self.body_offset()).ok()?..usize::try_from(self.end()).ok()?)
+    pub(crate) fn body<'a>(&self, file: &'a [u8]) -> Option<&'a [u8]> {
+        file.get(usize::try_from(self.body_offset()).ok()?..usize::try_from(self.end()).ok()?)
     }
 }
 
@@ -132,19 +129,15 @@ pub(crate) struct SegmentHeader {
     pub(crate) offset_ms: u64,
     pub(crate) duration_ms: u32,
     pub(crate) crc32: u32,
-    /// Of the coded data in the segment body.
-    pub(crate) coded_offset: usize,
 }
 
 pub(crate) fn segment_header_bytes(raw_len: u32, duration_ms: u32, crc: u32) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(SEGMENT_FIELDS_LEN);
-    bytes.extend_from_slice(&raw_len.to_le_bytes());
-    bytes.extend_from_slice(&duration_ms.to_le_bytes());
-    bytes.extend_from_slice(&crc.to_le_bytes());
+    put_u32(&mut bytes, raw_len);
+    put_u32(&mut bytes, duration_ms);
+    put_u32(&mut bytes, crc);
     bytes
 }
-
-pub(crate) const SEGMENT_FIELDS_LEN: usize = 4 + 4 + 4;
 
 pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
     let error = Error::Corrupt("segment header");
@@ -164,12 +157,11 @@ pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
         offset_ms: 0,
         duration_ms,
         crc32,
-        coded_offset: SEGMENT_FIELDS_LEN,
     })
 }
 
 /// Every reader applies the layout rules through it, so all accept and refuse the same files.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Layout {
     pub(crate) header: Header,
     pub(crate) models_block: Option<ModelsBlock>,
@@ -177,23 +169,20 @@ pub(crate) struct Layout {
     pub(crate) segments: Vec<(SegmentSpan, SegmentHeader)>,
     raw_len: u64,
     duration_ms: u64,
-    charge: Option<Charge>,
+    charge: Charge,
 }
 
 impl Layout {
     pub(crate) fn new(header: &[u8], budget: &Budget) -> Result<Self> {
         Ok(Self {
             header: parse_header(header)?,
-            charge: Some(Charge::none(budget)),
-            ..Default::default()
+            models_block: None,
+            has_models: false,
+            segments: Vec::new(),
+            raw_len: 0,
+            duration_ms: 0,
+            charge: Charge::none(budget),
         })
-    }
-
-    fn charge(&mut self, len: u64) -> Result<()> {
-        match &mut self.charge {
-            Some(charge) => charge.grow(len),
-            None => Ok(()),
-        }
     }
 
     pub(crate) fn has_models(&self) -> bool {
@@ -202,7 +191,7 @@ impl Layout {
 
     pub(crate) fn models(&mut self, models_block: Option<ModelsBlock>) -> Result<()> {
         if let Some(models_block) = &models_block {
-            self.charge(models_block.len())?;
+            self.charge.grow(models_block.len())?;
         }
         self.models_block = models_block;
         self.has_models = true;
@@ -229,7 +218,7 @@ impl Layout {
             }
             _ => return bad("segment sizes"),
         }
-        self.charge(SEGMENT_RECORD_LEN)?;
+        self.charge.grow(SEGMENT_RECORD_LEN)?;
         self.segments.push((*span, header));
         Ok(header)
     }

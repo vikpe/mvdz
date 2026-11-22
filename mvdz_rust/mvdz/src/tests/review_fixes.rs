@@ -2,7 +2,7 @@
 
 use super::common::*;
 use crate::Error;
-use crate::fields::put_u32;
+use crate::fields::put_usize;
 use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
@@ -46,11 +46,11 @@ fn r_m2_padded_model() {
     );
     let mut models = Vec::new();
     for field in [1, 0, header.len()] {
-        put_u32(&mut models, field);
+        put_usize(&mut models, field);
     }
     models.extend_from_slice(&header);
     let mut rans_body = Vec::new();
-    put_u32(&mut rans_body, 0);
+    put_usize(&mut rans_body, 0);
     let raw_len = table_count + 100;
     // fte, fte2, mvd1, tail; one entry (id 0, count, length); no blob body
     let mut body = Vec::new();
@@ -65,7 +65,7 @@ fn r_m2_padded_model() {
         rans_body.len(),
         0,
     ] {
-        put_u32(&mut body, field);
+        put_usize(&mut body, field);
     }
     body.extend_from_slice(&rans_body);
     let mut segment = segment_header_bytes(raw_len, 0, 0);
@@ -108,8 +108,8 @@ fn r_m4_segment_records_are_charged() -> anyhow::Result<()> {
     }
     .build();
     assert_eq!(decompress(&file, 1)?, demo);
-    // only the 60,000 segment records (3.8 MB) exceed it, not the 0.4 MB demo
-    let max_memory: u64 = 3 << 20;
+    // only the 60,000 segment records (2.9 MB) exceed it, not the 0.4 MB demo
+    let max_memory: u64 = 2 << 20;
     assert_eq!(
         crate::decode::decompress(&file, 1, max_memory).err(),
         Some(Error::MemoryLimit("memory"))

@@ -1,5 +1,5 @@
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 pub(crate) fn thread_count(max_threads: u8) -> usize {
     let available = if HAS_THREADS {
@@ -15,49 +15,48 @@ pub(crate) fn thread_count(max_threads: u8) -> usize {
 
 pub(crate) const HAS_THREADS: bool = !cfg!(target_family = "wasm");
 
-/// Results in index order.
-pub(crate) fn par_map<T: Send, F: Fn(usize) -> T + Sync>(
-    threads: usize,
-    count: usize,
-    job: F,
-) -> Vec<T> {
+/// Results in item order.
+pub(crate) fn par_map<I, T, F>(threads: usize, items: I, job: F) -> Vec<T>
+where
+    I: IntoIterator,
+    I::IntoIter: ExactSizeIterator + Send,
+    I::Item: Send,
+    T: Send,
+    F: Fn(I::Item) -> T + Sync,
+{
+    let items = items.into_iter();
+    let count = items.len();
     if threads <= 1 || count <= 1 || !HAS_THREADS {
-        return (0..count).map(job).collect();
+        return items.map(job).collect();
     }
-    let next = AtomicUsize::new(0);
-    let done: Vec<Vec<(usize, T)>> = std::thread::scope(|scope| {
+    let next = Mutex::new(items.enumerate());
+    let mut done: Vec<(usize, T)> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads.min(count))
             .map(|_| {
                 scope.spawn(|| {
                     let mut results = Vec::new();
                     loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= count {
+                        let Some((index, item)) =
+                            next.lock().unwrap_or_else(PoisonError::into_inner).next()
+                        else {
                             break results;
-                        }
-                        results.push((index, job(index)));
+                        };
+                        results.push((index, job(item)));
                     }
                 })
             })
             .collect();
         workers
             .into_iter()
-            .map(|worker| {
+            .flat_map(|worker| {
                 worker
                     .join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
             .collect()
     });
-    let mut out: Vec<Option<T>> = Vec::from_fn(count, |_| None);
-    for (index, value) in done.into_iter().flatten() {
-        if let Some(slot) = out.get_mut(index) {
-            *slot = Some(value);
-        }
-    }
-    out.into_iter()
-        .map(|value| value.expect("every index is filled"))
-        .collect()
+    done.sort_unstable_by_key(|&(index, _)| index);
+    done.into_iter().map(|(_, value)| value).collect()
 }
 
 #[cfg(test)]
@@ -73,7 +72,7 @@ mod tests {
 
     #[test]
     fn par_map_order() {
-        let doubled = super::par_map(3, 100, |index| index * 2);
+        let doubled = super::par_map(3, 0..100, |index| index * 2);
         assert_eq!(doubled, (0..100).map(|index| index * 2).collect::<Vec<_>>());
     }
 }
