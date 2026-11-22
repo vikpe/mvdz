@@ -6,7 +6,7 @@ use crate::fields::put_usize;
 use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
-use std::io::Cursor;
+use std::io::{Cursor, Read as _};
 use std::time::{Duration, Instant};
 
 fn small_demo_and_file() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
@@ -92,7 +92,8 @@ fn r_m2_padded_model() {
     );
 }
 
-/// R-M4: every segment's record is charged, so many tiny segments hit the memory limit.
+/// R-M4: the whole-file reader charges every segment's record, so many tiny segments hit the
+/// memory limit; the streaming reader keeps none.
 #[test]
 fn r_m4_segment_records_are_charged() -> anyhow::Result<()> {
     // the encoder cuts at 256 KiB, so one segment per frame is built by hand
@@ -108,18 +109,16 @@ fn r_m4_segment_records_are_charged() -> anyhow::Result<()> {
     }
     .build();
     assert_eq!(decompress(&file, 1)?, demo);
-    // only the 60,000 segment records (2.9 MB) exceed it, not the 0.4 MB demo
-    let max_memory: u64 = 2 << 20;
+    // only the 60,000 segment records (1.9 MB) exceed it, not the 0.4 MB demo
+    let max_memory: u64 = 1 << 20;
     assert_eq!(
         crate::decode::decompress(&file, 1, max_memory).err(),
         Some(Error::MemoryLimit("memory"))
     );
     let mut reader = crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?;
-    let mut read_all = || -> crate::Result<()> {
-        while reader.read_demo(&mut [0; 4096])? > 0 {}
-        Ok(())
-    };
-    assert_eq!(read_all().err(), Some(Error::MemoryLimit("memory")));
+    let mut streamed = Vec::new();
+    reader.read_to_end(&mut streamed)?;
+    assert_eq!(streamed, demo);
     Ok(())
 }
 

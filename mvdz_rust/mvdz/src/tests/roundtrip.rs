@@ -6,9 +6,9 @@ use std::io::Cursor;
 
 fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
-        let (one, info) = compress_unchecked(&src)?;
+        let (one, self_check_fallbacks) = compress_unchecked(&src)?;
         assert_eq!(
-            info.self_check_fallbacks, 0,
+            self_check_fallbacks, 0,
             "{what} {how}: the transform is lossy"
         );
         let back = readers_agree(&one, what).with_context(|| format!("{what} {how}: refused"))?;
@@ -191,9 +191,9 @@ fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
             ("as is", demo.clone()),
             ("repeated", several_segments(&demo)),
         ] {
-            let (file, info) = all_tail(&src)?;
+            let file = all_tail(&src)?;
             assert_eq!(
-                info.unstructured_len,
+                unstructured_len(&file)?,
                 src.len(),
                 "{what} {how}: every byte in the tail"
             );
@@ -232,11 +232,11 @@ fn segments_are_capped() -> anyhow::Result<()> {
         ("oversized frame", oversized.0, 2),
     ] {
         let (file, _) = compress_unchecked(&src)?;
-        let layout = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
-        let count = layout.segments.len();
+        let scanned = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
+        let count = scanned.segments.len();
         assert!(count >= segments, "{what}: {count} segments");
         assert!(
-            layout
+            scanned
                 .segments
                 .iter()
                 .all(|(_, segment)| segment.raw_len as usize <= max_segment),

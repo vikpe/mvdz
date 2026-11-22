@@ -22,7 +22,7 @@ use std::io::Write;
 /// segments, [`Error::Internal`] when the output fails its self-check (a bug).
 pub fn encode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     check_demo(bytes)?;
-    compress(bytes, thread_count(max_threads)).map(|(encoded, _)| encoded)
+    compress(bytes, thread_count(max_threads)).map(|(file, _)| file)
 }
 
 /// Nothing is written before `finish`; dropping it without `finish` writes nothing.
@@ -84,13 +84,6 @@ pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
         return Err(Error::NotMvd("the first frame does not parse"));
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct EncodeStats {
-    pub(crate) unstructured_len: usize,
-    /// Nonzero only for a transform bug.
-    pub(crate) self_check_fallbacks: usize,
 }
 
 pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
@@ -216,17 +209,9 @@ fn run_first_pass(segments: &[&[u8]], threads: usize) -> FirstPass {
     first_pass
 }
 
-/// Threads never change the file written.
-pub(crate) fn compress(src: &[u8], threads: usize) -> Result<(Vec<u8>, EncodeStats)> {
-    compress_inner(src, threads, false)
-}
-
-#[cfg(test)]
-pub(crate) fn compress_all_tail(src: &[u8], threads: usize) -> Result<(Vec<u8>, EncodeStats)> {
-    compress_inner(src, threads, true)
-}
-
-fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<u8>, EncodeStats)> {
+/// The file, and the count of segments that failed the self-check: nonzero only for a
+/// transform bug. Threads never change the file written.
+pub(crate) fn compress(src: &[u8], threads: usize) -> Result<(Vec<u8>, usize)> {
     // an empty demo has no segment
     let cuts = if src.is_empty() {
         vec![0]
@@ -242,20 +227,14 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
         return Err(Error::DemoTooLarge);
     }
     let hashes = || (crc32fast::hash(src), <[u8; 32]>::from(Sha256::digest(src)));
-    let first_pass_or_all_tail = || {
-        if is_all_tail {
-            FirstPass::all_tail(&segments)
-        } else {
-            run_first_pass(&segments, threads)
-        }
-    };
     let (first_pass, (crc, sha256)) = if threads > 1 && HAS_THREADS {
         std::thread::scope(|scope| {
             let hashing = scope.spawn(hashes);
-            (first_pass_or_all_tail(), hashing.join().expect("hashing"))
+            let first_pass = run_first_pass(&segments, threads);
+            (first_pass, hashing.join().expect("hashing"))
         })
     } else {
-        (first_pass_or_all_tail(), hashes())
+        (run_first_pass(&segments, threads), hashes())
     };
     let header = Header {
         size_bytes: src.len() as u64,
@@ -268,12 +247,11 @@ fn compress_inner(src: &[u8], threads: usize, is_all_tail: bool) -> Result<(Vec<
     let self_check_error = || Error::Internal("the encoder's output does not decode to its input");
     let mut fallbacks = 0;
     loop {
-        let (out, mut stats) = assemble(&header, file_models, &bodies);
+        let out = assemble(&header, file_models, &bodies);
         // the container itself does not decode: nothing to fall back to
         let is_failing = failing_segments(&out, &segments, threads).ok_or_else(self_check_error)?;
         if !is_failing.contains(&true) {
-            stats.self_check_fallbacks = fallbacks;
-            return Ok((out, stats));
+            return Ok((out, fallbacks));
         }
         for index in (0..segments.len()).filter(|&index| is_failing[index]) {
             if bodies[index].is_all_tail {
@@ -315,7 +293,6 @@ fn tail_body(raw: &[u8], first_pass: &FirstPass, index: usize) -> Result<Body> {
 struct Body {
     bytes: Vec<u8>,
     is_all_tail: bool,
-    unstructured_len: usize,
     model_ids: Vec<usize>,
 }
 
@@ -338,17 +315,12 @@ impl Body {
         Ok(Self {
             bytes,
             is_all_tail,
-            unstructured_len: walked.unstructured_len(),
             model_ids,
         })
     }
 }
 
-fn assemble(
-    header: &Header,
-    file_models: &[Option<FileModel>],
-    bodies: &[Body],
-) -> (Vec<u8>, EncodeStats) {
+fn assemble(header: &Header, file_models: &[Option<FileModel>], bodies: &[Body]) -> Vec<u8> {
     let mut out = header_bytes(header).to_vec();
     // only the models some segment uses
     let mut is_used = vec![false; file_models.len()];
@@ -361,12 +333,10 @@ fn assemble(
     } else {
         models_block(&mut out, &segment::models_body(file_models, &ids));
     }
-    let mut stats = EncodeStats::default();
     for body in bodies {
         segment_block(&mut out, &body.bytes);
-        stats.unstructured_len += body.unstructured_len;
     }
-    (out, stats)
+    out
 }
 
 /// Never holds the decoded demo whole.
@@ -376,17 +346,17 @@ pub(crate) fn failing_segments(
     threads: usize,
 ) -> Option<Vec<bool>> {
     let budget = Budget::unlimited();
-    let layout = scan_layout(file, threads, &budget).ok()?;
-    if layout.segments.len() != segments.len() {
+    let scanned = scan_layout(file, threads, &budget).ok()?;
+    if scanned.segments.len() != segments.len() {
         return None;
     }
     let timings = par_map(
         threads,
-        layout.segments.iter().zip(segments),
+        scanned.segments.iter().zip(segments),
         |((span, header), &want)| {
             let mut dst = vec![0u8; want.len()];
             let body = span.body(file)?;
-            decode_segment(&layout, body, header, &mut dst, &budget)
+            decode_segment(&scanned.layout, body, header, &mut dst, &budget)
                 .ok()
                 .filter(|_| dst == want)
         },
@@ -401,6 +371,6 @@ pub(crate) fn failing_segments(
     for (timing, &want) in timings.into_iter().zip(segments) {
         check.segment(want, timing?).ok()?;
     }
-    check.finish(&layout).ok()?;
+    check.finish(&scanned.layout).ok()?;
     Some(is_failing)
 }

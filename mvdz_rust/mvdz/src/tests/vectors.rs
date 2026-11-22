@@ -552,8 +552,8 @@ fn mvd1_float_demo() -> Vec<u8> {
 #[test]
 fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
     let demo = mvd1_float_demo();
-    let (file, stats) = compress_unchecked(&demo)?;
-    assert_eq!(stats.unstructured_len, 0);
+    let file = compress(&demo)?;
+    assert_eq!(unstructured_len(&file)?, 0);
     assert_eq!(decompress(&file, 1)?, demo);
     Ok(())
 }
@@ -626,7 +626,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let framed = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     add(
         "framed-as-tail.mvdz",
-        all_tail(&framed)?.0,
+        all_tail(&framed)?,
         &framed,
         "synthetic demo with demoinfo, written as all tail (the encoder's fallback layout)",
     );

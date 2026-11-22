@@ -1,15 +1,16 @@
 #![allow(dead_code)]
 
-use crate::encode::EncodeStats;
+use crate::decode::ScannedFile;
 use crate::format::*;
 use anyhow::Context as _;
+use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 
 pub(crate) fn compress(src: &[u8]) -> crate::Result<Vec<u8>> {
     crate::encode(src, 1)
 }
 
-pub(crate) fn scan(file: &[u8], max_memory: u64) -> crate::Result<Layout> {
+pub(crate) fn scan(file: &[u8], max_memory: u64) -> crate::Result<ScannedFile> {
     crate::decode::scan_layout(file, 1, &crate::budget::Budget::new(max_memory))
 }
 
@@ -17,12 +18,67 @@ pub(crate) fn decompress(file: &[u8], max_threads: u8) -> crate::Result<Vec<u8>>
     crate::decode(file, max_threads)
 }
 
-pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<(Vec<u8>, EncodeStats)> {
+/// The file and the count of segments that failed the self-check.
+pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<(Vec<u8>, usize)> {
     crate::encode::compress(src, 1)
 }
 
-pub(crate) fn all_tail(src: &[u8]) -> crate::Result<(Vec<u8>, EncodeStats)> {
-    crate::encode::compress_all_tail(src, 1)
+/// Every segment stored as it is: the encoder's fallback layout.
+pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use crate::segment::{cut_points, frame_scan, numerics, walk_tail};
+    let mut duration_ms = 0;
+    let mut segments = Vec::new();
+    for cut in cut_points(src).windows(2) {
+        let raw = &src[cut[0]..cut[1]];
+        let walked = walk_tail(raw, crate::proto::Proto::default());
+        let coded = crate::segment::encode(&walked, &numerics(raw, &walked), &mut Vec::new(), &[])
+            .context("a tail segment")?;
+        let segment_duration_ms = frame_scan(raw).duration_ms;
+        let mut segment = segment_header_bytes(
+            raw.len() as u32,
+            segment_duration_ms as u32,
+            crc32fast::hash(raw),
+        );
+        segment.extend_from_slice(&coded);
+        segments.push(segment);
+        duration_ms += segment_duration_ms;
+    }
+    let header = Header {
+        size_bytes: src.len() as u64,
+        duration_ms,
+        crc32: crc32fast::hash(src),
+        sha256: Sha256::digest(src).into(),
+    };
+    Ok(Parts {
+        header,
+        models: Vec::new(),
+        segments,
+    }
+    .build())
+}
+
+/// The bytes the walk left unstructured: the RAW and TAIL streams of every segment.
+pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
+    use crate::fields::{read_usize, skip};
+    use crate::streams::{RAW, TAIL, is_blob};
+    const PROTO_AND_TAIL_LEN: usize = 4 * 4;
+    let mut total = 0;
+    for segment in parts(file)?.segments {
+        let mut rest = &segment[SEGMENT_FIELDS_LEN..];
+        skip(&mut rest, PROTO_AND_TAIL_LEN).context("the transform header")?;
+        let stream_count = read_usize(&mut rest).context("the stream count")?;
+        for _ in 0..stream_count {
+            let id = read_usize(&mut rest).context("a stream id")?;
+            let count = read_usize(&mut rest).context("a stream's count")?;
+            if !is_blob(id) {
+                skip(&mut rest, 4).context("a stream's length")?;
+            }
+            if id == RAW || id == TAIL {
+                total += count;
+            }
+        }
+    }
+    Ok(total)
 }
 
 pub(crate) fn several_segments(demo: &[u8]) -> Vec<u8> {

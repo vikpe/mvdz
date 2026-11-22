@@ -8,7 +8,6 @@ use crate::fields::{put_usize, read_length_prefixed, read_usize};
 use crate::numeric::{NumericContext, bucket, numeric_context};
 use crate::parallel::par_map;
 use crate::streams::{STREAM_COUNT, is_lazy, is_numeric};
-use std::sync::Arc;
 
 pub(crate) const SCALE: u32 = 12;
 const FREQ_TOTAL: u32 = 1 << SCALE;
@@ -609,17 +608,16 @@ pub(crate) fn read_model(
     Ok(model)
 }
 
+static EMPTY_MODEL: DecoderModel = DecoderModel {
+    map: Vec::new(),
+    fallback: ENTRY_EMPTY,
+    chunks: 1,
+    pool: Vec::new(),
+    luts: Vec::new(),
+    _charge: None,
+};
+
 impl DecoderModel {
-    fn empty() -> Self {
-        Self {
-            map: Vec::new(),
-            fallback: ENTRY_EMPTY,
-            chunks: 1,
-            pool: Vec::new(),
-            luts: Vec::new(),
-            _charge: None,
-        }
-    }
     /// The entry of a table with at most [`SEARCH_MAX`] symbols: its offset in `pool`.
     fn push_search_table(&mut self, table: &Table, present: &[usize]) -> u32 {
         let width = 16 * self.chunks;
@@ -853,7 +851,7 @@ pub(crate) struct FileModel {
 }
 
 /// By stream id.
-pub(crate) type Models = Vec<Option<Arc<DecoderModel>>>;
+pub(crate) type Models = Vec<Option<DecoderModel>>;
 
 #[derive(Debug)]
 pub(crate) struct ModelsBlock {
@@ -912,9 +910,9 @@ fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Mod
     let built = par_map(threads, &entries, |&(_, alphabet_size, header)| {
         read_model(header, alphabet_size, budget)
     });
-    let mut models: Models = vec![None; STREAM_COUNT];
+    let mut models: Models = Vec::from_fn(STREAM_COUNT, |_| None);
     for (entry, model) in entries.iter().zip(built) {
-        models[entry.0] = Some(Arc::new(model?));
+        models[entry.0] = Some(model?);
     }
     Ok(models)
 }
@@ -931,7 +929,7 @@ pub(crate) fn encode_bytes(symbols: &[u8], contexts: &[u16], file_model: &FileMo
 /// `count` symbols of one stream body under one model.
 #[derive(Debug)]
 struct SymbolDecoder<'a> {
-    model: Arc<DecoderModel>,
+    model: &'a DecoderModel,
     decoder: RansDecoder<'a>,
     count: usize,
     used: usize,
@@ -940,15 +938,15 @@ struct SymbolDecoder<'a> {
 impl<'a> SymbolDecoder<'a> {
     fn empty() -> Self {
         SymbolDecoder {
-            model: Arc::new(DecoderModel::empty()),
+            model: &EMPTY_MODEL,
             decoder: RansDecoder::finished_empty(),
             count: 0,
             used: 0,
         }
     }
-    fn new(rans: &'a [u8], count: usize, file_model: &Arc<DecoderModel>) -> Self {
+    fn new(rans: &'a [u8], count: usize, file_model: &'a DecoderModel) -> Self {
         SymbolDecoder {
-            model: file_model.clone(),
+            model: file_model,
             decoder: RansDecoder::new(rans),
             count,
             used: 0,
@@ -976,11 +974,7 @@ impl<'a> ByteDecoder<'a> {
             symbols: SymbolDecoder::empty(),
         }
     }
-    pub(crate) fn new(
-        body: &'a [u8],
-        count: usize,
-        file_model: &Arc<DecoderModel>,
-    ) -> Result<Self> {
+    pub(crate) fn new(body: &'a [u8], count: usize, file_model: &'a DecoderModel) -> Result<Self> {
         let unpacked = unpack(body)?;
         if !unpacked.extra.is_empty() {
             return Err(Error::Corrupt("rans stream"));
@@ -1152,7 +1146,7 @@ impl<'a> NumericDecoder<'a> {
         stream: usize,
         body: &'a [u8],
         count: usize,
-        file_model: &Arc<DecoderModel>,
+        file_model: &'a DecoderModel,
     ) -> Result<Self> {
         let unpacked = unpack(body)?;
         Ok(NumericDecoder {
@@ -1194,12 +1188,12 @@ mod tests {
         symbols: &[u8],
         contexts: &[u16],
         alphabet_size: usize,
-    ) -> anyhow::Result<(FileModel, Arc<DecoderModel>)> {
+    ) -> anyhow::Result<(FileModel, DecoderModel)> {
         let mut tally = Tally::new(alphabet_size);
         tally.add(symbols, contexts);
         let file_model = tally.file_model().context("a model")?;
         let model = read_model(&file_model.bytes, alphabet_size, &Budget::unlimited())?;
-        Ok((file_model, Arc::new(model)))
+        Ok((file_model, model))
     }
 
     #[test]

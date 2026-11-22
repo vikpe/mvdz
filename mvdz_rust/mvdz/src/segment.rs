@@ -10,9 +10,7 @@ use crate::format::{MAX_MODELS_LEN, MAX_SEGMENT_RAW};
 use crate::numeric::{GROUPS, Group, NumericContext, NumericIo};
 use crate::parallel::par_map;
 use crate::proto::{Proto, frame_len};
-use crate::streams::{
-    BLOB_BODY, LAZY_STREAM_COUNT, RAW, STREAM_COUNT, TAIL, is_blob, is_lazy, is_numeric,
-};
+use crate::streams::{LAZY_STREAM_COUNT, RAW, STREAM_COUNT, TAIL, is_blob, is_lazy, is_numeric};
 use crate::walk::{Records, SymbolIo, Walker};
 
 pub(crate) const SEGMENT_TARGET_RAW: usize = 256 * 1024;
@@ -171,16 +169,16 @@ fn run_group(
     group: Group,
     records: &Records,
     dst: &mut [u8],
-    entries: &[Option<StreamBody>],
+    stream_bodies: &[Option<StreamBody>],
     file_models: Option<&rans::Models>,
 ) -> Result<()> {
     let mut decoders: [rans::NumericDecoder; MAX_GROUP_STREAMS] =
         std::array::from_fn(|_| rans::NumericDecoder::empty());
     for (stream_index, &stream) in group.streams().iter().enumerate() {
-        if let Some(StreamBody { bytes: body, count }) = entries[stream] {
+        if let Some(StreamBody { bytes, count }) = stream_bodies[stream] {
             decoders[stream_index] = rans::NumericDecoder::new(
                 stream,
-                body,
+                bytes,
                 count,
                 coder::file_model(file_models, stream)?,
             )?;
@@ -246,56 +244,11 @@ pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Kind {
-    /// All blob streams as one DEFLATE stream.
-    Blobs,
-    Lazy,
-    /// By group (in [`GROUPS`] order) and index in the group.
-    Numeric {
-        group: usize,
-        index: usize,
-    },
-}
-
-/// One non-empty stream to pack.
-#[derive(Debug, Clone, Copy)]
-struct Job {
-    stream: usize,
-    kind: Kind,
-}
-
 /// The non-empty ones, in id order.
 fn blob_ids(walked: &Walked) -> Vec<usize> {
     (0..STREAM_COUNT)
         .filter(|&stream| is_blob(stream) && !walked.io.blobs[stream].is_empty())
         .collect()
-}
-
-/// `None` for a structural or numeric stream without a model in the file.
-fn pack_one(
-    job: Job,
-    walked: &Walked,
-    numerics: &Numerics,
-    blob_ids: &[usize],
-    file: Option<&rans::FileModel>,
-) -> Option<Vec<u8>> {
-    match job.kind {
-        Kind::Lazy => Some(rans::encode_bytes(
-            &walked.io.symbols[job.stream],
-            &walked.io.contexts[job.stream],
-            file?,
-        )),
-        Kind::Numeric { group, index } => Some(rans::encode_num(&numerics[group][index], file?)),
-        Kind::Blobs => {
-            let mut all =
-                Vec::with_capacity(blob_ids.iter().map(|&id| walked.io.blobs[id].len()).sum());
-            for &id in blob_ids {
-                all.extend_from_slice(&walked.io.blobs[id]);
-            }
-            Some(crate::deflate::compress(&all))
-        }
-    }
 }
 
 /// Per group (in [`GROUPS`] order) and stream of the group.
@@ -421,6 +374,14 @@ fn fit_models_block(models: &mut [Option<rans::FileModel>], max: u64) {
     }
 }
 
+/// A structural or numeric stream as it is stored.
+#[derive(Debug)]
+struct CodedStream {
+    stream: usize,
+    count: usize,
+    body: Vec<u8>,
+}
+
 /// `None` if a structural or numeric stream has no model in `file_models` (by stream id).
 /// `model_ids` gets the streams coded with a model.
 pub(crate) fn encode(
@@ -429,60 +390,39 @@ pub(crate) fn encode(
     model_ids: &mut Vec<usize>,
     file_models: &[Option<rans::FileModel>],
 ) -> Option<Vec<u8>> {
-    let mut jobs: Vec<Job> = Vec::new();
+    let file_model = |stream: usize| file_models.get(stream)?.as_ref();
+    let mut coded_streams: Vec<CodedStream> = Vec::new();
     for (stream, symbols) in walked.io.symbols.iter().enumerate() {
         if !symbols.is_empty() {
-            jobs.push(Job {
+            coded_streams.push(CodedStream {
                 stream,
-                kind: Kind::Lazy,
+                count: symbols.len(),
+                body: rans::encode_bytes(symbols, &walked.io.contexts[stream], file_model(stream)?),
             });
         }
     }
-    for (group_index, group) in GROUPS.iter().enumerate() {
-        for (index, &stream) in group.streams().iter().enumerate() {
-            if !numerics[group_index][index].symbols.is_empty() {
-                jobs.push(Job {
+    for (group, group_numerics) in GROUPS.iter().zip(numerics) {
+        for (&stream, numeric) in group.streams().iter().zip(group_numerics) {
+            if !numeric.symbols.is_empty() {
+                coded_streams.push(CodedStream {
                     stream,
-                    kind: Kind::Numeric {
-                        group: group_index,
-                        index,
-                    },
+                    count: numeric.symbols.len(),
+                    body: rans::encode_num(numeric, file_model(stream)?),
                 });
             }
         }
     }
-    // the blob streams: one job, after every stream in id order
+    coded_streams.sort_by_key(|coded| coded.stream);
+    // the blob streams share one body and follow in the table: their ids are the highest
     let blobs = blob_ids(walked);
-    let blob_total: usize = blobs
-        .iter()
-        .map(|&stream| walked.io.blobs[stream].len())
-        .sum();
-    if !blobs.is_empty() {
-        jobs.push(Job {
-            stream: BLOB_BODY,
-            kind: Kind::Blobs,
-        });
-    }
-    let mut packed: Vec<Vec<u8>> = Vec::with_capacity(jobs.len());
-    for &job in &jobs {
-        let file = file_models.get(job.stream).and_then(|model| model.as_ref());
-        packed.push(pack_one(job, walked, numerics, &blobs, file)?);
-    }
-    // table order: stream id; the blob streams follow (their ids are the
-    // highest), each with its own entry but one shared body
-    let blob_job = jobs.iter().position(|job| matches!(job.kind, Kind::Blobs));
-    let mut table_jobs: Vec<usize> = (0..jobs.len())
-        .filter(|&job| Some(job) != blob_job)
-        .collect();
-    table_jobs.sort_by_key(|&job| jobs[job].stream);
-    let count = |job: usize| match jobs[job].kind {
-        Kind::Lazy => walked.io.symbols[jobs[job].stream].len(),
-        Kind::Numeric { group, index } => numerics[group][index].symbols.len(),
-        Kind::Blobs => blob_total,
-    };
-    let blob_body: &[u8] = match blob_job {
-        Some(job) => &packed[job],
-        None => &[],
+    let blob_body = if blobs.is_empty() {
+        Vec::new()
+    } else {
+        let blob_streams: Vec<&[u8]> = blobs
+            .iter()
+            .map(|&stream| walked.io.blobs[stream].as_slice())
+            .collect();
+        crate::deflate::compress(&blob_streams.concat())
     };
     let mut out = Vec::new();
     for flags in [
@@ -493,23 +433,22 @@ pub(crate) fn encode(
         out.extend_from_slice(&flags.to_le_bytes());
     }
     put_usize(&mut out, walked.tail);
-    put_usize(&mut out, table_jobs.len() + blobs.len());
-    for &job in &table_jobs {
-        let body = &packed[job];
-        put_usize(&mut out, jobs[job].stream);
-        put_usize(&mut out, count(job));
-        put_usize(&mut out, body.len());
-        model_ids.push(jobs[job].stream);
+    put_usize(&mut out, coded_streams.len() + blobs.len());
+    for coded in &coded_streams {
+        put_usize(&mut out, coded.stream);
+        put_usize(&mut out, coded.count);
+        put_usize(&mut out, coded.body.len());
+        model_ids.push(coded.stream);
     }
     for &stream in &blobs {
         put_usize(&mut out, stream);
         put_usize(&mut out, walked.io.blobs[stream].len());
     }
     put_usize(&mut out, blob_body.len());
-    for &job in &table_jobs {
-        out.extend_from_slice(&packed[job]);
+    for coded in &coded_streams {
+        out.extend_from_slice(&coded.body);
     }
-    out.extend_from_slice(blob_body);
+    out.extend_from_slice(&blob_body);
     Some(out)
 }
 
@@ -653,12 +592,18 @@ pub(crate) fn decode(
     budget: &Budget,
 ) -> Result<()> {
     let file_models = models_block.map(ModelsBlock::models);
-    let mut bodies: Vec<&[u8]> = Vec::with_capacity(transform_header.entries.len());
     let mut rest = body
         .get(transform_header.body_offset..)
         .ok_or(Error::Corrupt("stream body"))?;
+    let mut stream_bodies: Vec<Option<StreamBody>> = vec![None; STREAM_COUNT];
     for entry in &transform_header.entries {
-        bodies.push(read_bytes(&mut rest, entry.len).ok_or(Error::Corrupt("stream body"))?);
+        if !is_blob(entry.id) {
+            let bytes = read_bytes(&mut rest, entry.len).ok_or(Error::Corrupt("stream body"))?;
+            stream_bodies[entry.id] = Some(StreamBody {
+                bytes,
+                count: entry.count,
+            });
+        }
     }
     let blob_body =
         read_bytes(&mut rest, transform_header.blob_len).ok_or(Error::Corrupt("stream body"))?;
@@ -669,51 +614,32 @@ pub(crate) fn decode(
     } else {
         Vec::new()
     };
-    let mut blob_bufs: Vec<&[u8]> = vec![&[]; STREAM_COUNT];
+    let mut blobs: Vec<&[u8]> = vec![&[]; STREAM_COUNT];
     let mut at = 0;
-    for entry in transform_header
-        .entries
-        .iter()
-        .filter(|entry| is_blob(entry.id))
-    {
-        blob_bufs[entry.id] = &blob_bytes[at..at + entry.count];
-        at += entry.count;
-    }
-    let mut numeric_entries: Vec<Option<StreamBody>> = vec![None; STREAM_COUNT];
-    let mut lazy_entries: Vec<Option<StreamBody>> = vec![None; LAZY_STREAM_COUNT];
-    for (entry, &bytes) in transform_header.entries.iter().zip(&bodies) {
-        let stream_body = Some(StreamBody {
-            bytes,
-            count: entry.count,
-        });
-        if is_lazy(entry.id) {
-            lazy_entries[entry.id] = stream_body;
-        } else if is_numeric(entry.id) {
-            numeric_entries[entry.id] = stream_body;
+    for entry in &transform_header.entries {
+        if is_blob(entry.id) {
+            blobs[entry.id] = &blob_bytes[at..at + entry.count];
+            at += entry.count;
         }
     }
     let mut lazy: [rans::ByteDecoder; LAZY_STREAM_COUNT] =
         std::array::from_fn(|_| rans::ByteDecoder::empty());
-    for (id, entry) in lazy_entries.iter().enumerate() {
-        if let Some(StreamBody {
-            bytes: stream_body,
-            count,
-        }) = *entry
-        {
-            lazy[id] =
-                rans::ByteDecoder::new(stream_body, count, coder::file_model(file_models, id)?)?;
+    for (stream, decoder) in lazy.iter_mut().enumerate() {
+        if let Some(StreamBody { bytes, count }) = stream_bodies[stream] {
+            *decoder =
+                rans::ByteDecoder::new(bytes, count, coder::file_model(file_models, stream)?)?;
         }
     }
     walk_decode(
         lazy,
-        blob_bufs,
+        blobs,
         dst,
         &mut records,
         transform_header.proto,
         transform_header.tail,
     )?;
     for group in GROUPS {
-        run_group(group, &records, dst, &numeric_entries, file_models)?;
+        run_group(group, &records, dst, &stream_bodies, file_models)?;
     }
     Ok(())
 }

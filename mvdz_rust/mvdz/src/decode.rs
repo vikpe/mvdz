@@ -27,7 +27,6 @@ pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
 pub struct Decoder<R: Read> {
     input: R,
     layout: Layout,
-    next_offset: u64,
     current: Option<Decoded>,
     /// Into `current`.
     at: usize,
@@ -77,7 +76,6 @@ impl<R: Read> Decoder<R> {
         Ok(Self {
             input,
             layout,
-            next_offset: HEADER_LEN as u64,
             current: None,
             at: 0,
             ready: VecDeque::new(),
@@ -146,14 +144,9 @@ impl<R: Read> Decoder<R> {
             return bad("incomplete file");
         };
         check_coded_len(coded)?;
-        let span = SegmentSpan {
-            len_field_offset: self.next_offset,
-            body_len: coded + SEGMENT_FIELDS_LEN as u64,
-        };
-        let (body, charge) = self.read_body(span.body_len)?;
+        let (body, charge) = self.read_body(coded + SEGMENT_FIELDS_LEN as u64)?;
         let header = parse_segment_header(&body[..SEGMENT_FIELDS_LEN])?;
-        let header = self.layout.add_segment(&span, header)?;
-        self.next_offset = span.end();
+        self.layout.add_segment(&header)?;
         Ok((header, body, charge))
     }
 
@@ -223,7 +216,6 @@ impl<R: Read> Decoder<R> {
                     None
                 };
                 self.layout.models(models_block)?;
-                self.next_offset += LEN_FIELD_LEN as u64 + len;
                 continue;
             }
             if self.layout.is_complete() {
@@ -271,8 +263,16 @@ fn len_at(file: &[u8], offset: u64) -> Option<u64> {
     len_field(bytes_at(file, offset, LEN_FIELD_LEN as u64)?)
 }
 
+#[derive(Debug)]
+pub(crate) struct ScannedFile {
+    pub(crate) layout: Layout,
+    pub(crate) segments: Vec<(SegmentSpan, SegmentHeader)>,
+    _segments_charge: Charge,
+}
+
 /// FORMAT.md section 7; segment payloads are not decoded.
-pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Result<Layout> {
+pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Result<ScannedFile> {
+    const SEGMENT_RECORD_LEN: u64 = std::mem::size_of::<(SegmentSpan, SegmentHeader)>() as u64;
     let file_len = file.len() as u64;
     let mut layout = Layout::new(&file[..file.len().min(HEADER_LEN)], budget)?;
     let mut offset = HEADER_LEN as u64;
@@ -293,6 +293,8 @@ pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Resul
         layout.models(None)?;
     }
     offset += models_len;
+    let mut segments = Vec::new();
+    let mut segments_charge = Charge::none(budget);
     while !layout.is_complete() {
         let Some(coded) = len_at(file, offset) else {
             return bad("incomplete file");
@@ -307,14 +309,21 @@ pub(crate) fn scan_layout(file: &[u8], threads: usize, budget: &Budget) -> Resul
         }
         let fields = bytes_at(file, span.body_offset(), SEGMENT_FIELDS_LEN as u64)
             .ok_or(Error::Corrupt("truncated"))?;
-        layout.add_segment(&span, parse_segment_header(fields)?)?;
+        let header = parse_segment_header(fields)?;
+        layout.add_segment(&header)?;
+        segments_charge.grow(SEGMENT_RECORD_LEN)?;
+        segments.push((span, header));
         offset = span.end();
     }
     if offset != file_len {
         return bad("trailing bytes");
     }
     layout.finish()?;
-    Ok(layout)
+    Ok(ScannedFile {
+        layout,
+        segments,
+        _segments_charge: segments_charge,
+    })
 }
 
 pub(crate) fn decode_segment(
@@ -379,33 +388,35 @@ impl DemoCheck {
 
 pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result<Vec<u8>> {
     let budget = Budget::new(max_memory);
-    let layout = scan_layout(file, threads, &budget)?;
+    let ScannedFile {
+        layout, segments, ..
+    } = &scan_layout(file, threads, &budget)?;
     let size = layout.header.size_bytes;
     let _charge = budget.alloc(size)?;
     let mut out = try_zeroed(usize::try_from(size).map_err(|_| Error::MemoryLimit("demo size"))?)?;
-    let mut slices: Vec<&mut [u8]> = Vec::with_capacity(layout.segments.len());
+    let mut slices: Vec<&mut [u8]> = Vec::with_capacity(segments.len());
     let mut rest: &mut [u8] = &mut out;
-    for (_, header) in &layout.segments {
+    for (_, header) in segments {
         let (slice, after) = rest.split_at_mut(header.raw_len as usize);
         slices.push(slice);
         rest = after;
     }
     let results = par_map(
         threads,
-        layout.segments.iter().zip(slices),
+        segments.iter().zip(slices),
         |((span, header), dst)| {
             let body = span.body(file).ok_or(Error::Corrupt("truncated"))?;
-            decode_segment(&layout, body, header, dst, &budget)
+            decode_segment(layout, body, header, dst, &budget)
         },
     );
     let mut check = DemoCheck::default();
     let mut at = 0usize;
-    for (result, (_, header)) in results.into_iter().zip(&layout.segments) {
+    for (result, (_, header)) in results.into_iter().zip(segments) {
         let scan = result?;
         let len = header.raw_len as usize;
         check.segment(&out[at..at + len], scan)?;
         at += len;
     }
-    check.finish(&layout)?;
+    check.finish(layout)?;
     Ok(out)
 }

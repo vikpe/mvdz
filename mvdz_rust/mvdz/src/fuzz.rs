@@ -4,5 +4,5 @@ pub fn check_demo(demo: &[u8]) -> crate::Result<()> {
 
 /// Skips `check_demo`. The `usize` counts segments that failed the self-check: a transform bug.
 pub fn encode_any(demo: &[u8], threads: usize) -> crate::Result<(Vec<u8>, usize)> {
-    crate::encode::compress(demo, threads).map(|(file, stats)| (file, stats.self_check_fallbacks))
+    crate::encode::compress(demo, threads)
 }

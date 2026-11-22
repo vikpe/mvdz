@@ -62,8 +62,6 @@ pub(crate) const NAILS: usize = 85;
 pub(crate) const HIDMISC: usize = 86;
 pub(crate) const SNDF: usize = 87;
 pub(crate) const TEF: usize = 88;
-/// Not stored: the id under which statistics report a segment's DEFLATE blob body.
-pub(crate) const BLOB_BODY: usize = 78;
 pub(crate) const GEN_BASE: usize = 128;
 pub(crate) const STREAM_COUNT: usize = GEN_BASE + 256;
 

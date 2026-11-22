@@ -121,12 +121,9 @@ impl SegmentSpan {
     }
 }
 
-/// `raw_offset` and `offset_ms` are not stored: [`Layout::add_segment`] fills them in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SegmentHeader {
-    pub(crate) raw_offset: u64,
     pub(crate) raw_len: u32,
-    pub(crate) offset_ms: u64,
     pub(crate) duration_ms: u32,
     pub(crate) crc32: u32,
 }
@@ -152,9 +149,7 @@ pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
         return bad("segment too large");
     }
     Ok(SegmentHeader {
-        raw_offset: 0,
         raw_len,
-        offset_ms: 0,
         duration_ms,
         crc32,
     })
@@ -166,7 +161,6 @@ pub(crate) struct Layout {
     pub(crate) header: Header,
     pub(crate) models_block: Option<ModelsBlock>,
     has_models: bool,
-    pub(crate) segments: Vec<(SegmentSpan, SegmentHeader)>,
     raw_len: u64,
     duration_ms: u64,
     charge: Charge,
@@ -178,7 +172,6 @@ impl Layout {
             header: parse_header(header)?,
             models_block: None,
             has_models: false,
-            segments: Vec::new(),
             raw_len: 0,
             duration_ms: 0,
             charge: Charge::none(budget),
@@ -198,15 +191,7 @@ impl Layout {
         Ok(())
     }
 
-    /// Returns `header` with its raw offset and start time filled in.
-    pub(crate) fn add_segment(
-        &mut self,
-        span: &SegmentSpan,
-        mut header: SegmentHeader,
-    ) -> Result<SegmentHeader> {
-        const SEGMENT_RECORD_LEN: u64 = std::mem::size_of::<(SegmentSpan, SegmentHeader)>() as u64;
-        header.raw_offset = self.raw_len;
-        header.offset_ms = self.duration_ms;
+    pub(crate) fn add_segment(&mut self, header: &SegmentHeader) -> Result<()> {
         let raw_len = self.raw_len.checked_add(u64::from(header.raw_len));
         let duration_ms = self.duration_ms.checked_add(u64::from(header.duration_ms));
         match (raw_len, duration_ms) {
@@ -218,9 +203,7 @@ impl Layout {
             }
             _ => return bad("segment sizes"),
         }
-        self.charge.grow(SEGMENT_RECORD_LEN)?;
-        self.segments.push((*span, header));
-        Ok(header)
+        Ok(())
     }
 
     pub(crate) fn is_complete(&self) -> bool {

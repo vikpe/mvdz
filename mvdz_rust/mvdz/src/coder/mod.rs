@@ -5,12 +5,11 @@ pub(crate) mod rans;
 pub(crate) mod rc;
 
 use crate::error::{Error, Result};
-use std::sync::Arc;
 
 pub(crate) fn file_model(
     models: Option<&rans::Models>,
     stream: usize,
-) -> Result<&Arc<rans::DecoderModel>> {
+) -> Result<&rans::DecoderModel> {
     models
         .and_then(|models| models.get(stream)?.as_ref())
         .ok_or(Error::Corrupt("stream without a model"))

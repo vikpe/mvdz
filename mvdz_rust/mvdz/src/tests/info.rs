@@ -22,26 +22,18 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         assert_eq!(header_bytes(&header), file[..HEADER_LEN]);
         let decoder = crate::Decoder::new(Cursor::new(&file))?;
         assert_eq!(*decoder.header(), header);
-        let layout = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
-        assert_eq!(layout.header, header);
+        let scanned = scan(&file, crate::budget::DEFAULT_MAX_MEMORY)?;
+        assert_eq!(scanned.layout.header, header);
         assert_eq!(
-            layout.segments.len() > 1,
+            scanned.segments.len() > 1,
             demo.len() > crate::segment::SEGMENT_TARGET_RAW
         );
-        let (mut raw, mut previous_start) = (0, 0);
-        for (index, (_, segment)) in layout.segments.iter().enumerate() {
-            let size = u64::from(segment.raw_len);
-            assert_eq!(segment.raw_offset, raw, "segment {index}");
-            assert!(segment.offset_ms >= previous_start, "segment {index}");
-            assert!(size > 0, "segment {index}");
-            assert_eq!(
-                segment.offset_ms,
-                crate::segment::frame_scan(&demo[..raw as usize]).duration_ms
-            );
-            raw += size;
-            previous_start = segment.offset_ms;
-        }
-        assert_eq!(raw, header.size_bytes);
+        let raw_len: u64 = scanned
+            .segments
+            .iter()
+            .map(|(_, segment)| u64::from(segment.raw_len))
+            .sum();
+        assert_eq!(raw_len, header.size_bytes);
         assert_eq!(
             readers_agree(&file, "header").context("every reader refuses")?,
             demo

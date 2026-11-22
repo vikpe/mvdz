@@ -136,7 +136,7 @@ segment := len u32 | raw_len u32 | duration_ms u32 | crc32 u32 | coded[len]
 
 Segments follow the models block in demo order, without gaps. A segment's
 offset in the demo is the sum of the `raw_len` of all earlier segments;
-its start time (`offset_ms`) is the sum of their `duration_ms`. The
+its start time is the sum of their `duration_ms`. The
 running sums never exceed the header's `size` and `duration_ms`
 (`format.rs:Layout::add_segment`).
 
