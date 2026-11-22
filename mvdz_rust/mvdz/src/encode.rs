@@ -165,7 +165,7 @@ fn count_segment(raw: &[u8], start_proto: Proto) -> Counted {
 /// the proto the one before ends in, so the segments of a batch are walked in parallel from
 /// the end proto of the batch before, and the few that start in another proto walked again.
 fn run_first_pass<'a>(segments: &[&'a [u8]], threads: usize) -> FirstPass<'a> {
-    let model_builder = segment::ModelBuilder::default();
+    let mut model_builder = segment::ModelBuilder::default();
     let mut proto = Proto::default();
     let mut plans = Vec::with_capacity(segments.len());
     let mut first = 0;

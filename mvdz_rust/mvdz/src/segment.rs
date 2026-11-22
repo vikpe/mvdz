@@ -281,7 +281,7 @@ pub(crate) fn numerics(src: &[u8], walked: &Walked) -> Numerics {
 /// (FORMAT.md section 8 rule 4). Segments are added a few at a time; only counts are kept.
 #[derive(Debug)]
 pub(crate) struct ModelBuilder {
-    tallies: Vec<std::sync::Mutex<Option<rans::Tally>>>,
+    tallies: Vec<Option<rans::Tally>>,
     /// (group, index in the group)
     numeric_positions: Vec<Option<(usize, usize)>>,
 }
@@ -295,49 +295,47 @@ impl Default for ModelBuilder {
             }
         }
         Self {
-            tallies: Vec::from_fn(STREAM_COUNT, |_| std::sync::Mutex::default()),
+            tallies: Vec::from_fn(STREAM_COUNT, |_| None),
             numeric_positions,
         }
     }
 }
 
 impl ModelBuilder {
-    pub(crate) fn add(&self, segments: &[(&Walked, &Numerics)], threads: usize) {
+    pub(crate) fn add(&mut self, segments: &[(&Walked, &Numerics)], threads: usize) {
+        let numeric_positions = &self.numeric_positions;
         // streams are independent: in parallel, each over the segments in order
-        par_map(threads, 0..STREAM_COUNT, |stream| {
-            let mut tally = self.tallies[stream]
-                .lock()
-                .expect("no panic while counting");
-            let mut add = |alphabet: usize, symbols: &[u8], contexts: &[u16]| {
-                if !symbols.is_empty() {
-                    tally
-                        .get_or_insert_with(|| rans::Tally::new(alphabet))
-                        .add(symbols, contexts);
+        par_map(
+            threads,
+            self.tallies.iter_mut().enumerate(),
+            |(stream, tally)| {
+                let mut add = |alphabet: usize, symbols: &[u8], contexts: &[u16]| {
+                    if !symbols.is_empty() {
+                        tally
+                            .get_or_insert_with(|| rans::Tally::new(alphabet))
+                            .add(symbols, contexts);
+                    }
+                };
+                for &(walked, numerics) in segments {
+                    if stream < LAZY_STREAM_COUNT {
+                        add(256, &walked.io.symbols[stream], &walked.io.contexts[stream]);
+                    }
+                    if let Some((group_index, stream_index)) = numeric_positions[stream] {
+                        add(
+                            rans::NUMERIC_ALPHABET,
+                            &numerics[group_index][stream_index].symbols,
+                            &numerics[group_index][stream_index].contexts,
+                        );
+                    }
                 }
-            };
-            for &(walked, numerics) in segments {
-                if stream < LAZY_STREAM_COUNT {
-                    add(256, &walked.io.symbols[stream], &walked.io.contexts[stream]);
-                }
-                if let Some((group_index, stream_index)) = self.numeric_positions[stream] {
-                    add(
-                        rans::NUMERIC_ALPHABET,
-                        &numerics[group_index][stream_index].symbols,
-                        &numerics[group_index][stream_index].contexts,
-                    );
-                }
-            }
-        });
+            },
+        );
     }
 
     pub(crate) fn models(self, threads: usize) -> Vec<Option<rans::FileModel>> {
-        let mut models: Vec<Option<rans::FileModel>> =
-            par_map(threads, 0..STREAM_COUNT, |stream| {
-                let tally = self.tallies[stream]
-                    .lock()
-                    .expect("no panic while counting");
-                tally.as_ref().and_then(rans::Tally::file_model)
-            });
+        let mut models: Vec<Option<rans::FileModel>> = par_map(threads, &self.tallies, |tally| {
+            tally.as_ref().and_then(rans::Tally::file_model)
+        });
         fit_models_block(&mut models, MAX_MODELS_LEN);
         models
     }
@@ -653,7 +651,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     fn build_models(segments: &[(&Walked, &Numerics)]) -> Vec<Option<rans::FileModel>> {
-        let model_builder = ModelBuilder::default();
+        let mut model_builder = ModelBuilder::default();
         model_builder.add(segments, 1);
         model_builder.models(1)
     }
