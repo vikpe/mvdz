@@ -737,7 +737,8 @@ fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Every frame type, every command the sizer knows (FORMAT.md section 4.2) and the
+/// Every frame type, every command the sizer knows (FORMAT.md section 4.2 and section 8
+/// rule 12) and the
 /// playerinfo, packet-entity, sound and temp-entity forms, first without and then with
 /// FTE extensions. The walk escapes nothing.
 fn commands_demo() -> Vec<u8> {

@@ -66,6 +66,11 @@ value.
   (`math.rs:byte_residual_bucket`).
 * "Symbol" = one byte of a structural stream; "value" = one `i32` of a
   numeric stream.
+* **Over-read.** Reading past the end of a stream is an error: more symbols
+  or values than its `count` (3.1), a rANS word or a mantissa bit past its
+  bytes (6.4), more bytes than a blob stream holds. A decoder may report it
+  at once, or carry on with any value and fail the segment later: the
+  result is an error either way.
 
 ---------------------------------------------------------------------------
 
@@ -103,8 +108,7 @@ describes the `.mvdz` file.
 ### 2.2 Models block (`rans.rs:read_models_block`)
 
 ```
-models := len u32 | body[len]
-body   := meta | n u32 | n x { id u32 | raw_len u32 | len u32 | stream[len] }
+body := meta | n u32 | n x { id u32 | raw_len u32 | len u32 | stream[len] }
 ```
 
 * `len` 0: the file has no models. Otherwise `len` is at most 2^24
@@ -130,10 +134,6 @@ body   := meta | n u32 | n x { id u32 | raw_len u32 | len u32 | stream[len] }
   segment, and the models do not change while segments are decoded.
 
 ### 2.3 Segments
-
-```
-segment := len u32 | raw_len u32 | duration_ms u32 | crc32 u32 | coded[len]
-```
 
 * `len`: length of `coded`, at most 2^21 (2 MiB). The segment occupies
   `16 + len` bytes.
@@ -185,9 +185,9 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
   start (4.1).
 * `tail`: length of the unframed bytes at the end of the segment, at most
   `raw_len`.
-* `n`: at most 322; `n = 0` is a stored segment (below). Per entry:
+* `n`: `n = 0` is a stored segment (below). Per entry:
   * `id`: a structural, numeric or blob stream id (3.2), each at most
-    once, in any order;
+    once, in any order: so `n` is at most 322;
   * `count`: symbols, values or bytes in the stream, at most
     `2 * raw_len + 16`: two per byte of the segment (an entity word of two
     bytes takes up to three `ENTITY_GAP` symbols) plus a fixed margin of
@@ -305,9 +305,6 @@ An id of 322 or above is an error.
    every numeric stream must be complete.
 7. Check `crc32(output) == crc32` of the segment fields.
 
-The reference decodes segments in parallel; the result does not depend on
-it.
-
 ### 3.4 Whole-demo checks (`decode.rs:Decoder::finish`)
 
 After the last segment a reader checks that no byte follows it and that
@@ -339,8 +336,8 @@ Three kinds of stream feed the walker (stream ids: section 3):
 Walker primitives (decode direction; `p` = output cursor):
 
 * `symbol(s, ctx)`: the next symbol of structural stream `s` under context
-  `ctx`. If `s` is exhausted or absent, `symbol` returns 255 and the segment
-  fails (`segment.rs:DecodeIo::symbol`); 255 ends every loop below.
+  `ctx`; error if `s` is absent or has no symbol left
+  (`segment.rs:DecodeIo::symbol`).
 * `code_symbol(s, ctx)`: `v = symbol(s, ctx)`; write `v` at `dst[p]`;
   `p += 1`; return `v`.
 * `code_symbol_residual(s, ctx, pred)`: `v = (symbol(s, ctx) + pred) mod 256`;
@@ -361,8 +358,8 @@ Walker primitives (decode direction; `p` = output cursor):
 * `copy_command_body(s, c)`: `n = command_body_size(c, the unread bytes of blob s)`
   (section 4.2); `None` is an error; else `copy_blob(s, n)`.
 
-Writing beyond `raw_len` is an error. Errors are sticky: the walk stops at
-the next check and the segment fails.
+Writing beyond `raw_len` is an error. An error stops the walk and fails
+the segment.
 
 ### 4.1 Protocol state (`protocol.rs:ProtocolState`)
 
@@ -406,43 +403,34 @@ short), `str` (to and including the next NUL; fails if there is none).
 | c | name | body |
 |---|---|---|
 | 1, 27, 28, 34, 35 | `SVC_NOP`, `SVC_KILLED_MONSTER`, `SVC_FOUND_SECRET`, `SVC_SMALL_KICK`, `SVC_BIG_KICK` | empty |
-| 2, 9, 26, 31 | `SVC_DISCONNECT`, `SVC_STUFF_TEXT`, `SVC_CENTER_PRINT`, `SVC_FINALE` | str |
-| 3 | `SVC_UPDATE_STAT` | skip 2 |
-| 6 | `SVC_SOUND` | `ch = u16`; if `ch & SND_VOLUME` (1<<15) skip 1; if `ch & SND_ATTENUATION` (1<<14) skip 1; skip `1 + 3*coord` |
-| 8 | `SVC_PRINT` | skip 1; str |
+| 2, 9, 31 | `SVC_DISCONNECT`, `SVC_STUFF_TEXT`, `SVC_FINALE` | str |
 | 10 | `SVC_SET_ANGLE` | skip `1 + 3*angle` |
 | 11 | `SVC_SERVER_DATA` | loop { `v = u32`; if `v == 28` break; skip 4 }; skip 4; str; skip 4; str; skip 40 |
 | 12 | `SVC_LIGHT_STYLE` | skip 1; str |
-| 14 | `SVC_UPDATE_FRAGS` | skip 3 |
 | 19 | `SVC_DAMAGE` | skip `2 + 3*coord` |
 | 20 | `SVC_SPAWN_STATIC` | skip `4 + 3*(coord + angle)` |
 | 21, 66 | `SVC_FTE_SPAWN_STATIC_2`, `SVC_FTE_SPAWN_BASELINE_2` | `w = u16`; `delta(w)` |
 | 22 | `SVC_SPAWN_BASELINE` | skip `2 + 4 + 3*(coord + angle)` |
-| 23 | `SVC_TEMP_ENTITY` | `t = u8`; t in {`TE_LIGHTNING_1` 5, `TE_LIGHTNING_2` 6, `TE_LIGHTNING_3` 9}: skip `2 + 6*coord`; t in {0, 1, 3, 4, 7, 8, 10, 11, 13}: skip `3*coord`; t in {`TE_GUNSHOT` 2, `TE_BLOOD` 12}: skip `1 + 3*coord`; else `None` |
 | 24, 32, 44 | `SVC_SET_PAUSE`, `SVC_CD_TRACK`, `SVC_CHOKE_COUNT` | skip 1 |
 | 29 | `SVC_SPAWN_STATIC_SOUND` | skip `3*coord + 3` |
 | 30 | `SVC_INTERMISSION` | skip `3*wide_coord + 3*angle` |
 | 36 | `SVC_UPDATE_PING` | skip 3 |
-| 37, 38 | `SVC_UPDATE_ENTER_TIME`, `SVC_UPDATE_STAT_LONG` | skip 5 |
+| 37 | `SVC_UPDATE_ENTER_TIME` | skip 5 |
 | 39, 53 | `SVC_MUZZLE_FLASH`, `SVC_UPDATE_PL` | skip 2 |
 | 40 | `SVC_UPDATE_USER_INFO` | skip 5; str |
 | 41 | `SVC_DOWNLOAD` | `n = u16` as i16; skip 1; if `n > 0` skip `n` |
-| 42 | `SVC_PLAYER_INFO` | skip 1; `f = u16`; skip 1; for i in 0..3: if `f & (DF_ORIGIN << i)` skip coord; for i in 0..3: if `f & (DF_ANGLES << i)` skip 2; skip 1 for each of `DF_MODEL`, `DF_SKIN_NUM`, `DF_EFFECTS`, `DF_WEAPON_FRAME` that is set |
 | 43 | `SVC_NAILS` | `n = u8`; skip `6*n` |
 | 45, 46 | `SVC_MODEL_LIST`, `SVC_SOUND_LIST` | skip 1; loop { str; break if it was just the NUL }; skip 1 |
-| 47 | `SVC_PACKET_ENTITIES` | loop { `w = u16`; if `w == 0` break; `delta(w)` } |
-| 48 | `SVC_DELTA_PACKET_ENTITIES` | skip 1; then as 47 |
 | 49, 50 | `SVC_MAX_SPEED`, `SVC_ENT_GRAVITY` | skip 4 |
 | 51 | `SVC_SET_INFO` | skip 1; str; str |
 | 52 | `SVC_SERVER_INFO` | str; str |
 | 54 | `SVC_NAILS_2` | `n = u8`; skip `7*n` |
-| any other | | `None` |
+| any other but those of section 8, rule 12 | | `None` |
 
-A decoder sizes commands only through `copy_command_body` (section 4.6):
-with the rows of 9 (for 8, 9 and 26), 11, 36, 37, 53, 43, 54 and every
-command without a row of its own in section 4.6. Commands 3, 6, 8, 14, 23,
-26, 38, 42, 47 and 48 are sized only by the encoder, to choose between
-walking a command and escaping (section 4.5).
+These are the rows a decoder needs: it sizes commands only through
+`copy_command_body` (section 4.6). The commands the walker decodes field by
+field (3, 6, 8, 14, 23, 26, 38, 42, 47 and 48) are sized only by the
+encoder; their rows are in section 8, rule 12.
 
 Bits (`protocol.rs`): `DF_ORIGIN` 1<<0, `DF_ANGLES` 1<<3, `DF_EFFECTS` 1<<6,
 `DF_SKIN_NUM` 1<<7, `DF_WEAPON_FRAME` 1<<10, `DF_MODEL` 1<<11.
@@ -452,7 +440,9 @@ Bits (`protocol.rs`): `DF_ORIGIN` 1<<0, `DF_ANGLES` 1<<3, `DF_EFFECTS` 1<<6,
 `U_MORE_BITS` 1<<15. In the extension byte(s): `U_FTE_SCALE` 1<<0,
 `U_FTE_TRANS` 1<<1, `U_FTE_FATNESS` 1<<2, `U_FTE_MODEL_DBL` 1<<3,
 `U_FTE_ENTITY_DBL` 1<<5, `U_FTE_ENTITY_DBL_2` 1<<6, `U_FTE_YET_MORE` 1<<7,
-`U_FTE_COLOR_MOD` 1<<10.
+`U_FTE_COLOR_MOD` 1<<10. In the sound channel word: `SND_ATTENUATION` 1<<14,
+`SND_VOLUME` 1<<15. Temp entity types: `TE_GUNSHOT` 2, `TE_LIGHTNING_1` 5,
+`TE_LIGHTNING_2` 6, `TE_LIGHTNING_3` 9, `TE_BLOOD` 12.
 
 `delta(w)` (`ProtocolState::skip_entity_delta`):
 
@@ -473,16 +463,6 @@ if more & U_FTE_FATNESS: skip 1
 if more & U_FTE_COLOR_MOD and fte & FTE_PEXT_COLOR_MOD: skip 3
 ```
 
-`frame_len(src, p)` (`protocol.rs:frame_len`) is the length of the frame at
-`p`, header included, or `None`. With fewer than 2 bytes left: `None`.
-By `src[p+1] & 7`: `DEM_SET` (2): 10 bytes; `DEM_MULTIPLE` (3):
-`10 + le32(src[p+6..])`; `DEM_READ` (1), `DEM_SINGLE` (4), `DEM_STATS` (5),
-`DEM_ALL` (6): `6 + le32(src[p+2..])`; anything else (0, 7): `None`. A
-frame that runs past the end of `src` is `None`. The encoder walks frames
-while `frame_len` is `Some` and stores the rest of the segment as its tail;
-it also cuts the demo and sums `duration_ms` with it (section 8). A decoder
-does not need `frame_len`.
-
 ### 4.3 Walker state (`walker.rs:SegmentWalker::new`)
 
 Fresh for every segment; zero unless noted:
@@ -490,7 +470,7 @@ Fresh for every segment; zero unless noted:
 | state | type | init | updated |
 |---|---|---|---|
 | `time` | u32 | 0 | += every time byte (wrapping) |
-| `target` | u8 | 0 | `type >> 3` of the current frame |
+| `target` | u8 | 0 | `type >> 3` of the current frame, 0 to 31 |
 | `last_type`, `last_time_byte` | u8 | 0 | the previous frame's type and time byte |
 | `previous_command` | u8 | 0 | reset to 0 at each payload start |
 | `first_command_by_type[8]` | u8 | 0 | per frame type (`type & 7`), section 4.5 |
@@ -503,7 +483,7 @@ Fresh for every segment; zero unless noted:
 | `usercmd_previous_players[2]` | u8 | 0 | per segment |
 | `usercmds[256]` | {drop, msec, grid, buttons, impulse u8; moves[3] u16} | 0 | per usercmd player number |
 | `entities[2048]` | {angles[3] u8, angle_residuals[3] u8, frame u8, model u8, bits u8, last_packet u32} | 0 | per entity number |
-| `stats[32][256]` | u8 | 0 | per (target & 31, stat index) |
+| `stats[32][256]` | u8 | 0 | per (target, stat index) |
 | `player_origin_offsets[256][3]`, `entity_origin_offsets[2048][3]` | u32 | `NO_OFFSET` (0xFFFFFFFF) | offset of the latest origin coord per axis |
 | `previous_packet`, `current_packet` | list of u16 | empty | entity numbers (9-bit) of the previous and current packet |
 | `previous_packet_index` | usize | 0 | |
@@ -522,12 +502,12 @@ section 5:
 * `UsercmdRecord {pitch_offset u32, number u8, grid_axes u8}` (section 4.11)
 
 The lists grow as the walk appends. Every record consumes a symbol of its
-stream, so the stream table's counts bound them (section 9, note 2).
+stream, so the stream table's counts bound them (section 9, note 1).
 
 ### 4.4 Segment walk and frames (`SegmentWalker::run`, `SegmentWalker::frame`)
 
 ```
-stop = max(raw_len - tail, 0)
+stop = raw_len - tail                  // tail <= raw_len, section 3.1
 while no error and p < stop: frame()
 if p != stop: error
 copy_blob(TAIL, tail)
@@ -547,8 +527,9 @@ switch ty & 7:
   0, 7:                             error
 ```
 
-Both contexts use `last_type` before it is updated; TIME's uses the
-previous frame's time byte.
+Frame types (`ty & 7`): `DEM_READ` 1, `DEM_SET` 2, `DEM_MULTIPLE` 3,
+`DEM_SINGLE` 4, `DEM_STATS` 5, `DEM_ALL` 6. Both contexts use `last_type`
+before it is updated; TIME's uses the previous frame's time byte.
 
 `length_prefixed(ty, hidden)`: `at = reserve(4)` (stop on error); then
 `hidden ? hidden_payload() : payload(ty)`; then write `n = p - at - 4` as
@@ -623,9 +604,6 @@ for k in 0..5:
 copy_blob(RAW, n)
 ```
 
-The encoder escapes when the next command byte is 0, unknown to the sizer,
-or its body does not fit before the payload end. It writes `n` in groups of
-7 bits, least significant first, bit 7 set on every group but the last.
 The escaped part runs to the end of the payload.
 
 ### 4.6 Commands (`SegmentWalker::command`)
@@ -637,12 +615,12 @@ for the first), updated after `command()` returns.
 |---|---|
 | `SVC_PLAYER_INFO` | section 4.7 |
 | `SVC_PACKET_ENTITIES`, `SVC_DELTA_PACKET_ENTITIES` | section 4.8 |
-| `SVC_UPDATE_STAT` | `pl = target & 31`; `i = code_symbol(STAT_INDEX, stat_previous_index \| (previous_command << 8))`; `prev = stats[pl][i]`; `v = code_symbol_residual(STAT_VALUE, i \| (stat_previous_residual << 8), prev)`; `stat_previous_index = i`; `stat_previous_residual = v - prev` (mod 256); `stats[pl][i] = v` |
+| `SVC_UPDATE_STAT` | `i = code_symbol(STAT_INDEX, stat_previous_index \| (previous_command << 8))`; `prev = stats[target][i]`; `v = code_symbol_residual(STAT_VALUE, i \| (stat_previous_residual << 8), prev)`; `stat_previous_index = i`; `stat_previous_residual = v - prev` (mod 256); `stats[target][i] = v` |
 | `SVC_UPDATE_STAT_LONG` | `code_blob_byte(STAT_LONG_INDEX)`; `copy_blob(STAT_LONG_VALUE, 4)` |
 | `SVC_SOUND` | section 4.9 |
 | `SVC_TEMP_ENTITY` | section 4.10 |
 | `SVC_PRINT` | `code_blob_byte(PRINT_LEVEL)`; `copy_command_body(TEXT, SVC_STUFF_TEXT)` (one string) |
-| `SVC_STUFF_TEXT`, `SVC_CENTER_PRINT` | `copy_command_body(TEXT, SVC_STUFF_TEXT)` |
+| `SVC_STUFF_TEXT`, `SVC_CENTER_PRINT` (26) | `copy_command_body(TEXT, SVC_STUFF_TEXT)` |
 | `SVC_UPDATE_FRAGS` | `copy_blob(FRAGS, 3)` |
 | `SVC_UPDATE_PING`, `SVC_UPDATE_ENTER_TIME`, `SVC_UPDATE_PL` | `copy_command_body(PING, c)` |
 | `SVC_NAILS`, `SVC_NAILS_2` | `copy_command_body(NAILS, c)` |
@@ -688,9 +666,8 @@ write flags as 2 bytes, low byte first
 
 Symbol `a`: bits 0-5 are `x` bits 0-5, bit 6 is `x` bit 10, bit 7 says a
 rare bit changed. `b1`: low nibble `x` bits 6-9, high nibble `x` bits
-11-14. `b2`: `x` bit 15 (the encoder writes 0 or 1; the decoder reads bit
-0). The encoder sets bit 7 of `a` exactly when `x & ~0x43f != 0`. The three
-contexts do not overlap: 0x8000-0xFFFF, 0x100-0x1FF and 0x200.
+11-14. `b2`: bit 0 is `x` bit 15. The three contexts do not overlap:
+0x8000-0xFFFF, 0x100-0x1FF and 0x200.
 
 ### 4.8 Packet entities (`SegmentWalker::packet_entities`, `SegmentWalker::entity_delta`)
 
@@ -725,8 +702,7 @@ swap(previous_packet, current_packet)                // also after an error brea
 `len(previous_packet)` and `previous_packet[previous_packet_index] <=
 prev`; return `previous_packet[previous_packet_index]` if the index is
 below the length, else `prev + 1`. The index only moves forward within a
-packet. The encoder codes `d = ((e - prev - 1) & 511) + 1` (1..512):
-directly if `d < 255`, else as 255 followed by the two bytes of `d`.
+packet.
 
 `entity_delta(w)`:
 
@@ -829,9 +805,6 @@ else:
     off = reserve(6); push TempEntityRecord{off, [NO_OFFSET] * 3, t}
 ```
 
-The encoder escapes a payload with an unknown temp-entity type (the sizer
-returns `None`), so the last branch sees only the types of section 4.2.
-
 ### 4.11 Hidden payloads (`SegmentWalker::hidden_payload`)
 
 A `DEM_MULTIPLE` frame with mask 0 carries blocks `[u32 len][u16 type][len
@@ -850,10 +823,6 @@ loop:
     elif type == MVD_HIDDEN_USERCMD (1) and len == 23: usercmd()
     else:                                              copy_blob(HIDDEN_MISC, len)
 ```
-
-The encoder writes tag 2 at the end of the payload, and tag 0 (an escape of
-the rest) when fewer than 6 bytes remain or the block length is 0 or runs
-past the payload.
 
 **usercmd blocks** (`SegmentWalker::usercmd`). mvdsv writes one hidden block of
 type 1 per player input when usercmd recording is on (`sv_user.c`
@@ -895,40 +864,9 @@ usercmd():
 power of two). The client sends its angles as 16-bit values and the server
 stores exactly that value times 360/65536, so in practice every angle is on
 the grid; -0.0, NaN, +180.0 and anything else are not, and are kept as their
-four bytes. The encoder computes the bits so (`math.rs:on_grid`). A type-1
-block of another length goes to `HIDDEN_MISC` like every other block. A segment
-without usercmd blocks has neither `USERCMD` nor `USERCMD_ANGLE` in its table.
-
-### 4.12 Contexts of the structural streams
-
-| stream | context(s) |
-|---|---|
-| `TIME` | `last_type \| (last_time_byte << 8)` |
-| `TYPE` | `last_type \| (min(tb, 32) << 8)` |
-| `COMMAND` | class 0-14: `class \| (min(index, 15) << 4) \| (first_class << 8) \| (ti << 12)`; class 15: `0x8000 \| previous_command \| (ti << 8) \| (min(index, 7) << 11)` |
-| `PLAYER_FLAGS` | `0x8000 \| (prev & 0x7fff)`; `0x100 \| ((prev >> 6) & 0xff)`; `0x200` |
-| `PLAYER_FRAME` | `ps.frame \| (flags & 0x300)` |
-| `PLAYER_WEAPON_FRAME` | `ps.weapon_frame` |
-| `ENTITY_GAP` | `ectx`; `1 << 12`; `2 << 12` |
-| `ENTITY_BITS` | `es.bits \| (es.model << 7)` (9-bit index) |
-| `ENTITY_MORE` | `(bits >> 9) \| (m0 << 8)`; `0x8000`; `0x8001` |
-| `ENTITY_ANGLE` | `i \| (q << 2) \| (model << 6)`; FTE float: `3 \| (model << 6) \| (k << 14)` |
-| `STAT_INDEX` | `stat_previous_index \| (previous_command << 8)` |
-| `STAT_VALUE` | `i \| (stat_previous_residual << 8)` |
-| `SOUND_CHANNEL` | `previous_command`; `0x100 \| lo` |
-| `SOUND_NUMBER` | `(ch & 7) \| (min(e, 33) << 3)` |
-| `TEMP_ENTITY_TYPE` | `previous_temp_entity \| ((previous_command == SVC_TEMP_ENTITY) << 8)` |
-| `USERCMD` | `min(p1, 31) \| (min(p2, 31) << 5)`; `(kind << 12) \| x` for the other fields (section 4.11) |
-
-Every context fits in 16 bits. The blob streams the walker reads byte by
-byte (`blob_byte`, `code_blob_byte`, `code_blob_residual`, `code_blob_bytes`)
-are `MASK`, `ESCAPE_LENGTH`, `HIDDEN_TAG`, `HIDDEN_LENGTH`, `HIDDEN_TYPE`,
-`PLAYER_NUMBER`, `PLAYER_MODEL`, `PLAYER_SKIN`, `PLAYER_EFFECTS`,
-`ENTITY_HEADER`, `ENTITY_MODEL`, `ENTITY_FRAME`, `ENTITY_MISC`,
-`STAT_LONG_INDEX`, `SOUND_MISC`, `TEMP_ENTITY_MISC` and `PRINT_LEVEL`;
-`HIDDEN_DAMAGE`, `FRAGS`, `STAT_LONG_VALUE`, `RAW`, `TAIL`, `SET`, `TEXT`,
-`PING`, `NAILS`, `HIDDEN_MISC`, `SOUND_FLOAT`, `TEMP_ENTITY_FLOAT` and the
-generic streams `GENERIC + c` are read with `copy_blob`.
+four bytes. A type-1 block of another length goes to `HIDDEN_MISC` like every
+other block. A segment without usercmd blocks has neither `USERCMD` nor
+`USERCMD_ANGLE` in its table.
 
 ## 5. Numeric groups (`numeric.rs`)
 
@@ -965,13 +903,13 @@ reference runs them in `GROUPS` order after the walk (`segment.rs:decode`).
   slot. The residual kept as state is `(r as u16) as i16 as i32`.
 * 32-bit field: `v = (pred + (r as u32)) mod 2^32`, written u32le. The
   residual kept as state is `r`.
-* A read outside the segment's output reads 0; a write outside it is
-  dropped. Neither happens in a well-formed walk.
+* Every slot lies inside the segment's output: `reserve` checked it
+  (section 4).
 
 The encoder's residual is `(v - pred) as i16 as i32` for a 16-bit field
 and `(v - pred) as i32` for a 32-bit field.
 
-### 5.2 Prediction helpers
+### 5.2 Prediction helpers (`numeric.rs:time_deltas`, `predict_time_scaled`; `math.rs:div_round`)
 
 ```
 time_deltas(frame_times = (last, previous), t) -> (now, before):
@@ -990,10 +928,6 @@ div_round(a i32, b i32 > 0) -> i32:          // halves round away from zero
     q = n / b                                // floor
     return a < 0 ? -q : q
 ```
-
-The reference divides through a reciprocal table for `b < 256`; it equals
-plain integer division for every `n < 2^31` (`math.rs:div_round`, test
-`div_round_matches_reference`).
 
 `AxisTrack` (per player or entity and axis, all zero initially): `last,
 previous, before_previous: u16; residual: i32; float_last_bits,
@@ -1056,11 +990,11 @@ Angles are 16-bit whether the coordinates are float or not.
 
 ### 5.5 Entity origins: streams 23-25 and 31-33 (`entity_origin_step`)
 
-Group `EntityOrigin(a)`. State: `AxisTrack` per entity, indexed `number &
-2047`. For each packet entity record `e` (fields of section 4: `offset`,
-`number`, `bits`; `bits` holds `1 << 2i` for
+Group `EntityOrigin(a)`. State: `AxisTrack` per entity number (2048: a
+number is at most 511 + 512 + 1024). For each packet entity record `e`
+(fields of section 4: `offset`, `number`, `bits`; `bits` holds `1 << 2i` for
 origin `i` sent, `2 << 2i` for angle `i` sent, and `PE_IN_PREVIOUS` (64),
-`PE_FLOAT` (128), `PE_WIDE` (256)), with `s = tracks[e.number & 2047]`:
+`PE_FLOAT` (128), `PE_WIDE` (256)), with `s = tracks[e.number]`:
 
 ```
 if e.bits & (1 << (2 * a)):                                      // origin a sent
@@ -1133,18 +1067,6 @@ else:
 
 `references` point only at 16-bit player or entity origin slots, written by the
 origin groups before these two groups run.
-
-### 5.7 Feature vectors (summary)
-
-| Stream | f0 | f1 | f2 | f3 |
-|---|---|---|---|---|
-| 17-19 | residual_bucket(residual) | residual_bucket(velocity) | | |
-| 20-22 | residual_bucket(residual) | residual_bucket(previous_velocity) | | |
-| 23-25 | residual_bucket(residual) | residual_bucket(velocity) | in_previous | |
-| 26 | i \| kind << 2 | sound number | | |
-| 27 | i \| sel << 2 (sel 0 point, 1 beam start, 2 beam end) | kind | | |
-| 28-30, 31-33 | residual_bucket(float_residual_bits) | axis | | |
-| 34 | residual_bucket(residual) | residual_bucket(velocity) | residual_bucket(previous_velocity) | axis |
 
 ## 6. Entropy coding (`rans.rs`)
 
@@ -1229,7 +1151,7 @@ State: `x` u32 and a word cursor over `rans`.
 
 ```
 init: hi = word(); lo = word(); x = (hi << 16) | lo
-word(): the u16le at pos (0 if fewer than 2 bytes remain); pos += 2
+word(): the u16le at pos; pos += 2      // fewer than 2 bytes left: an over-read (section 1)
 
 decode(context):
     table = the table of context (contexts) or the fallback
@@ -1242,9 +1164,7 @@ decode(context):
     return s
 ```
 
-A symbol of a single-symbol table is not coded. The reference's
-decoder-side layout (search tables, slot LUTs, a context map) is an
-implementation detail.
+A symbol of a single-symbol table is not coded.
 
 **Structural streams** (`ByteDecoder`): `context = walker_context & 0xFFFF`
 (every walker context fits 16 bits, section 4); the symbol is the byte.
@@ -1259,7 +1179,8 @@ v = (b is even) ? (m as i32).wrapping_neg() : m as i32                  // b = 0
 ```
 
 `bits` reads `extra` as an LSB-first bit stream (bit `k` of the stream is
-bit `k % 8` of byte `k / 8`), zeros past the end. `get(n)` reads `n` bits,
+bit `k % 8` of byte `k / 8`); a bit past the end is an over-read
+(section 1). `get(n)` reads `n` bits,
 the first one read being bit 0 of the result; `get(0) = 0`. Buckets 63
 and 64 (n = 32) give `m` up to 2^32 - 1; `m` is reinterpreted as i32
 before the sign, and the negation wraps. The encoder's bucket is `2n - 1 +
@@ -1284,8 +1205,8 @@ min(v, m)`:
 A structural or numeric stream is complete only if exactly `count` symbols
 (its stream table entry, section 3; symbols of single-symbol tables count,
 though they are not coded) were decoded, the state is back at 2^16 and
-every word of `rans` was read (the word cursor equals `rans_len`; an empty
-`rans` therefore never completes: the cursor is past its end). A numeric
+every word of `rans` was read (the word cursor equals `rans_len`, which is
+therefore even and at least 4). A numeric
 stream's mantissa bits must also end within the last byte of `extra`:
 `ceil(bits_read / 8) == len(extra)`, at most 7 padding bits
 (`ByteDecoder::is_done`, `NumericDecoder::is_done`, `BitReader::is_finished`).
@@ -1329,34 +1250,18 @@ writes are in section 8.
 
 ## 7. Validation rules and limits
 
+A reader refuses a file that breaks any rule of this document:
+
+* **Layout rules** (`decode.rs:Decoder`, `format.rs:Layout`): those of section 2, on the
+  header, the models block and each segment's fields. Each is checked before the block it
+  covers is decoded. A file that ends inside a field or a block, or before it is complete
+  (2.3), is corrupt.
+* **Content rules**: those of sections 3 to 6, applied when a segment is decoded, and the
+  whole-demo check (3.4) after the last segment.
+
 The reference has one reader: whole-file decoding (`decode.rs:decompress`) collects what
 in-order streaming (`decode.rs:Decoder`) reads, so both accept and refuse the same files.
 The reference tests this on every vector and on mutated files.
-
-**Layout rules** (`decode.rs:Decoder`, `format.rs:Layout`), each checked before the
-block it covers is decoded; refuse the file if any fails:
-
-1. Header (section 2): the magic `MVDZ` (else *NotMvdz*), version 3 (else
-   *UnsupportedVersion*), all 60 bytes present.
-2. Models block (section 2): its length field present, the length at most 2^24, the body
-   present; if the length is not 0, the body follows section 2.2 (the meta model whole,
-   count not 0, ids strictly increasing, each a modelled stream, the raw lengths within
-   their limit, consumed exactly, and every model's rules: its stream decodes to exactly
-   `raw_len` bytes and is complete, the raw length matches its own count, the own count is
-   at most 65536, contexts strictly increasing).
-3. Each segment (section 2), in file order, until the running sum of `raw_len` equals the
-   header's `size`: its length field present, `len` at most 2^21, the 12 header bytes
-   and `len` coded bytes present, `raw_len` at least 1 and at most 2^20, the running
-   sum of `raw_len` at most the header's `size`.
-4. After the last segment: no byte follows.
-
-**Content rules**, applied when a segment is decoded: the transform header and stream
-table (section 3), every stream body consumed exactly (section 6), the walk (section 4), the numeric groups
-(section 5), the segment's CRC-32 (section 3). After the last segment, the whole-demo
-check (section 3): the CRC-32 of the demo.
-
-A model the models block lists and no segment uses is valid and ignored. A segment that
-codes a structural or numeric stream the models block has no model for is corrupt.
 
 **Errors.** The reference reports one of these `Error` variants; another decoder should
 report the same category in its own words (the messages in `MANIFEST.tsv` are the
@@ -1424,7 +1329,7 @@ its blob parser (rule 10) on its own.
    follow it. A damaged demo with an intact start is encoded. The unchecked entry point
    (the fuzz targets' `encode_any`) writes any bytes.
 2. **Cut points** (`segment.rs:cut_points`): an empty demo has no segment. Otherwise walk
-   the frames from the start (`protocol.rs:frame_len`, section 4) and cut after a frame whenever
+   the frames from the start (`frame_len`, rule 11) and cut after a frame whenever
    at least 2^18 bytes have accumulated since the last cut and bytes remain. When a
    frame would take the segment past 2^20 bytes, or the bytes no longer frame, the rest
    of the demo is cut every 2^20 bytes from the last cut; the last piece is the last
@@ -1500,7 +1405,7 @@ its blob parser (rule 10) on its own.
    `Internal`: a bug in the encoder.
 8. **Determinism**: the output depends only on the input, not on the thread count.
 9. **Duration** (`segment.rs:duration_ms`): a segment's `duration_ms` is the sum of the
-   time bytes of the whole frames it starts with (`protocol.rs:frame_len`, section 4),
+   time bytes of the whole frames it starts with (`frame_len`, rule 11),
    stopping at the first bytes that do not frame. The header's `duration_ms` is the sum
    of the segments'.
 10. **Blob tokens** (`lz.rs:parse`): the canonical parse of the blob bytes. Greedy; at
@@ -1528,57 +1433,77 @@ its blob parser (rule 10) on its own.
 
     The tokens are coded as section 6.6 reads them. `vectors/lz-tokens.tsv` holds inputs
     with their tokens.
+11. **Frames** (`protocol.rs:frame_len`): `frame_len(src, p)` is the length of the frame
+    at `p`, header included, or `None`. With fewer than 2 bytes left: `None`. By
+    `src[p+1] & 7`: `DEM_SET`: 10 bytes; `DEM_MULTIPLE`: `10 + le32(src[p+6..])`;
+    `DEM_READ`, `DEM_SINGLE`, `DEM_STATS`, `DEM_ALL`: `6 + le32(src[p+2..])`; anything
+    else (0, 7): `None`. A frame that runs past the end of `src` is `None`. The walk of a
+    segment takes frames while `frame_len` is `Some`; the rest of the segment is its
+    tail. Rules 2 and 9 cut the demo and sum `duration_ms` with it.
+12. **Walk** (`walker.rs`): the encoder runs the walk of section 4 over the source bytes
+    and codes what the decoder reads there. What section 4 does not say:
+
+    * **Sizer**: the rows of `command_body_size` (section 4.2) for the commands the walker
+      decodes field by field, sized to choose between walking a command and escaping:
+
+      | c | name | body |
+      |---|---|---|
+      | 3 | `SVC_UPDATE_STAT` | skip 2 |
+      | 6 | `SVC_SOUND` | `ch = u16`; if `ch & SND_VOLUME` skip 1; if `ch & SND_ATTENUATION` skip 1; skip `1 + 3*coord` |
+      | 8 | `SVC_PRINT` | skip 1; str |
+      | 14 | `SVC_UPDATE_FRAGS` | skip 3 |
+      | 23 | `SVC_TEMP_ENTITY` | `t = u8`; t in {`TE_LIGHTNING_1`, `TE_LIGHTNING_2`, `TE_LIGHTNING_3`}: skip `2 + 6*coord`; t in {0, 1, 3, 4, 7, 8, 10, 11, 13}: skip `3*coord`; t in {`TE_GUNSHOT`, `TE_BLOOD`}: skip `1 + 3*coord`; else `None` |
+      | 26 | `SVC_CENTER_PRINT` | str |
+      | 38 | `SVC_UPDATE_STAT_LONG` | skip 5 |
+      | 42 | `SVC_PLAYER_INFO` | skip 1; `f = u16`; skip 1; for i in 0..3: if `f & (DF_ORIGIN << i)` skip coord; for i in 0..3: if `f & (DF_ANGLES << i)` skip 2; skip 1 for each of `DF_MODEL`, `DF_SKIN_NUM`, `DF_EFFECTS`, `DF_WEAPON_FRAME` that is set |
+      | 47 | `SVC_PACKET_ENTITIES` | loop { `w = u16`; if `w == 0` break; `delta(w)` } |
+      | 48 | `SVC_DELTA_PACKET_ENTITIES` | skip 1; then as 47 |
+
+    * **Escape** (section 4.5): when the next command byte is 0, unknown to the sizer, or
+      its body does not fit before the payload end. `n`, the length of the rest of the
+      payload, is written in groups of 7 bits, least significant first, bit 7 set on every
+      group but the last.
+    * **Player flags** (section 4.7): bit 7 of `a` is set exactly when `x & ~0x43f != 0`;
+      `b2` is 0 or 1.
+    * **Entity gap** (section 4.8): `d = ((e - prev - 1) & 511) + 1` (1..512), coded
+      directly if `d < 255`, else as 255 followed by the two bytes of `d`.
+    * **Temp entity** (section 4.10): a payload with a type the row of 23 does not size is
+      escaped, so the last branch of section 4.10 sees only types 0, 1, 3, 4, 7, 8, 10, 11
+      and 13.
+    * **Hidden payload** (section 4.11): tag 2 at the end of the payload; tag 0 (an escape
+      of the rest) when fewer than 6 bytes remain or the block length is 0 or runs past
+      the payload. The grid bits of a usercmd block are `math.rs:on_grid`.
 
 ---------------------------------------------------------------------------
 
 ## 9. Notes for implementers
 
-1. **Order of work in a segment.** Walk the structure first (section 4), then run the numeric
-   groups in `numeric.rs:GROUPS` order (section 5): the sound and temp-entity groups predict
-   from origins the player and entity groups wrote, so they run after them.
-2. **Record lists are bounded by the stream table.** Every record consumes a symbol from
+1. **Record lists are bounded by the stream table.** Every record consumes a symbol from
    its stream (one `PLAYER_NUMBER` per player record, one `ENTITY_BITS` per entity
    record, one `SOUND_NUMBER` per sound, one `TEMP_ENTITY_TYPE` per temp entity), and
-   over-reading a stream fails its completeness check.
-3. **An exhausted structural stream reads as 255** (`segment.rs:DecodeIo`) and marks
-   failure; every loop of the walk stops on it. A port may stop at once: the result is
-   an error either way. A stream decoder does not stop at `count` by itself; the
-   completeness check after the walk enforces it.
-4. **Arithmetic that could overflow on invalid input** wraps in the reference: time
+   over-reading a stream is an error (section 1).
+2. **Arithmetic that could overflow on invalid input** wraps in the reference: time
    differences (`numeric.rs:time_deltas`), time-scaled predictions
    (`predict_time_scaled`) and residuals. Use wrapping 32-bit and 16-bit arithmetic
    (in Go: compute in `int32`/`uint16` and let it wrap before any clamp).
-5. **The escape length** (`walker.rs:escape`, section 4) is 7 bits per byte, low group first, at
-   most 5 bytes; a fifth byte with its top bit set is an error, and its bits above 32
-   are lost.
-6. **The rANS alphabet follows from the stream kind** (256 structural, 65 numeric); it
-   is not stored.
-7. **Coordinate offsets may point at 4-byte float fields** when the protocol switched to
+3. **Coordinate offsets may point at 4-byte float fields** when the protocol switched to
    float coordinates earlier in the same segment (an `svc_serverdata` mid-segment) and
    back; sounds and temp entities then read the low 16 bits of that field as their
    prediction. `observe_server_data` takes effect within a payload: later commands of the
    same payload use the new coordinate width.
-8. **Temp entity references** use a player's origin only for entities 1 to 32; beams from
+4. **Temp entity references** use a player's origin only for entities 1 to 32; beams from
    other entities predict their start from 0.
-9. **The `TEXT` blob is shared** by `svc_print` (after the level byte), `svc_stufftext`
+5. **The `TEXT` blob is shared** by `svc_print` (after the level byte), `svc_stufftext`
    and `svc_centerprint`, all sized as a NUL-terminated string. The `PING` and `NAILS`
    blobs are shared by several commands, each sized by its own rule.
-10. **Single-symbol tables**: a symbol from a single-symbol table is not coded and leaves
-    the rANS state alone. The final-state check (section 6) needs the state read from the
-    first 4 bytes even when no symbol is coded.
-11. **The TIME context uses the unclamped previous time byte**; TYPE uses
-    `min(time byte, 32)`.
-12. **Time is segment-relative**: every walker and predictor state starts fresh in each
-    segment, time at 0. A player's second record in a segment measures its previous
-    time delta from 0.
-13. **Per-player timing**: player origins and angles keep the last two frame times per
-    player and advance them on every record, sent or not. Entity origins use no time.
-14. **The models are read once per file**, when the layout is read, and the same
-    read-only models serve every segment (the reference shares them between threads).
-    Their memory counts once against a cap, not per segment.
-15. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
-    CRC-32s and lengths (zlib's `crc32_combine`), as the reference does
-    (`decode.rs:Decoder::decode_batch`). Hashing the output again gives the same value.
+6. **Time is segment-relative**: every walker and predictor state starts fresh in each
+   segment, time at 0. A player's second record in a segment measures its previous
+   time delta from 0.
+7. **Per-player timing**: player origins and angles keep the last two frame times per
+   player and advance them on every record, sent or not. Entity origins use no time.
+8. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
+   CRC-32s and lengths (zlib's `crc32_combine`), as the reference does
+   (`decode.rs:Decoder::decode_batch`). Hashing the output again gives the same value.
 
 ---------------------------------------------------------------------------
 
