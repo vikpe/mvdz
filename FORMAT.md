@@ -1131,21 +1131,20 @@ normalize(w[0..alphabet]) -> f[0..alphabet]   (total 4096):
 
 `freq = normalize(quantized_weight(q[s]))`, `cumulative[0] = 0`,
 `cumulative[s + 1] = cumulative[s] + freq[s]`. A table is **empty** if no
-symbol has `freq > 0` and **single-symbol** if exactly one has (its `freq`
-is then 4096). A symbol is present exactly when `q[s] > 0`.
+symbol has `freq > 0`. A symbol is present exactly when `q[s] > 0`; the
+only symbol of a table has `freq` 4096.
 
 ### 6.4 Symbol decode (`rans.rs:DecoderModel::decode`, `RansDecoder`)
 
 State: `x` u32 and a word cursor over `rans`.
 
 ```
-init: hi = word(); lo = word(); x = (hi << 16) | lo
+init: hi = word(); lo = word(); x = (hi << 16) | lo; error if x < 2^16
 word(): the u16le at pos; pos += 2      // fewer than 2 bytes left: an over-read (section 1)
 
 decode(context):
     table = the table of context (contexts) or the fallback
     if table is empty: error
-    if table is single-symbol: return its symbol         // the state is not used
     slot = x & 4095
     s = the symbol with cumulative[s] <= slot < cumulative[s + 1]
     x = freq[s] * (x >> 12) + slot - cumulative[s]      // u32 wrapping
@@ -1153,7 +1152,9 @@ decode(context):
     return s
 ```
 
-A symbol of a single-symbol table is not coded.
+`x` is never below 2^16: the check of `init` and the last step of `decode`
+keep it there. A symbol with `freq` 4096 leaves `x` as it is and reads no
+word, so a decoder may return it without the step.
 
 **Structural streams** (`ByteDecoder`): `context = walker_context & 0xFFFF`
 (every walker context fits 16 bits, section 4); the symbol is the byte.
@@ -1533,11 +1534,13 @@ order (u16le each), the fallback table and the own tables in the order of their 
 one byte per symbol: its quantized count.
 
 **rANS encoder** (`rans.rs:rans_encode`): state `x = 2^16`. Encode the symbols in
-reverse order, skipping those of single-symbol tables: with `freq`, `cum` of the symbol
-in its table: if `x >= ((2^16 >> 12) << 16) * freq`, emit the word `x & 0xFFFF` and
-`x >>= 16`; then `x = ((x / freq) << 12) + x % freq + cum`. Finally emit `x & 0xFFFF`
-then `x >> 16`; reverse the emitted word list and write it as u16le words. With no coded
-symbol the body is the 4 bytes of the state 2^16.
+reverse order: with `freq`, `cum` of the symbol in its table: if
+`x >= ((2^16 >> 12) << 16) * freq` (compared in 64 bits: the product is 2^32 for `freq`
+4096), emit the word `x & 0xFFFF` and `x >>= 16`; then
+`x = ((x / freq) << 12) + x % freq + cum`. Finally emit `x & 0xFFFF` then `x >> 16`;
+reverse the emitted word list and write it as u16le words. A symbol with `freq` 4096
+leaves `x` as it is and may be skipped; with no other symbol the body is the 4 bytes of
+the state 2^16.
 
 **Mantissa bits** (`math.rs:bucket`, `BitWriter`): for a value v != 0, `n = bitlen(|v|)`,
 bucket `2n - 1 + (v < 0)`, and the `n - 1` bits of `|v|` below its leading one, appended

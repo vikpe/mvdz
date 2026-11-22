@@ -793,11 +793,15 @@ impl<'a> SymbolDecoder<'a> {
             decoder: RansDecoder::finished_empty(),
         }
     }
-    fn new(rans: &'a [u8], file_model: &'a DecoderModel) -> Self {
-        SymbolDecoder {
-            model: file_model,
-            decoder: RansDecoder::new(rans),
+    fn new(rans: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
+        let decoder = RansDecoder::new(rans);
+        if decoder.state < STATE_MIN {
+            return Err(Error::Corrupt("rans stream"));
         }
+        Ok(SymbolDecoder {
+            model: file_model,
+            decoder,
+        })
     }
     #[inline(always)]
     fn get(&mut self, context_key: u32) -> Option<u32> {
@@ -826,7 +830,7 @@ impl<'a> ByteDecoder<'a> {
             return Err(Error::Corrupt("rans stream"));
         }
         Ok(ByteDecoder {
-            symbols: SymbolDecoder::new(unpacked.rans, file_model),
+            symbols: SymbolDecoder::new(unpacked.rans, file_model)?,
         })
     }
     #[inline(always)]
@@ -993,7 +997,7 @@ impl<'a> NumericDecoder<'a> {
         let unpacked = unpack(body)?;
         Ok(NumericDecoder {
             stream,
-            symbols: SymbolDecoder::new(unpacked.rans, file_model),
+            symbols: SymbolDecoder::new(unpacked.rans, file_model)?,
             bits: BitReader::new(unpacked.extra),
         })
     }

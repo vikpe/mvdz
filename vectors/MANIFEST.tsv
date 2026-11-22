@@ -47,6 +47,7 @@ hostile-table-blob-total.mvdz	error: corrupt: blob streams	-	the last blob strea
 hostile-table-trailing.mvdz	error: corrupt: stream bodies	-	one byte after the last stream body
 hostile-blob-split.mvdz	error: corrupt: structure	-	the first two blob streams' sizes moved by one byte: the same blob bytes, split differently
 hostile-rans-short.mvdz	error: corrupt: unconsumed stream data	-	the first stream body without its last rANS word
+hostile-rans-low-state.mvdz	error: corrupt: rans stream	-	the first stream body's first rANS word zeroed: an initial state below 2^16
 hostile-rans-odd.mvdz	error: corrupt: rans stream	-	the first stream body's rans_len raised by one, to an odd length
 hostile-tables-no-entry.mvdz	error: corrupt: stream without a model	-	the models block without the entry of a stream the segments code with rANS
 hostile-tables-missing.mvdz	error: corrupt: stream without a model	-	an empty models block: rANS streams without a model

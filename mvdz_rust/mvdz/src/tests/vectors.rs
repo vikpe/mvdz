@@ -460,6 +460,13 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         with_table(&edited),
         "the first stream body without its last rANS word",
     );
+    let mut edited = table.clone();
+    edited.bodies[4..6].fill(0);
+    add(
+        "rans-low-state",
+        with_table(&edited),
+        "the first stream body's first rANS word zeroed: an initial state below 2^16",
+    );
     let mut edited = table;
     edited.bodies[..4].copy_from_slice(&(rans_len + 1).to_le_bytes());
     add(

@@ -382,6 +382,9 @@ func newStreamDecoder(model *streamModel, body []byte) (*streamDecoder, error) {
 	}
 	high := decoder.word()
 	decoder.state = high<<16 | decoder.word()
+	if decoder.state < ransLowerBound {
+		return nil, corrupt("stream body")
+	}
 	return decoder, nil
 }
 
