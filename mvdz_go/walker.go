@@ -259,21 +259,9 @@ func commandClass(command uint8) uint16 {
 func (walker *segmentWalker) escape() {
 	sourceLen := uint32(len(walker.payloadRest()))
 	var length uint32
-	for group := 0; ; group++ {
-		sourceByte := uint8(sourceLen>>(7*group)) & 0x7f
-		hasMoreGroups := sourceLen>>(7*(group+1)) != 0
-		if hasMoreGroups {
-			sourceByte |= 0x80
-		}
-		lengthByte := walker.blobByte(streamEscapeLength, sourceByte)
-		length |= uint32(lengthByte&0x7f) << (7 * group)
-		if lengthByte < 0x80 {
-			break
-		}
-		if group == 4 {
-			walker.fail("escape length")
-			return
-		}
+	for index := range 4 {
+		sourceByte := uint8(sourceLen >> (8 * index))
+		length |= uint32(walker.blobByte(streamEscapeLength, sourceByte)) << (8 * index)
 	}
 	walker.copyBlob(streamRaw, length)
 }

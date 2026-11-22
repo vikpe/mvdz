@@ -480,32 +480,16 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     }
 
     fn escape(&mut self, end: usize) {
-        if IS_ENCODE {
-            let mut len = (end - self.offset) as u32;
-            loop {
-                let byte = (len & 0x7f) as u8 | if len >= 0x80 { 0x80 } else { 0 };
-                self.blob_byte(ESCAPE_LENGTH, byte);
-                len >>= 7;
-                if len == 0 {
-                    break;
-                }
-            }
-            self.copy_blob(RAW, end - self.offset);
+        let source_len = if IS_ENCODE {
+            (end - self.offset) as u32
         } else {
-            let mut len = 0u32;
-            for group in 0..5u32 {
-                let byte = self.blob_byte(ESCAPE_LENGTH, 0);
-                len |= u32::from(byte & 0x7f) << (7 * group);
-                if byte < 0x80 {
-                    break;
-                }
-                if group == 4 {
-                    self.has_error = true;
-                    return;
-                }
-            }
-            self.copy_blob(RAW, len as usize);
+            0
+        };
+        let mut len = 0u32;
+        for (index, source_byte) in source_len.to_le_bytes().into_iter().enumerate() {
+            len |= u32::from(self.blob_byte(ESCAPE_LENGTH, source_byte)) << (8 * index);
         }
+        self.copy_blob(RAW, len as usize);
     }
 
     fn payload(&mut self, end: usize, frame_type: u8) {

@@ -37,8 +37,7 @@ value.
 
 * **`u32`, `u64`**: unsigned fixed-width integers, little-endian. Every
   integer field of the container and the segment layout is a `u32`,
-  except two `u64` fields of the file header (2.1). The only
-  variable-length integer of the format is the escape length (4.5).
+  except two `u64` fields of the file header (2.1).
 * **CRC-32**: as in zlib, gzip and PNG (ISO 3309; reflected polynomial
   0xEDB88320, initial value 0xFFFFFFFF, final XOR 0xFFFFFFFF). Check
   value: CRC-32("123456789") = 0xCBF43926.
@@ -254,7 +253,7 @@ An id of 322 or above is an error.
 | 35 | `LZ_LENGTH` | numeric | match lengths of the blob tokens, 0 for a literal (6.6) |
 | 36 | `LZ_DISTANCE` | numeric | match distances of the blob tokens (6.6) |
 | 37 | `MASK` | blob | dem_multiple mask (4 bytes) |
-| 38 | `ESCAPE_LENGTH` | blob | escape length bytes |
+| 38 | `ESCAPE_LENGTH` | blob | escape length (4 bytes) |
 | 39 | `HIDDEN_TAG` | blob | hidden-block tag (0 escape, 1 block, 2 end) |
 | 40 | `HIDDEN_LENGTH` | blob | hidden-block length (4 bytes) |
 | 41 | `HIDDEN_TYPE` | blob | hidden-block type (2 bytes) |
@@ -596,11 +595,7 @@ The COMMAND context is split by bit 15:
 
 ```
 n = 0
-for k in 0..5:
-    b = blob_byte(ESCAPE_LENGTH)
-    n |= (b & 0x7f) << (7*k)          // u32; bits beyond 32 are lost
-    if b < 0x80: break
-    if k == 4: error; return
+for k in 0..4: n |= blob_byte(ESCAPE_LENGTH) << (8*k)      // u32, low byte first; not written
 copy_blob(RAW, n)
 ```
 
@@ -1460,9 +1455,8 @@ its blob parser (rule 10) on its own.
       | 48 | `SVC_DELTA_PACKET_ENTITIES` | skip 1; then as 47 |
 
     * **Escape** (section 4.5): when the next command byte is 0, unknown to the sizer, or
-      its body does not fit before the payload end. `n`, the length of the rest of the
-      payload, is written in groups of 7 bits, least significant first, bit 7 set on every
-      group but the last.
+      its body does not fit before the payload end. `n` is the length of the rest of the
+      payload.
     * **Player flags** (section 4.7): bit 7 of `a` is set exactly when `x & ~0x43f != 0`;
       `b2` is 0 or 1.
     * **Entity gap** (section 4.8): `d = ((e - prev - 1) & 511) + 1` (1..512), coded
