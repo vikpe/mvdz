@@ -14,9 +14,7 @@ usercmd.normal.segments.mvdz	b63058bd186b2d3732942c390e17c32b1c68731c08f8ff13fc2
 hostile-base-cut.mvdz	error: corrupt: incomplete file	-	the base file (a synthetic demo repeated to several segments) without its last 10 bytes
 hostile-trailing-byte.mvdz	error: corrupt: trailing bytes	-	one byte after the last segment
 hostile-header-size.mvdz	error: corrupt: incomplete file	-	the header's size + 1
-hostile-header-duration.mvdz	error: corrupt: demo duration	-	the header's duration_ms + 1
 hostile-header-crc.mvdz	error: corrupt: checksum mismatch	-	one bit of the header's CRC-32 flipped
-hostile-header-checksum-field.mvdz	error: corrupt: header checksum field	-	the high half of the header's checksum field set
 hostile-version.mvdz	error: unsupported MVDZ version	-	version 3
 hostile-dropped-segment.mvdz	error: corrupt: incomplete file	-	the third segment removed
 hostile-swapped-segments.mvdz	error: corrupt: checksum mismatch	-	the second and third segments swapped
@@ -24,7 +22,6 @@ hostile-repeated-segment.mvdz	error: corrupt: segment sizes	-	the second segment
 hostile-segment-crc.mvdz	error: corrupt: segment checksum	-	one bit of the second segment's CRC-32 flipped
 hostile-segment-empty.mvdz	error: corrupt: empty segment	-	an empty segment
 hostile-segment-length.mvdz	error: corrupt: segment size	-	the first segment padded with zeros to one byte over the largest coded length (2 MiB)
-hostile-segment-duration.mvdz	error: corrupt: segment duration	-	a segment whose dur_ms is 1 more than its frame times
 hostile-models-size.mvdz	error: corrupt: models too large	-	a models block of 256 MiB declared in a few bytes
 hostile-models-missing.mvdz	error: corrupt: tables	-	the base file without its models block
 hostile-ucmd-grid.mvdz	error: corrupt: structure	-	a usercmd block whose grid flags symbol is 9
@@ -34,11 +31,9 @@ hostile-tables-missing.mvdz	error: corrupt: stream without a model	-	an empty mo
 hostile-tables-order.mvdz	error: corrupt: tables	-	two entries of the models block swapped (stream ids not increasing)
 hostile-tables-dup-id.mvdz	error: corrupt: tables	-	an entry of the models block repeated (the same stream id twice)
 hostile-tables-blob-id.mvdz	error: corrupt: tables	-	a model for a blob stream (text)
-hostile-tables-plain-id.mvdz	error: corrupt: tables	-	a model for a stream that has none (pi.num)
-hostile-tables-unassigned-id.mvdz	error: corrupt: tables	-	a model for stream id 40 (unassigned)
+hostile-tables-unassigned-id.mvdz	error: corrupt: tables	-	a model for a stream id past the last
 hostile-tables-empty.mvdz	error: corrupt: tables	-	a models block with n = 0
 hostile-tables-trailing.mvdz	error: corrupt: tables	-	a models block with one byte after its last entry
-hostile-tables-padding.mvdz	error: corrupt: model	-	a model with one byte of padding (not consumed exactly)
-hostile-tables-alphabet.mvdz	error: corrupt: model	-	a numeric stream's entry holding a structural model (alphabet 256)
-hostile-tables-m1.mvdz	error: corrupt: model	-	a model declaring 65536 own tables (rule M1)
-hostile-tables-decisions.mvdz	error: corrupt: model	-	a model breaking the decision limit (rule M2)
+hostile-tables-padding.mvdz	error: corrupt: deflate data	-	a model with one byte of padding (not consumed exactly)
+hostile-tables-alphabet.mvdz	error: corrupt: deflate data	-	a numeric stream's entry holding a structural model (alphabet 256)
+hostile-tables-own-count.mvdz	error: corrupt: model	-	a model declaring 65537 own tables: more than there are contexts

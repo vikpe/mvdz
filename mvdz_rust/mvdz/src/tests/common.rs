@@ -13,34 +13,30 @@ pub(crate) fn decompress(file: &[u8], max_threads: u8) -> crate::Result<Vec<u8>>
     crate::decode(file, max_threads)
 }
 
-/// The file and the count of segments that failed the self-check.
-pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<(Vec<u8>, usize)> {
+pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<Vec<u8>> {
     crate::encode::compress(src, 1)
 }
 
 /// Every segment stored as it is: the encoder's fallback layout.
 pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use crate::segment::{cut_points, frame_scan, numerics, walk_tail};
-    let mut duration_ms = 0;
+    use crate::segment::{cut_points, numerics, walk_tail};
     let mut segments = Vec::new();
     for cut in cut_points(src).windows(2) {
         let raw = &src[cut[0]..cut[1]];
         let walked = walk_tail(raw, crate::proto::Proto::default());
         let coded = crate::segment::encode(&walked, &numerics(raw, &walked), &mut Vec::new(), &[])
             .context("a tail segment")?;
-        let segment_duration_ms = frame_scan(raw).duration_ms;
         let mut segment = segment_header_bytes(
             raw.len() as u32,
-            segment_duration_ms as u32,
+            crate::segment::duration_ms(raw),
             crc32fast::hash(raw),
         );
         segment.extend_from_slice(&coded);
         segments.push(segment);
-        duration_ms += segment_duration_ms;
     }
     let header = Header {
         size_bytes: src.len() as u64,
-        duration_ms,
+        duration_ms: u64::from(crate::segment::duration_ms(src)),
         crc32: crc32fast::hash(src),
         sha256: Sha256::digest(src).into(),
     };

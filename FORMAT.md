@@ -25,7 +25,7 @@ kind of error (section 7), in its own words.
   a consumer that must authenticate a demo hashes the decoded bytes.
 * *Integrity*: the CRC-32 of every segment's decoded bytes (2.3) and of
   the whole demo (2.1) are checked on every decode, together with the
-  demo's size and duration. They detect damage (bit rot, truncation, a bad
+  demo's size. They detect damage (bit rot, truncation, a bad
   copy), not a deliberately forged file (section 10).
 
 **Version.** The header's version field is 2. A reader refuses any other
@@ -37,7 +37,7 @@ value.
 
 * **`u32`, `u64`**: unsigned fixed-width integers, little-endian. Every
   integer field of the container and the segment layout is a `u32`,
-  except three `u64` fields of the file header (2.1). There are no
+  except two `u64` fields of the file header (2.1). There are no
   variable-length integers.
 * **CRC-32**: as in zlib, gzip and PNG (ISO 3309; reflected polynomial
   0xEDB88320, initial value 0xFFFFFFFF, final XOR 0xFFFFFFFF). Check
@@ -74,14 +74,14 @@ value.
 
 ```
 file    := header | models | segment*
-header  := "MVDZ" | version u32 | size u64 | duration_ms u64 | crc u64 | sha256[32]   (64 bytes)
+header  := "MVDZ" | version u32 | size u64 | duration_ms u64 | crc32 u32 | sha256[32]   (60 bytes)
 models  := len u32 | body[len]
 segment := len u32 | raw_len u32 | duration_ms u32 | crc32 u32 | coded[len]
 ```
 
 ### 2.1 Header (`format.rs:parse_header`)
 
-The first 64 bytes. Every field describes the original demo, none
+The first 60 bytes. Every field describes the original demo, none
 describes the `.mvdz` file.
 
 | Offset | Bytes | Field | Content |
@@ -89,16 +89,17 @@ describes the `.mvdz` file.
 | 0 | 4 | magic | `MVDZ` |
 | 4 | 4 | version | 2 |
 | 8 | 8 | size | length of the original demo in bytes |
-| 16 | 8 | duration_ms | demo time: the sum of all frame time bytes (4.4) |
-| 24 | 8 | crc | CRC-32 of the original demo in the low 4 bytes; the high 4 bytes are 0 |
-| 32 | 32 | sha256 | SHA-256 of the original demo |
+| 16 | 8 | duration_ms | demo time in milliseconds: the sum of the frame time bytes (4.4) |
+| 24 | 4 | crc32 | CRC-32 of the original demo |
+| 28 | 32 | sha256 | SHA-256 of the original demo |
 
 * Input whose first 4 bytes are not `MVDZ` (or that is shorter than 4
   bytes) is not an MVDZ file. If bytes 4-7 are present and are not 2, the
-  version is unsupported. Otherwise a header shorter than 64 bytes is
-  truncated, and non-zero high bytes of `crc` are an error.
+  version is unsupported. Otherwise a header shorter than 60 bytes is
+  truncated.
 * Demo time stands still while the server is paused: `duration_ms` is not
-  wall-clock time.
+  wall-clock time. Like `sha256`, it is a claim of the encoder: no reader
+  checks it (section 7).
 
 ### 2.2 Models block (`coder/rans.rs:read_models_block`)
 
@@ -110,7 +111,7 @@ body   := n u32 | n x { id u32 | len u32 | model[len] }
 * `len` 0: the file has no models. Otherwise `len` is at most 2^24
   (16 MiB) and the body is consumed exactly.
 * `n >= 1`. Each `id` is a structural or numeric stream id (3.2), the ids
-  strictly increasing. Each `model` is a model header (section 6.4), read with the
+  strictly increasing. Each `model` is a model (section 6.2), read with the
   alphabet of its stream: 256 for a structural stream, 65 for a numeric
   one.
 * The models block holds the only models: every structural or numeric
@@ -129,28 +130,29 @@ segment := len u32 | raw_len u32 | duration_ms u32 | crc32 u32 | coded[len]
 * `len`: length of `coded`, at most 2^21 (2 MiB). The segment occupies
   `16 + len` bytes.
 * `raw_len`: bytes the segment decodes to, 1 to 2^20 (1 MiB).
-* `duration_ms`: the sum of the time bytes of the segment's whole frames
-  (3.4).
+* `duration_ms`: demo time the segment covers: the sum of the time bytes of
+  the whole frames it starts with (4.4). A claim of the encoder, not
+  checked (section 7).
 * `crc32`: CRC-32 of the segment's decoded bytes.
 * `coded`: the segment's transform (section 3).
 
 Segments follow the models block in demo order, without gaps. A segment's
-offset in the demo is the sum of the `raw_len` of all earlier segments;
-its start time is the sum of their `duration_ms`. The
-running sums never exceed the header's `size` and `duration_ms`
+offset in the demo is the sum of the `raw_len` of all earlier segments,
+and its start time the sum of their `duration_ms`: a reader finds the
+segment of a demo time from the segment fields alone, without decoding.
+The running sum of `raw_len` never exceeds the header's `size`
 (`format.rs:Layout::add_segment`).
 
 **Completeness.** The file is complete when the segments' `raw_len` sum to
 the header's `size`. A file that ends before that is incomplete; bytes
 after that are an error ("trailing bytes"). An empty demo (`size` 0) has
-no segment. At the end the segments' `duration_ms` must sum to the
-header's `duration_ms`.
+no segment.
 
-**Segment boundaries.** A segment starts at a frame boundary or inside a
-frame cut at 1 MiB. Every segment but the last consists of whole frames,
-or is exactly 2^20 bytes long (3.4 checks it). Segments are independent:
-every walker and predictor state starts fresh in each segment, and the
-protocol state at its start is in its transform header (3.1).
+**Segment boundaries.** Segments are independent: every walker and
+predictor state starts fresh in each segment, and the protocol state at
+its start is in its transform header (3.1). A reader does not check where
+a demo is cut: a segment may start or end inside a frame, and the bytes
+after its last whole frame are its tail (3.1).
 
 **Cut points written by the reference encoder** (`segment.rs:cut_points`):
 a segment ends at the first frame boundary at or after 256 KiB of its
@@ -177,7 +179,7 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
   start (4.1).
 * `tail`: length of the unframed bytes at the end of the segment, at most
   `raw_len`.
-* `n`: at most 384. Per entry:
+* `n`: at most 319. Per entry:
   * `id`: a structural, numeric or blob stream id (3.2), each at most
     once, in any order;
   * `count`: symbols, values or bytes in the stream, at most
@@ -199,81 +201,75 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
 
 ### 3.2 Stream ids (`streams.rs`)
 
-Three kinds of stream:
+Three kinds of stream, one id range each:
 
-* **Structural** streams (ids 0-34, without the plain ones) are decoded
-  one symbol at a time by the walker (section 4), each symbol under a
-  context chosen by the walker, with rANS (section 6.6).
-* **Numeric** streams (ids 48-66, without 59) hold `i32` residuals,
-  decoded after the walk by the numeric groups (section 5), each value
-  under a feature vector, with rANS (section 6.6).
-* **Blob** streams are byte arrays taken from the blob body and consumed
-  in order by the walker: the 20 *plain* streams with ids below 80, ids
-  80-88, and the generic streams 128-383.
+* **Structural** streams (ids 0-15) are decoded one symbol at a time by
+  the walker (section 4), each symbol under a context chosen by the
+  walker, with rANS (section 6.4).
+* **Numeric** streams (ids 16-33) hold `i32` residuals, decoded after the
+  walk by the numeric groups (section 5), each value under a feature
+  vector, with rANS (section 6.4).
+* **Blob** streams (ids 34-318) are byte arrays taken from the blob body
+  and consumed in order by the walker.
 
-Every other id (35-47, 67-79, 89-127, 384 and above) is an error.
+An id of 319 or above is an error.
 
 | id | name | kind | content |
 |---|---|---|---|
 | 0 | time | structural | frame time byte |
 | 1 | type | structural | frame type byte |
-| 2 | mask | plain | dem_multiple mask (4 bytes) |
-| 3 | cmd | structural | svc command byte; 255 = end of payload, 0 = escape |
-| 4 | esclen | plain | escape length bytes |
-| 5 | hid.tag | plain | hidden-block tag (0 escape, 1 block, 2 end) |
-| 6 | hid.len | plain | hidden-block length (4 bytes) |
-| 7 | hid.type | plain | hidden-block type (2 bytes) |
-| 8 | hid.dmg | plain | hidden damage block (8 bytes) |
-| 9 | pi.num | plain | playerinfo player number |
-| 10 | pi.flags | structural | playerinfo flags (1 to 3 symbols) |
-| 11 | pi.frame | structural | playerinfo frame (residual) |
-| 12 | pi.model | plain | playerinfo model |
-| 13 | pi.skin | plain | playerinfo skin |
-| 14 | pi.eff | plain | playerinfo effects |
-| 15 | pi.wframe | structural | playerinfo weapon frame (residual) |
-| 16 | pe.hdr | plain | delta packet-entities "from" byte |
-| 17 | pe.ent | structural | entity-number gap |
-| 18 | pe.bits | structural | U_* high bits of the entity word, XOR previous |
-| 19 | pe.more | structural | U_MORE_BITS byte, FTE extension bytes |
-| 20 | pe.model | plain | modelindex (1 or 2 bytes) |
-| 21 | pe.frame | plain | frame |
-| 22 | pe.misc | plain | colormap, skin, effects, FTE trans/scale/fatness/colormod |
-| 23 | pe.a | structural | entity angles (residual or raw) |
-| 24 | st.idx | structural | svc_updatestat index |
-| 25 | st.val | structural | svc_updatestat value (residual) |
-| 26 | stl.idx | plain | svc_updatestatlong index |
-| 27 | snd.ch | structural | sound channel word (2 symbols) |
-| 28 | snd.misc | plain | sound volume, attenuation |
-| 29 | snd.num | structural | sound number |
-| 30 | te.type | structural | temp-entity type |
-| 31 | te.misc | plain | temp-entity entity (2 bytes) or count (1 byte) |
-| 32 | pr.level | plain | svc_print level |
-| 33 | frags | plain | svc_updatefrags (3 bytes) |
-| 34 | uc | structural | usercmd blocks: every field but the angles on the grid (4.11) |
-| 48, 49, 50 | pi.ox, pi.oy, pi.oz | numeric | player origin, 16-bit coordinates |
-| 51, 52, 53 | pi.ap, pi.ay, pi.ar | numeric | player angles (16-bit) |
-| 54, 55, 56 | pe.ox, pe.oy, pe.oz | numeric | entity origin, 16-bit coordinates |
-| 57 | snd.o | numeric | sound origins (16-bit coordinates) |
-| 58 | te.o | numeric | temp-entity origins (16-bit coordinates) |
-| 59 | stl.val | plain | svc_updatestatlong value (4 bytes) |
-| 60, 61, 62 | pi.fx, pi.fy, pi.fz | numeric | player origin, 32-bit float coordinates (bit patterns) |
-| 63, 64, 65 | pe.fx, pe.fy, pe.fz | numeric | entity origin, 32-bit float coordinates |
-| 66 | uc.a | numeric | usercmd angles on the 360/65536 grid (5.6) |
-| 80 | raw | blob | escaped payload bytes |
-| 81 | tail | blob | unframed bytes at the end of the segment |
-| 82 | set | blob | dem_set bodies (8 bytes each) |
-| 83 | text | blob | string bodies of svc 8 (after the level), 9 and 26 |
-| 84 | ping | blob | bodies of svc 36, 37 and 53 |
-| 85 | nails | blob | bodies of svc 43 and 54 |
-| 86 | hid.misc | blob | hidden-block bodies other than damage |
-| 87 | snd.f | blob | sound origins with float coordinates (12 bytes) |
-| 88 | te.f | blob | temp-entity origins with float coordinates |
-| 128 + c | gen.c | blob | body of every other svc command c (including 11, serverdata) |
-
-The plain streams are blob streams whose ids lie among the structural and
-numeric ones; the walker reads and writes the same fields as for a
-structural stream, but takes the bytes from the blob body
-(`streams.rs:PLAIN`).
+| 2 | cmd | structural | svc command byte; 255 = end of payload, 0 = escape |
+| 3 | pi.flags | structural | playerinfo flags (1 to 3 symbols) |
+| 4 | pi.frame | structural | playerinfo frame (residual) |
+| 5 | pi.wframe | structural | playerinfo weapon frame (residual) |
+| 6 | pe.ent | structural | entity-number gap |
+| 7 | pe.bits | structural | U_* high bits of the entity word, XOR previous |
+| 8 | pe.more | structural | U_MORE_BITS byte, FTE extension bytes |
+| 9 | pe.a | structural | entity angles (residual or raw) |
+| 10 | st.idx | structural | svc_updatestat index |
+| 11 | st.val | structural | svc_updatestat value (residual) |
+| 12 | snd.ch | structural | sound channel word (2 symbols) |
+| 13 | snd.num | structural | sound number |
+| 14 | te.type | structural | temp-entity type |
+| 15 | uc | structural | usercmd blocks: every field but the angles on the grid (4.11) |
+| 16, 17, 18 | pi.ox, pi.oy, pi.oz | numeric | player origin, 16-bit coordinates |
+| 19, 20, 21 | pi.ap, pi.ay, pi.ar | numeric | player angles (16-bit) |
+| 22, 23, 24 | pe.ox, pe.oy, pe.oz | numeric | entity origin, 16-bit coordinates |
+| 25 | snd.o | numeric | sound origins (16-bit coordinates) |
+| 26 | te.o | numeric | temp-entity origins (16-bit coordinates) |
+| 27, 28, 29 | pi.fx, pi.fy, pi.fz | numeric | player origin, 32-bit float coordinates (bit patterns) |
+| 30, 31, 32 | pe.fx, pe.fy, pe.fz | numeric | entity origin, 32-bit float coordinates |
+| 33 | uc.a | numeric | usercmd angles on the 360/65536 grid (5.6) |
+| 34 | mask | blob | dem_multiple mask (4 bytes) |
+| 35 | esclen | blob | escape length bytes |
+| 36 | hid.tag | blob | hidden-block tag (0 escape, 1 block, 2 end) |
+| 37 | hid.len | blob | hidden-block length (4 bytes) |
+| 38 | hid.type | blob | hidden-block type (2 bytes) |
+| 39 | hid.dmg | blob | hidden damage block (8 bytes) |
+| 40 | pi.num | blob | playerinfo player number |
+| 41 | pi.model | blob | playerinfo model |
+| 42 | pi.skin | blob | playerinfo skin |
+| 43 | pi.eff | blob | playerinfo effects |
+| 44 | pe.hdr | blob | delta packet-entities "from" byte |
+| 45 | pe.model | blob | modelindex (1 or 2 bytes) |
+| 46 | pe.frame | blob | frame |
+| 47 | pe.misc | blob | colormap, skin, effects, FTE trans/scale/fatness/colormod |
+| 48 | stl.idx | blob | svc_updatestatlong index |
+| 49 | snd.misc | blob | sound volume, attenuation |
+| 50 | te.misc | blob | temp-entity entity (2 bytes) or count (1 byte) |
+| 51 | pr.level | blob | svc_print level |
+| 52 | frags | blob | svc_updatefrags (3 bytes) |
+| 53 | stl.val | blob | svc_updatestatlong value (4 bytes) |
+| 54 | raw | blob | escaped payload bytes |
+| 55 | tail | blob | unframed bytes at the end of the segment |
+| 56 | set | blob | dem_set bodies (8 bytes each) |
+| 57 | text | blob | string bodies of svc 8 (after the level), 9 and 26 |
+| 58 | ping | blob | bodies of svc 36, 37 and 53 |
+| 59 | nails | blob | bodies of svc 43 and 54 |
+| 60 | hid.misc | blob | hidden-block bodies other than damage |
+| 61 | snd.f | blob | sound origins with float coordinates (12 bytes) |
+| 62 | te.f | blob | temp-entity origins with float coordinates |
+| 63 + c | gen.c | blob | body of every other svc command c (including 11, serverdata) |
 
 ### 3.3 Decoding a segment (`decode.rs:decode_segment`, `segment.rs:decode`)
 
@@ -289,28 +285,18 @@ structural stream, but takes the bytes from the blob body
    consumed, and every blob stream must be consumed exactly.
 5. Run the **numeric groups** (section 5) in their fixed order; afterwards
    every numeric stream must be complete.
-6. Check `crc32(output) == crc32` of the segment fields, and that the
-   segment's whole frames (3.4) have time bytes summing to its
-   `duration_ms`.
+6. Check `crc32(output) == crc32` of the segment fields.
 
 The reference decodes segments in parallel; the result does not depend on
 it.
 
-### 3.4 Whole-demo checks (`decode.rs:DemoCheck`)
+### 3.4 Whole-demo checks (`decode.rs:Decoder::finish`)
 
-A segment's *whole frames* are found by `frame_len` (`proto.rs:frame_len`,
-4.4) from its first byte, as long as a whole frame fits; the bytes after
-them are its tail. A reader that decodes the whole demo checks, in order
-of the segments:
+After the last segment a reader checks that no byte follows it and that
+the CRC-32 of the concatenated output equals the header's `crc32`. The
+output's length equals the header's `size` by the completeness rule (2.3).
 
-* a segment that has a tail and is not exactly 2^20 bytes long is the
-  last one: another segment after it is an error ("segment ends inside a
-  frame");
-* the CRC-32 of the concatenated output equals the header's `crc`, and its
-  length equals the header's `size`;
-* the segments' frame time sums add up to the header's `duration_ms`.
-
-The decoded demo is returned only when all of these pass. A sequential
+The decoded demo is returned only when these pass. A sequential
 reader delivers each segment's bytes once that segment passes its own
 checks (3.3), and reports the end of the demo only after the whole-demo
 checks; a failure after some bytes were delivered is an error, and those
@@ -326,7 +312,7 @@ depends on a numeric value.
 
 Three kinds of stream feed the walker (stream ids: section 3):
 
-* *structural* streams (16 of them, ids below 35): rANS-coded symbols, each
+* *structural* streams (ids 0-15): rANS-coded symbols, each
   with a 16-bit context (section 6);
 * *blob* streams: plain bytes, read in order from the stream's slice of the
   segment's blob body;
@@ -641,8 +627,8 @@ for the first), updated after `command()` returns.
 | `SVC_UPDATE_FRAGS` | `blob(FRAGS, 3)` |
 | `SVC_UPDATE_PING`, `SVC_UPDATE_ENTER_TIME`, `SVC_UPDATE_PL` | `generic(PING, c)` |
 | `SVC_NAILS`, `SVC_NAILS_2` | `generic(NAILS, c)` |
-| `SVC_SERVER_DATA` | `start = p`; `generic(128 + 11, SVC_SERVER_DATA)`; if no error: `proto.observe_server_data(dst[start..p])` |
-| any other | `generic(128 + c, c)` |
+| `SVC_SERVER_DATA` | `start = p`; `generic(63 + 11, SVC_SERVER_DATA)`; if no error: `proto.observe_server_data(dst[start..p])` |
+| any other | `generic(63 + c, c)` |
 
 ### 4.7 playerinfo (`Walker::playerinfo`, `Walker::playerinfo_flags`)
 
@@ -922,7 +908,7 @@ byte (`take`, `p8`, `pr8`, `pn`) are `MASK`, `ESCLEN`, `HIDTAG`, `HIDLEN`,
 `HIDTYPE`, `PI_NUM`, `PI_MODEL`, `PI_SKIN`, `PI_EFF`, `PE_HDR`, `PE_MODEL`,
 `PE_FRAME`, `PE_MISC`, `STL_IDX`, `SND_MISC`, `TE_MISC` and `PR_LEVEL`;
 `HIDDMG`, `FRAGS`, `STL_VAL`, `RAW`, `TAIL`, `SET`, `TEXT`, `PING`, `NAILS`,
-`HIDMISC`, `SNDF`, `TEF` and the generic streams `128 + c` are read with
+`HIDMISC`, `SNDF`, `TEF` and the generic streams `63 + c` are read with
 `blob`.
 
 ## 5. Numeric groups (`numeric.rs`)
@@ -933,7 +919,7 @@ player infos, packet entities, sounds, temp entities and usercmds. After
 the walk, the numeric groups fill these slots. A group iterates one record
 list in walk order; for each value it computes a prediction `pred` and a
 feature vector `f[0..6]` (u8 each) from group-local state, takes a residual
-`r` from its stream with context `numeric_context(stream, f)` (section 6.6),
+`r` from its stream with context `numeric_context(stream, f)` (section 6.4),
 writes `pred + r` at the slot's offset and updates its state.
 
 The groups (`numeric.rs:GROUPS`, `Group::streams`):
@@ -987,7 +973,7 @@ div_round(a i32, b i32 > 0) -> i32:          // halves round away from zero
     q = n / b                                // floor
     return a < 0 ? -q : q
 
-residual_bucket(v i32) -> u8:                // section 6.6
+residual_bucket(v i32) -> u8:                // section 6.4
     v == 0 ? 0 : 2 * bitlen(|v|) - 1 + (v < 0)
 ```
 
@@ -999,7 +985,7 @@ plain integer division for every `n < 2^31` (`numeric.rs:div_round`, test
 previous, before_previous: u16; residual: i32; float_last_bits,
 float_previous_bits: u32; float_residual_bits: i32; last_time: u32`.
 
-### 5.3 Player origins: streams 48-50 and 60-62 (`pi_origin_step`)
+### 5.3 Player origins: streams 16-18 and 27-29 (`pi_origin_step`)
 
 Group `PlayerOrigin(a)`. State: `Track` and `frame_times` per player
 number (256 each). For each player info record `p` (fields of section 4:
@@ -1009,7 +995,7 @@ record of that player whatever its flags; then with `s = tracks[p.number]`
 and `sent = p.flags & (1 << a)`:
 
 ```
-if p.has_float_coords:                                  // stream 60 + a
+if p.has_float_coords:                                  // stream 27 + a
     if sent:
         offset = p.offset + 4 * popcount(p.flags & ((1 << a) - 1))
         pred   = float_last_bits + (float_last_bits - float_previous_bits)   // u32 wrapping
@@ -1019,7 +1005,7 @@ if p.has_float_coords:                                  // stream 60 + a
     else:
         float_previous_bits = float_last_bits; float_residual_bits = 0
     // the 16-bit state is untouched
-else:                                                   // stream 48 + a
+else:                                                   // stream 16 + a
     if sent:
         pred     = predict_time_scaled(last, previous, now, before)
         offset   = p.offset + 2 * popcount(p.flags & ((1 << a) - 1))
@@ -1033,7 +1019,7 @@ else:                                                   // stream 48 + a
     // the float state is untouched
 ```
 
-### 5.4 Player angles: streams 51-53 (`pi_angle_step`)
+### 5.4 Player angles: streams 19-21 (`pi_angle_step`)
 
 Group `PlayerAngle(a)`. State and `time_deltas` as in section 5.3, separate from
 the origin groups'. For each player info record `p`, with `s =
@@ -1056,7 +1042,7 @@ before_previous = previous; previous = last; last = v
 
 Angles are 16-bit whether the coordinates are float or not.
 
-### 5.5 Entity origins: streams 54-56 and 63-65 (`pe_origin_step`)
+### 5.5 Entity origins: streams 22-24 and 30-32 (`pe_origin_step`)
 
 Group `EntityOrigin(a)`. State: `Track` per entity, indexed `number &
 2047`. For each packet entity record `e` (fields of section 4: `offset`, `time`,
@@ -1068,12 +1054,12 @@ origin `i` sent, `2 << 2i` for angle `i` sent, and `PE_IN_PREVIOUS` (64),
 now = (e.time - last_time) as i32; last_time = e.time           // every record
 if e.bits & (1 << (2 * a)):                                      // origin a sent
     offset = origin_offsets(e)[a]
-    if e.bits & PE_FLOAT:                                        // stream 63 + a
+    if e.bits & PE_FLOAT:                                        // stream 30 + a
         pred  = float_last_bits + (float_last_bits - float_previous_bits)
         f     = [residual_bucket(float_residual_bits), a, 0, 0, 0, 0]
         v, r' = 32-bit field (offset, pred, f)
         float_previous_bits = float_last_bits; float_last_bits = v; float_residual_bits = r'
-    else:                                                        // stream 54 + a
+    else:                                                        // stream 22 + a
         velocity = (last - previous) as i16 as i32
         pred     = last + (velocity as u16)
         in_previous = (e.bits & PE_IN_PREVIOUS) ? 1 : 0
@@ -1092,9 +1078,9 @@ for `i` in 0..3: if `bits & (1 << 2i)`: `o[i] = pos; pos += coord`; if
 `bits & (2 << 2i)`: `pos += angle`. `e.update_bits & 7` are the entity
 word's `U_ORIGIN_1..3` bits.
 
-### 5.6 Usercmd angles (66), sounds (57), temp entities (58)
+### 5.6 Usercmd angles (33), sounds (25), temp entities (26)
 
-**Usercmd angles, stream 66** (`numeric.rs:usercmd_angles`). State: three
+**Usercmd angles, stream 33** (`numeric.rs:usercmd_angles`). State: three
 `Track`s per player number (256). For each usercmd record `u` (section 4:
 `pitch_offset`, `number`, `grid_axes`), for `a` in 0..3 with `u.grid_axes &
 (1 << a)` (other axes are skipped and their state is untouched), with `s =
@@ -1116,12 +1102,12 @@ before_previous = previous; previous = last; last = v
 which is exact. The encoder's residual is `(g - pred) as i16 as i32` for
 the grid value `g` of the angle (`walk.rs:on_grid`, section 4).
 
-**Sounds, stream 57** (`numeric.rs:sound_origins`). For each sound record
+**Sounds, stream 25** (`numeric.rs:sound_origins`). For each sound record
 `s` (section 4: `offset`, `refs[3]`, `kind`, `number`), for `i` in 0..3:
 `pred = refs[i] == NO_OFFSET ? 0 : the u16le already decoded at refs[i]`,
 `f = [i | kind << 2, number, 0, 0, 0, 0]`, 16-bit field at `offset + 2i`.
 
-**Temp entities, stream 58** (`numeric.rs:temp_entity_origins`). State:
+**Temp entities, stream 26** (`numeric.rs:temp_entity_origins`). State:
 `last[3]` u16, zero, across the segment. For each temp entity record `t`
 (section 4: `offset`, `refs[3]`, `kind`):
 
@@ -1143,27 +1129,27 @@ origin groups before these two groups run.
 
 | Stream | f[0] | f[1] | f[2] | f[3] | f[4] | f[5] |
 |---|---|---|---|---|---|---|
-| 48-50 | rb(residual) | rb(velocity) | clamp(now, 0, 63) | flags & 7 | time_delta_change | 0 |
-| 51-53 | rb(residual) | rb(previous_velocity) | clamp(now, 0, 63) | (flags >> 3) & 7 | time_delta_change | 0 |
-| 54-56 | rb(residual) | rb(velocity) | model | in_previous \| (update_bits & 7) << 1 | clamp(now, 0, 63) | 0 |
-| 57 | i \| kind << 2 | sound number | 0 | 0 | 0 | 0 |
-| 58 | i \| sel << 2 (sel 0 point, 1 beam start, 2 beam end) | kind | 0 | 0 | 0 | 0 |
-| 60-62, 63-65 | rb(float_residual_bits) | axis | 0 | 0 | 0 | 0 |
-| 66 | rb(residual) | rb(velocity) | rb(previous_velocity) | axis | 0 | 0 |
+| 16-18 | rb(residual) | rb(velocity) | clamp(now, 0, 63) | flags & 7 | time_delta_change | 0 |
+| 19-21 | rb(residual) | rb(previous_velocity) | clamp(now, 0, 63) | (flags >> 3) & 7 | time_delta_change | 0 |
+| 22-24 | rb(residual) | rb(velocity) | model | in_previous \| (update_bits & 7) << 1 | clamp(now, 0, 63) | 0 |
+| 25 | i \| kind << 2 | sound number | 0 | 0 | 0 | 0 |
+| 26 | i \| sel << 2 (sel 0 point, 1 beam start, 2 beam end) | kind | 0 | 0 | 0 | 0 |
+| 27-29, 30-32 | rb(float_residual_bits) | axis | 0 | 0 | 0 | 0 |
+| 33 | rb(residual) | rb(velocity) | rb(previous_velocity) | axis | 0 | 0 |
 
 `rb` is `residual_bucket`.
 
 ## 6. Entropy coding (`coder/`)
 
 Every structural and numeric stream of a segment is coded with static rANS
-(Giesen's interleaved scheme) under the stream's model from the models
+(Giesen's scheme, one state) under the stream's model from the models
 block (section 2): one model per stream id for the whole file, shared by every
 segment, never changed by decoding. A segment's stream table entry names
 the stream; its kind (structural or numeric, from its id, section 3) decides the
 alphabet and the coder. No stream carries a model or coder id of its own. A
 structural or numeric stream in a stream table without a model in the
 models block is an error (`coder/mod.rs:file_model`). Blob streams are not
-entropy coded (section 6.8).
+entropy coded (section 6.6).
 
 ### 6.1 Stream body
 
@@ -1171,105 +1157,36 @@ entropy coded (section 6.8).
 rans_len u32 | rans[rans_len] | extra (rest of the body)
 ```
 
-`rans` is the interleaved rANS stream (section 6.6). `extra` holds the mantissa
-bits of a numeric stream (section 6.6); for a structural stream it must be empty
+`rans` is the rANS stream (section 6.4). `extra` holds the mantissa
+bits of a numeric stream (section 6.4); for a structural stream it must be empty
 (`rans.rs:unpack`, `ByteDecoder::new`).
 
-### 6.2 Range coder (`coder/rc.rs:RangeDecoder`)
+### 6.2 Model (`rans.rs:read_model_header`, `read_model`)
 
-Used only to read model headers. An LZMA-style binary decoder with 12-bit
-probabilities `p = P(bit = 1)` in 1..4095:
-
-```
-init: code = 0; range = 0xFFFFFFFF; pos = 0
-      repeat 5: code = (code << 8) | next()      // u32: the first byte is shifted out
-next(): the byte at pos, or 0 past the end; pos += 1 always
-bit(p):
-    bound = (range >> 12) * p
-    if code < bound: bit = 1; range = bound
-    else:            bit = 0; code -= bound; range -= bound
-    while range < 2^24: range <<= 8; code = (code << 8) | next()
-    return bit
-is_overrun() = pos > len + 5
-```
-
-Bit 1 takes the lower sub-interval. `decisions` counts the calls of
-`bit()`.
-
-### 6.3 Adaptive probability and IntModel (`rc.rs:Probability`, `IntModel`)
-
-A `Probability` is a u16, initially 32768. Its coding value is
-`clamp(P >> 4, 1, 4095)`. Update with shift `sh`: bit 1: `P += (65535 - P)
->> sh`; bit 0: `P -= P >> sh`.
-
-`IntModel(context_count)` holds `context_count * 64` probabilities.
-`get(context)` (Elias-gamma binarization):
+Each models block entry (section 2) holds one model:
 
 ```
-base = context * 64
-n = 0
-while n < 32:
-    b = bit(P[base + n]); update P[base + n] with shift 4
-    if b == 0: break
-    n += 1
-v = 1 (u64)
-for i = n - 1 down to 0:
-    k = base + 33 + min(i, 30)
-    b = bit(P[k]); update P[k] with shift 5
-    v = (v << 1) | b
-return (v - 1) as u32
+model    := own_count u32 | deflate (the rest of the entry)
+deflate  -> contexts | tables
+contexts := own_count x u16                    // little-endian, strictly increasing
+tables   := (own_count + 1) x q[alphabet]      // one byte per symbol
 ```
 
-After 32 ones no terminating zero is read. Slot 32 is unused.
+* `own_count` is at most 65536: one table per 16-bit context.
+* `alphabet` follows from the stream's kind: 256 structural, 65 numeric.
+* `deflate` is one raw DEFLATE stream (1). It decodes to exactly
+  `2 * own_count + (own_count + 1) * alphabet` bytes and nothing follows
+  its final block; anything else is an error.
 
-### 6.4 Model (`rans.rs:read_model_header`, `read_model`)
+Each table is a vector of log-quantized counts `q[s]`, 0 meaning absent;
+every byte value is valid. The first table is the fallback: it serves
+every context that is not in `contexts`. Table `i + 1` serves context
+`contexts[i]`.
 
-Each models block entry (section 2) holds one model: a range-coded header, read
-with a fresh `RangeDecoder` over exactly the entry's bytes and one
-`IntModel` of `QUANTIZED_CONTEXTS + 8 = 314` contexts
-(`QUANTIZED_CONTEXTS = 17 * 18 = 306`):
+A model decodes to at most `2 * 65536 + 65537 * 256` bytes (about 16 MiB),
+known from `own_count` before the DEFLATE stream is read.
 
-```
-alphabet  = get(306)                    // 256 structural, 65 numeric: must match the stream's kind
-own_count = get(307)                    // rule M1: own_count <= 65535
-fallback  = read_table(none)
-key = 0
-for i in 0..own_count:
-    if decisions > max_decisions: error                          // rule M2, checked early
-    delta = get(308)
-    if i > 0 and delta == 0: error                               // keys strictly increasing
-    key += delta (checked u32 add); require key <= 0xFFFF       // rule M1
-    keys[i] = key
-    tables[i] = read_table(fallback)
-    if is_overrun(): error
-require pos == len(header)                                       // consumed exactly
-require decisions <= max_decisions                               // rule M2
-
-max_decisions = 128 * len(header) + 1024    // DECISIONS_PER_BYTE, DECISIONS_BASE
-
-read_table(fallback):
-    previous = 0
-    for s in 0..alphabet:
-        c = (fallback is none) ? 17 : min(fallback[s], 16)
-        t[s] = min(get(c * 17 + min(previous, 16)), 160)
-        previous = t[s]                                          // the clamped value
-```
-
-Each table is a vector of log-quantized counts `q[s]`, 0 meaning absent.
-The fallback table serves every context that is not a key; table `i`
-serves context `keys[i]`.
-
-**Rules M1 and M2** bound the memory and work of a model by the bytes it
-occupies. An adaptive binary coder codes a long run of predictable
-decisions in almost no space, so without them a few kilobytes of header
-could describe millions of tables. M1: at most 65535 own tables, keys at
-most 0xFFFF. M2: at most `128 * len + 1024` decisions. The header must be
-consumed exactly (`pos`, counting the 5 initial bytes and one per
-renormalization, equals its length): the encoder writes exactly that many
-bytes (Appendix A), and padding, which would buy more decisions under M2,
-is refused. The encoder never writes a model that breaks M2 (section 8).
-
-### 6.5 From quantized counts to frequencies (`rans.rs:quantized_weight`, `normalize`, `Table`)
+### 6.3 From quantized counts to frequencies (`rans.rs:quantized_weight`, `normalize`, `Table`)
 
 ```
 STEPS_PER_OCTAVE = 2
@@ -1300,31 +1217,28 @@ normalize(w[0..alphabet]) -> f[0..alphabet]   (total 4096):
 symbol has `freq > 0` and **single-symbol** if exactly one has (its `freq`
 is then 4096). A symbol is present exactly when `q[s] > 0`.
 
-### 6.6 Symbol decode (`rans.rs:DecoderModel::decode`, `RansDecoder`)
+### 6.4 Symbol decode (`rans.rs:DecoderModel::decode`, `RansDecoder`)
 
-State: `X[4]` u32, a word cursor over `rans`, and `j`, the next state
-index, starting at 0.
+State: `x` u32 and a word cursor over `rans`.
 
 ```
-init: for j in 0..4: hi = word(); lo = word(); X[j] = (hi << 16) | lo
+init: hi = word(); lo = word(); x = (hi << 16) | lo
 word(): the u16le at pos (0 if fewer than 2 bytes remain); pos += 2
 
 decode(context):
-    table = the table of context (keys) or the fallback
+    table = the table of context (contexts) or the fallback
     if table is empty: error
-    if table is single-symbol: return its symbol         // no state used, j unchanged
-    i = j; j = (j + 1) % 4
-    x = X[i]; slot = x & 4095
+    if table is single-symbol: return its symbol         // the state is not used
+    slot = x & 4095
     s = the symbol with cumulative[s] <= slot < cumulative[s + 1]
     x = freq[s] * (x >> 12) + slot - cumulative[s]      // u32 wrapping
     if x < 2^16: x = (x << 16) | word()
-    X[i] = x
     return s
 ```
 
-The four states are used round-robin over coded symbols only; symbols of
-single-symbol tables use none. The reference's decoder-side layout (search
-tables, slot LUTs, a context map) is an implementation detail.
+A symbol of a single-symbol table is not coded. The reference's
+decoder-side layout (search tables, slot LUTs, a context map) is an
+implementation detail.
 
 **Structural streams** (`ByteDecoder`): `context = walker_context & 0xFFFF`
 (every walker context fits 16 bits, section 4); the symbol is the byte.
@@ -1350,25 +1264,25 @@ min(v, m)`:
 
 | Stream | Context |
 |---|---|
-| 48-50 | `c(f0, 19) \| c(f1, 19) << 5` |
-| 51-53 | `c(f0, 23) \| c(f1, 23) << 5` |
-| 54-56 | `c(f0, 17) \| c(f1, 17) << 5 \| (f3 & 1) << 10` |
-| 57, 58 | `f0 \| f1 << 4` |
-| 66 | `c(f0, 23) \| c(f1, 23) << 5 \| c(f2, 15) << 10 \| f3 << 14` |
-| 60-65 | `c(f0, 63) \| f1 << 6` |
+| 16-18 | `c(f0, 19) \| c(f1, 19) << 5` |
+| 19-21 | `c(f0, 23) \| c(f1, 23) << 5` |
+| 22-24 | `c(f0, 17) \| c(f1, 17) << 5 \| (f3 & 1) << 10` |
+| 25, 26 | `f0 \| f1 << 4` |
+| 33 | `c(f0, 23) \| c(f1, 23) << 5 \| c(f2, 15) << 10 \| f3 << 14` |
+| 27-32 | `c(f0, 63) \| f1 << 6` |
 
-### 6.7 End of a stream
+### 6.5 End of a stream
 
 A structural or numeric stream is complete only if exactly `count` symbols
-(its stream table entry, section 3) were decoded, every state is back at 2^16 and
+(its stream table entry, section 3) were decoded, the state is back at 2^16 and
 every word of `rans` was read (the word cursor equals `rans_len`; an empty
-`rans` therefore never completes, as its states read as 0). A numeric
+`rans` therefore never completes: the cursor is past its end). A numeric
 stream's mantissa bits must also end within the last byte of `extra`:
 `ceil(bits_read / 8) == len(extra)`, at most 7 padding bits
 (`ByteDecoder::is_done`, `NumericDecoder::is_done`, `BitReader::is_finished`).
 An incomplete stream is an error.
 
-### 6.8 Blob body (`deflate.rs`)
+### 6.6 Blob body (`deflate.rs`)
 
 The blob streams of a segment, in stream table order, form one raw DEFLATE
 stream (RFC 1951: no zlib or gzip wrapper, no preset dictionary). It must
@@ -1388,23 +1302,21 @@ The reference tests this on every vector and on mutated files.
 block it covers is decoded; refuse the file if any fails:
 
 1. Header (section 2): the magic `MVDZ` (else *NotMvdz*), version 2 (else
-   *UnsupportedVersion*), all 64 bytes present, the high 4 bytes of the `crc` field 0.
+   *UnsupportedVersion*), all 60 bytes present.
 2. Models block (section 2): its length field present, the length at most 2^24, the body
    present; if the length is not 0, the body follows section 6 (count not 0, ids strictly
-   increasing, each a modelled stream, consumed exactly, and every model header's
-   rules: alphabet, M1, M2, contexts, consumed exactly).
+   increasing, each a modelled stream, consumed exactly, and every model's rules: the
+   own count, DEFLATE data of exactly the declared length, contexts strictly increasing).
 3. Each segment (section 2), in file order, until the running sum of `raw_len` equals the
    header's `size`: its length field present, `len` at most 2^21, the 12 header bytes
    and `len` coded bytes present, `raw_len` at least 1 and at most 2^20, the running
-   sums of `raw_len` and `dur_ms` at most the header's `size` and `duration_ms`.
-4. After the last segment: no byte follows, and the running sum of `dur_ms` equals the
-   header's `duration_ms`.
+   sum of `raw_len` at most the header's `size`.
+4. After the last segment: no byte follows.
 
 **Content rules**, applied when a segment is decoded: the transform header and stream
 table (section 3), every stream body consumed exactly (section 6), the walk (section 4), the numeric groups
-(section 5), the segment's CRC-32 and frame time (section 3). After the last segment, the whole-demo
-checks (section 3): the CRC-32 and size of the demo, its duration, and no segment but the last
-or one of exactly 2^20 bytes ending inside a frame.
+(section 5), the segment's CRC-32 (section 3). After the last segment, the whole-demo
+check (section 3): the CRC-32 of the demo.
 
 A model the models block lists and no segment uses is valid and ignored. A segment that
 codes a structural or numeric stream the models block has no model for is corrupt.
@@ -1437,13 +1349,12 @@ Each hostile vector breaks one rule only.
 | segment coded length (`len`) | at most 2^21 bytes | section 2 |
 | models block | at most 2^24 bytes | section 2 |
 | stream table | each id once, `count <= raw_len + 16` | section 3 |
-| own tables per model (M1) | at most 65535 | section 6 |
-| model decisions (M2) | at most `128 x header length + 1024` | section 6 |
+| own tables per model | at most 65536 | section 6 |
 
-With these, every size a decoder allocates is bounded by the bytes present: a segment
-yields at most 2^20 bytes and takes at least its 16 header bytes of the file, and a
-model at most 34 (one per modelled stream) is read once per file, its work bounded by
-M2. The blob streams of a segment that decodes hold at most `2 x raw_len` bytes: each is
+With these, every size a decoder allocates is bounded: a segment yields at most 2^20
+bytes and takes at least its 16 header bytes of the file, and the models, at most 34
+(one per modelled stream) and read once per file, decode to about 16 MiB each at most
+(section 6). The blob streams of a segment that decodes hold at most `2 x raw_len` bytes: each is
 a byte of the output, except the `ESCLEN` and `HIDTAG` bytes (section 4), at most 5 for
 every 6 bytes of output. A decoder may so refuse a stream table whose blob counts sum to
 more before it allocates them, as the reference does.
@@ -1454,7 +1365,8 @@ more than 1 GiB, and whole-file decoding refuses a demo of more than 1 GiB; in-o
 streaming holds a few segments at a time whatever the demo's size. A decoder must never
 abort the process on a declared size.
 
-**Not checked.** The header's SHA-256 (section 10): no reader recomputes it. The `fte2` field
+**Not checked.** The header's SHA-256 (section 10) and `duration_ms`, and the segments'
+`duration_ms`: no reader recomputes them. Where the demo is cut into segments. The `fte2` field
 of a transform header beyond carrying it. Padding bits after a numeric stream's mantissa
 bits, and the bits a DEFLATE decoder ignores.
 
@@ -1488,10 +1400,7 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
      cross-entropy against the fallback table; two passes, the fallback rebuilt after the
      first from the contexts that did not get a table.
    * Counts are quantized to the nearest step `2^(k/2)` in ratio (`quantize`).
-   * Rule M2: a header over the decision limit is made smaller, an eighth of the own
-     contexts at a time (fewest symbols first, ties: highest context first) joining the
-     fallback; a stream whose fallback alone breaks M2 gets no model.
-   * While the models block would exceed 2^24 bytes, the model with the largest header is
+   * While the models block would exceed 2^24 bytes, the largest model is
      dropped (ties: highest stream id) (`segment.rs:fit_models_block`).
 5. **Segments**: a segment is transform-coded (section 3) unless its walk fails, a stream it
    needs has no model, or its coded length would exceed 2^21; then it is written all
@@ -1501,11 +1410,14 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
    id order.
 6. **Models block**: lists only the models some segment uses, in id order; length 0 when
    none is used.
-7. **Self-check** (`encode.rs:first_failing_segment`), always on: the encoder decodes its
-   output, each segment against its input, then the whole-demo checks. The first segment
-   that fails is rewritten all tail and the file assembled again, until none fails. A
-   failing all-tail segment, or a file that fails outside a segment, is `Internal`.
+7. **Self-check** (`encode.rs:decodes_to`), always on: the encoder decodes its output,
+   each segment against its input, then the whole-demo checks. A file that fails is
+   `Internal`: a bug in the encoder.
 8. **Determinism**: the output depends only on the input, not on the thread count.
+9. **Duration** (`segment.rs:duration_ms`): a segment's `duration_ms` is the sum of the
+   time bytes of the whole frames it starts with (`proto.rs:frame_len`, section 4),
+   stopping at the first bytes that do not frame. The header's `duration_ms` is the sum
+   of the segments'.
 
 ---------------------------------------------------------------------------
 
@@ -1514,12 +1426,10 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
 1. **Order of work in a segment.** Walk the structure first (section 4), then run the numeric
    groups in `numeric.rs:GROUPS` order (section 5): the sound and temp-entity groups predict
    from origins the player and entity groups wrote, so they run after them.
-2. **Record list capacity.** The reference sizes record lists from the stream table's
-   counts (`walk.rs:Records::fixed`) and fails if the walk pushes more records than
-   that. Every record consumes a symbol from its stream (one `pi.num` per player record,
-   one `pe.bits` per entity record, one `snd.num` per sound, one `te.type` per temp
-   entity), and over-reading a stream fails its completeness check, so a port with
-   growable lists refuses the same files.
+2. **Record lists are bounded by the stream table.** Every record consumes a symbol from
+   its stream (one `pi.num` per player record, one `pe.bits` per entity record, one
+   `snd.num` per sound, one `te.type` per temp entity), and over-reading a stream fails
+   its completeness check.
 3. **An exhausted structural stream reads as 255** (`segment.rs:DecodeIo`) and marks
    failure; every loop of the walk stops on it. A port may stop at once: the result is
    an error either way. A stream decoder does not stop at `count` by itself; the
@@ -1531,8 +1441,8 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
 5. **The escape length** (`walk.rs:escape`, section 4) is 7 bits per byte, low group first, at
    most 5 bytes; a fifth byte with its top bit set is an error, and its bits above 32
    are lost.
-6. **The rANS alphabet is checked** against the stream kind (256 structural, 65
-   numeric); a decoded numeric bucket over 64 is an error.
+6. **The rANS alphabet follows from the stream kind** (256 structural, 65 numeric); it
+   is not stored.
 7. **Coordinate offsets may point at 4-byte float fields** when the protocol switched to
    float coordinates earlier in the same segment (an `svc_serverdata` mid-segment) and
    back; sounds and temp entities then read the low 16 bits of that field as their
@@ -1543,9 +1453,9 @@ an encoder that follows them (and uses `miniz_oxide`'s DEFLATE at level 9).
 9. **The `TEXT` blob is shared** by `svc_print` (after the level byte), `svc_stufftext`
    and `svc_centerprint`, all sized as a NUL-terminated string. The `PING` and `NAILS`
    blobs are shared by several commands, each sized by its own rule.
-10. **The rANS lane rule**: 4 states, used round-robin over coded symbols only; a symbol
-    from a single-symbol table does not advance the lane. The final-state check (section 6)
-    needs the states read from the first 16 bytes even when no symbol is coded.
+10. **Single-symbol tables**: a symbol from a single-symbol table is not coded and leaves
+    the rANS state alone. The final-state check (section 6) needs the state read from the
+    first 4 bytes even when no symbol is coded.
 11. **The TIME context uses the unclamped previous time byte**; TYPE uses
     `min(time byte, 32)`.
 12. **Time is segment-relative**: every walker and predictor state starts fresh in each
@@ -1581,7 +1491,7 @@ filtering it applies to demos and servers; tools that display demo content must 
 it.
 
 **Bit rot.** A CRC-32 covers every segment's decoded bytes and a second one the whole
-demo; a full decode also checks sizes and timing. Corruption is detected, not repaired:
+demo; a full decode also checks the demo's size. Corruption is detected, not repaired:
 there is no redundancy, and the reference refuses the whole file. Each segment decodes on
 its own given the models block, so a decoder that skips a damaged segment can still
 recover the others. Neither CRC detects a file replaced as a whole by another valid file;
@@ -1591,41 +1501,16 @@ only a hash kept elsewhere does.
 
 ## Appendix A. Encoders
 
-**Range encoder** (`coder/rc.rs:RangeEncoder`), the inverse of section 6's decoder (LZMA
-style): `low: u64 = 0`, `range: u32 = 0xFFFFFFFF`, `cache: u8 = 0`, `cache_size = 1`.
-`bit(b, p)`: `bound = (range >> 12) * p`; b = 1: `range = bound`; b = 0:
-`low += bound; range -= bound`; then while `range < 2^24`: `range <<= 8; shift_low()`.
-`shift_low()`: if `(low as u32) < 0xFF000000` or `low >> 32 != 0`: emit `cache + carry`
-(carry = `low >> 32`), then `cache_size - 1` bytes of `0xFF + carry`,
-`cache = (low >> 24) as u8`, `cache_size = 0`; then `cache_size += 1;
-low = (low & 0x00FFFFFF) << 8`. `finish`: `shift_low()` 5 times. The first byte written
-is always 0.
+**Model** (`coder/rans.rs:write_model`): `own_count`, then one DEFLATE stream of the own
+contexts in ascending order (u16le each), the fallback table and the own tables in the
+order of their contexts, one byte per symbol: its quantized count.
 
-**Adaptive bit** (`rc.rs:Probability`): a u16 starting at 2^15; coded with probability
-`clamp(p >> 4, 1, 4095)` of a 1; after a 1: `p += (65535 - p) >> s`, after a 0:
-`p -= p >> s`.
-
-**IntModel.put(context, v)** (`rc.rs:IntModel`; 64 adaptive bits per context): `v1 = v + 1`
-(u64), `n = bitlen(v1) - 1`; code `n` ones at bits `64 * context + i` (i = 0..n-1,
-s = 4), then, if `n < 32`, a zero at `64 * context + n` (s = 4); then the bits of `v1`
-below its leading one, from bit `n - 1` down to 0, at `64 * context + 33 + min(i, 30)`
-(s = 5).
-
-**Model header** (`coder/rans.rs:write_model`; 306 = 17 x 18 table contexts first):
-`put(306, alphabet size)`, `put(307, own table count)`, the fallback table, then per own
-context in ascending order `put(308, context - previous context)` (the first: the context
-itself) and its table. A table is one `put` per symbol of its quantized count, in
-context `f * 17 + min(previous count in this table, 16)`, with `f = 17` for the fallback
-table and `f = min(fallback count of this symbol, 16)` for an own table.
-
-**rANS encoder** (`rans.rs:rans_encode`): states `X[0..4] = 2^16`. Assign each symbol
-whose table is not single-symbol the state `(index among such symbols) mod 4`. Encode
-the symbols in reverse order, skipping single-symbol ones: with `freq`, `cum` of its
-table and `x = X[j]`: if `x >= ((2^16 >> 12) << 16) * freq`, emit the word `x & 0xFFFF`
-and `x >>= 16`; then `X[j] = ((x / freq) << 12) + x % freq + cum`. Finally, for j = 3
-down to 0, emit `X[j] & 0xFFFF` then `X[j] >> 16`; reverse the emitted word list and
-write it as u16le words. With no coded symbol the body is the 16 bytes of four states
-2^16.
+**rANS encoder** (`rans.rs:rans_encode`): state `x = 2^16`. Encode the symbols in
+reverse order, skipping those of single-symbol tables: with `freq`, `cum` of the symbol
+in its table: if `x >= ((2^16 >> 12) << 16) * freq`, emit the word `x & 0xFFFF` and
+`x >>= 16`; then `x = ((x / freq) << 12) + x % freq + cum`. Finally emit `x & 0xFFFF`
+then `x >> 16`; reverse the emitted word list and write it as u16le words. With no coded
+symbol the body is the 4 bytes of the state 2^16.
 
 **Mantissa bits** (`rans.rs:bucket`, `BitWriter`): for a value v != 0, `n = bitlen(|v|)`,
 bucket `2n - 1 + (v < 0)`, and the `n - 1` bits of `|v|` below its leading one, appended

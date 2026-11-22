@@ -1,7 +1,6 @@
 //! Static rANS with per-context tables, integer arithmetic only so both sides agree. After
 //! Giesen, "Interleaved entropy coders" (2014); written fresh.
 
-use super::rc::{IntModel, RangeDecoder, RangeEncoder};
 use crate::error::{Error, Result};
 use crate::fields::{put_usize, read_length_prefixed, read_usize};
 use crate::memory::try_with_capacity;
@@ -13,7 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) const SCALE: u32 = 12;
 const FREQ_TOTAL: u32 = 1 << SCALE;
 const STATE_MIN: u32 = 1 << 16;
-const STATE_COUNT: usize = 4;
 
 const STEPS_PER_OCTAVE: u32 = 2;
 /// 16.16 fixed point.
@@ -169,7 +167,6 @@ fn cross_bits(counts: &[u32], reference: &[u32]) -> f64 {
 
 #[derive(Debug)]
 struct Model {
-    alphabet_size: usize,
     /// Own contexts, ascending: `own[i]` codes with `tables[i + 1]`.
     own: Vec<u32>,
     map: Vec<u32>,
@@ -234,55 +231,12 @@ impl Tally {
         }
     }
 
-    /// A header over the decision limit (rule M2) is made smaller until it holds: the own
-    /// contexts with the fewest symbols join the fallback, an eighth at a time. `None` if
-    /// the fallback alone breaks the limit.
-    pub(crate) fn file_model(&self) -> Option<FileModel> {
-        let mut counts = select(self);
-        loop {
-            let model = build_model(&counts);
-            if let Some(bytes) = header_within_limit(&model) {
-                return Some(FileModel { model, bytes });
-            }
-            if counts.own.is_empty() {
-                return None;
-            }
-            counts.fold_smallest(counts.own.len().div_ceil(8));
+    pub(crate) fn file_model(&self) -> FileModel {
+        let model = build_model(&select(self));
+        FileModel {
+            bytes: write_model(&model),
+            model,
         }
-    }
-}
-
-impl Counts {
-    /// Ties: the highest context first.
-    fn fold_smallest(&mut self, count: usize) {
-        let alphabet_size = self.alphabet_size;
-        let row = |index: usize| &self.own_rows[index * alphabet_size..(index + 1) * alphabet_size];
-        let mut order: Vec<usize> = (0..self.own.len()).collect();
-        order.sort_by_key(|&index| {
-            (
-                row(index)
-                    .iter()
-                    .map(|&symbol_count| u64::from(symbol_count))
-                    .sum::<u64>(),
-                std::cmp::Reverse(index),
-            )
-        });
-        let mut is_dropped = vec![false; self.own.len()];
-        for &index in order.iter().take(count) {
-            is_dropped[index] = true;
-        }
-        let mut own = Vec::new();
-        let mut own_rows = Vec::new();
-        for index in 0..self.own.len() {
-            if is_dropped[index] {
-                add_counts(&mut self.rest, row(index));
-            } else {
-                own.push(self.own[index]);
-                own_rows.extend_from_slice(row(index));
-            }
-        }
-        self.own = own;
-        self.own_rows = own_rows;
     }
 }
 
@@ -361,93 +315,26 @@ fn build_model(counts: &Counts) -> Model {
         map[context as usize] = (index + 1) as u32;
     }
     Model {
-        alphabet_size,
         own: counts.own.clone(),
         map,
         tables,
     }
 }
 
-/// A quantized count is coded under the fallback's count of the symbol (17: no fallback) and
-/// the count of the symbol before, each capped at 16.
-const QUANTIZED_CONTEXTS: usize = 17 * 18;
-const ALPHABET_CONTEXT: usize = QUANTIZED_CONTEXTS;
-const OWN_COUNT_CONTEXT: usize = QUANTIZED_CONTEXTS + 1;
-const CONTEXT_DELTA_CONTEXT: usize = QUANTIZED_CONTEXTS + 2;
-const HEADER_CONTEXT_COUNT: usize = QUANTIZED_CONTEXTS + 8;
-
-fn table_context(fallback: Option<&[u32]>, symbol: usize, previous: u32) -> usize {
-    let fallback_context = fallback.map_or(17, |fallback| fallback[symbol].min(16)) as usize;
-    fallback_context * 17 + previous.min(16) as usize
-}
-
-fn write_table(
-    encoder: &mut RangeEncoder,
-    int_model: &mut IntModel,
-    table: &[u32],
-    fallback: Option<&[u32]>,
-) {
-    let mut previous = 0u32;
-    for (symbol, &quantized) in table.iter().enumerate() {
-        int_model.put(
-            encoder,
-            table_context(fallback, symbol, previous),
-            quantized,
-        );
-        previous = quantized;
+/// FORMAT.md section 6.2: the count of own contexts, then DEFLATE of the own contexts (u16
+/// each, ascending) and the quantized counts of every table, the fallback first.
+fn write_model(model: &Model) -> Vec<u8> {
+    let mut contexts_and_tables = Vec::new();
+    for &context in &model.own {
+        contexts_and_tables.extend_from_slice(&(context as u16).to_le_bytes());
     }
-}
-
-fn read_table(
-    decoder: &mut RangeDecoder,
-    int_model: &mut IntModel,
-    alphabet_size: usize,
-    fallback: Option<&[u32]>,
-) -> Vec<u32> {
-    let mut table = vec![0u32; alphabet_size];
-    let mut previous = 0u32;
-    for (symbol, quantized) in table.iter_mut().enumerate() {
-        *quantized = int_model
-            .get(decoder, table_context(fallback, symbol, previous))
-            .min(160);
-        previous = *quantized;
+    for table in &model.tables {
+        contexts_and_tables.extend(table.quantized.iter().map(|&quantized| quantized as u8));
     }
-    table
-}
-
-/// The header and the binary decisions it takes.
-fn write_model(model: &Model) -> (Vec<u8>, u64) {
-    let mut encoder = RangeEncoder::new();
-    let mut int_model = IntModel::new(HEADER_CONTEXT_COUNT);
-    int_model.put(&mut encoder, ALPHABET_CONTEXT, model.alphabet_size as u32);
-    int_model.put(
-        &mut encoder,
-        OWN_COUNT_CONTEXT,
-        (model.tables.len() - 1) as u32,
-    );
-    let fallback = model.tables[0].quantized.clone();
-    write_table(&mut encoder, &mut int_model, &fallback, None);
-    let mut previous_context = 0u32;
-    for (index, &context) in model.own.iter().enumerate() {
-        int_model.put(
-            &mut encoder,
-            CONTEXT_DELTA_CONTEXT,
-            if index == 0 {
-                context
-            } else {
-                context - previous_context
-            },
-        );
-        previous_context = context;
-        write_table(
-            &mut encoder,
-            &mut int_model,
-            &model.tables[index + 1].quantized,
-            Some(&fallback),
-        );
-    }
-    let decisions = encoder.decisions;
-    (encoder.finish(), decisions)
+    let mut bytes = Vec::new();
+    put_usize(&mut bytes, model.own.len());
+    bytes.extend_from_slice(&crate::deflate::compress(&contexts_and_tables));
+    bytes
 }
 
 /// Wider tables decode with a slot LUT instead of a search.
@@ -458,11 +345,6 @@ const SEARCH_MAX: usize = 64;
 const ENTRY_SINGLE: u32 = 1 << 31;
 const ENTRY_LUT: u32 = 1 << 30;
 const ENTRY_EMPTY: u32 = ENTRY_SINGLE | ENTRY_LUT;
-
-/// Rule M2: a model header takes at most `DECISIONS_PER_BYTE * len + DECISIONS_BASE`
-/// binary decisions.
-pub(crate) const DECISIONS_PER_BYTE: u64 = 128;
-pub(crate) const DECISIONS_BASE: u64 = 1024;
 
 /// A search table in `pool` is `[0, c1, .., cn = FREQ_TOTAL, pad..]` (16*chunks + 1
 /// entries), then its 16*chunks symbols: one or two cache lines.
@@ -493,46 +375,27 @@ fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
 /// Own contexts, quantized counts of every table (the fallback first).
 type ModelHeader = (Vec<u32>, Vec<u8>);
 
-/// FORMAT.md section 6.4.
-fn read_model_header(header: &[u8], required_alphabet_size: usize) -> Result<ModelHeader> {
+/// FORMAT.md section 6.2.
+fn read_model_header(model: &[u8], alphabet_size: usize) -> Result<ModelHeader> {
+    /// One per 16-bit context.
+    const MAX_OWN_COUNT: usize = 1 << 16;
     let corrupt = Error::Corrupt("model");
-    let max_decisions = (header.len() as u64)
-        .saturating_mul(DECISIONS_PER_BYTE)
-        .saturating_add(DECISIONS_BASE);
-    let mut decoder = RangeDecoder::new(header);
-    let mut int_model = IntModel::new(HEADER_CONTEXT_COUNT);
-    let alphabet_size = int_model.get(&mut decoder, ALPHABET_CONTEXT) as usize;
-    let own_count = int_model.get(&mut decoder, OWN_COUNT_CONTEXT) as usize;
-    if alphabet_size != required_alphabet_size || own_count > 65535 {
-        return Err(corrupt);
-    }
-    // the quantized tables (u8: quantized <= 160) until the layout is known
-    let mut quantized_tables: Vec<u8> = try_with_capacity((own_count + 1) * alphabet_size)?;
-    let mut keys: Vec<u32> = try_with_capacity(own_count)?;
-    let fallback = read_table(&mut decoder, &mut int_model, alphabet_size, None);
-    quantized_tables.extend(fallback.iter().map(|&quantized| quantized as u8));
-    let mut context = 0u32;
-    for index in 0..own_count {
-        if decoder.decisions > max_decisions {
-            return Err(corrupt);
-        }
-        let context_delta = int_model.get(&mut decoder, CONTEXT_DELTA_CONTEXT);
-        if index > 0 && context_delta == 0 {
-            return Err(corrupt);
-        }
-        context = context.checked_add(context_delta).ok_or(corrupt)?;
-        if context > 0xffff {
-            return Err(corrupt);
-        }
-        let table = read_table(&mut decoder, &mut int_model, alphabet_size, Some(&fallback));
-        keys.push(context);
-        quantized_tables.extend(table.iter().map(|&quantized| quantized as u8));
-        if decoder.is_overrun() {
-            return Err(corrupt);
-        }
-    }
-    // consumed exactly: one byte per byte written (5 at the start, then one per renormalization)
-    if decoder.pos() != header.len() || decoder.decisions > max_decisions {
+    let mut rest = model;
+    let own_count = read_usize(&mut rest)
+        .filter(|&own_count| own_count <= MAX_OWN_COUNT)
+        .ok_or(corrupt)?;
+    let contexts_len = 2 * own_count;
+    let tables_len = (own_count + 1) * alphabet_size;
+    let mut contexts = crate::deflate::decompress(rest, contexts_len + tables_len)?;
+    let quantized_tables = contexts.split_off(contexts_len);
+    let keys: Vec<u32> = contexts
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|context| u32::from(u16::from_le_bytes(*context)))
+        .collect();
+    let is_ascending = keys.windows(2).all(|pair| pair[0] < pair[1]);
+    if !is_ascending {
         return Err(corrupt);
     }
     Ok((keys, quantized_tables))
@@ -687,9 +550,7 @@ impl DecoderModel {
                 Some(entry & 0xffff)
             };
         }
-        let state_index = decoder.state_index;
-        decoder.state_index = (state_index + 1) % STATE_COUNT;
-        let state = decoder.states[state_index];
+        let state = decoder.state;
         let slot = state & (FREQ_TOTAL - 1);
         let (symbol, mut state) = if entry & ENTRY_LUT == 0 {
             let width = 16 * self.chunks;
@@ -717,40 +578,37 @@ impl DecoderModel {
         if state < STATE_MIN {
             state = (state << 16) | u32::from(decoder.word());
         }
-        decoder.states[state_index] = state;
+        decoder.state = state;
         Some(symbol)
     }
 }
 
 #[derive(Debug)]
 struct RansEncoder {
-    states: [u32; STATE_COUNT],
+    state: u32,
     words: Vec<u16>,
 }
 
 impl RansEncoder {
     fn new() -> Self {
         Self {
-            states: [STATE_MIN; STATE_COUNT],
+            state: STATE_MIN,
             words: Vec::new(),
         }
     }
     #[inline]
-    fn put(&mut self, state_index: usize, freq: u32, cumulative: u32) {
-        let mut state = self.states[state_index];
+    fn put(&mut self, freq: u32, cumulative: u32) {
+        let mut state = self.state;
         let state_max = ((STATE_MIN >> SCALE) << 16) * freq;
         if state >= state_max {
             self.words.push(state as u16);
             state >>= 16;
         }
-        self.states[state_index] = ((state / freq) << SCALE) + (state % freq) + cumulative;
+        self.state = ((state / freq) << SCALE) + (state % freq) + cumulative;
     }
     fn finish(mut self) -> Vec<u8> {
-        for state_index in (0..STATE_COUNT).rev() {
-            let state = self.states[state_index];
-            self.words.push(state as u16);
-            self.words.push((state >> 16) as u16);
-        }
+        self.words.push(self.state as u16);
+        self.words.push((self.state >> 16) as u16);
         self.words.reverse();
         let mut out = Vec::with_capacity(self.words.len() * 2);
         for word in self.words {
@@ -762,25 +620,21 @@ impl RansEncoder {
 
 #[derive(Debug)]
 struct RansDecoder<'a> {
-    states: [u32; STATE_COUNT],
+    state: u32,
     input: &'a [u8],
     pos: usize,
-    state_index: usize,
 }
 
 impl<'a> RansDecoder<'a> {
     fn new(input: &'a [u8]) -> Self {
         let mut decoder = RansDecoder {
-            states: [0; STATE_COUNT],
+            state: 0,
             input,
             pos: 0,
-            state_index: 0,
         };
-        for state_index in 0..STATE_COUNT {
-            let hi = u32::from(decoder.word());
-            let lo = u32::from(decoder.word());
-            decoder.states[state_index] = hi << 16 | lo;
-        }
+        let hi = u32::from(decoder.word());
+        let lo = u32::from(decoder.word());
+        decoder.state = hi << 16 | lo;
         decoder
     }
     #[inline(always)]
@@ -795,43 +649,28 @@ impl<'a> RansDecoder<'a> {
     }
     fn finished_empty() -> RansDecoder<'static> {
         RansDecoder {
-            states: [STATE_MIN; STATE_COUNT],
+            state: STATE_MIN,
             input: &[],
             pos: 0,
-            state_index: 0,
         }
     }
-    /// Every word read and every state back at its initial value.
+    /// Every word read and the state back at its initial value.
     fn is_finished(&self) -> bool {
-        self.pos == self.input.len() && self.states.iter().all(|&state| state == STATE_MIN)
+        self.pos == self.input.len() && self.state == STATE_MIN
     }
 }
 
 fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Vec<u8> {
-    let table_indices: Vec<usize> = contexts
-        .iter()
-        .map(|&context| model.map.get(context as usize).copied().unwrap_or(0) as usize)
-        .collect();
-    let mut coded = 0usize;
-    let mut state_of = vec![0u8; symbols.len()];
-    for (index, &table_index) in table_indices.iter().enumerate() {
-        if model.tables[table_index].single_symbol.is_none() {
-            state_of[index] = (coded % STATE_COUNT) as u8;
-            coded += 1;
-        }
-    }
     let mut encoder = RansEncoder::new();
-    for index in (0..symbols.len()).rev() {
-        let table = &model.tables[table_indices[index]];
-        if table.single_symbol.is_some() {
-            continue;
+    for (&symbol, &context) in symbols.iter().zip(contexts).rev() {
+        let table_index = model.map.get(context as usize).copied().unwrap_or(0) as usize;
+        let table = &model.tables[table_index];
+        if table.single_symbol.is_none() {
+            encoder.put(
+                table.freq[symbol as usize],
+                table.cumulative[symbol as usize],
+            );
         }
-        let symbol = symbols[index] as usize;
-        encoder.put(
-            state_of[index] as usize,
-            table.freq[symbol],
-            table.cumulative[symbol],
-        );
     }
     encoder.finish()
 }
@@ -843,12 +682,6 @@ fn pack_body(model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) -> V
     out.extend_from_slice(&body);
     out.extend_from_slice(extra);
     out
-}
-
-/// `None` if it breaks the decision limit (rule M2).
-fn header_within_limit(model: &Model) -> Option<Vec<u8>> {
-    let (header, decisions) = write_model(model);
-    (decisions <= (header.len() as u64) * DECISIONS_PER_BYTE + DECISIONS_BASE).then_some(header)
 }
 
 /// A stream body: `rans_len u32 | rans | extra`.
@@ -1183,7 +1016,6 @@ impl<'a> NumericDecoder<'a> {
 mod tests {
     use super::*;
     use crate::streams::PI_OX;
-    use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
     fn models(
@@ -1193,7 +1025,7 @@ mod tests {
     ) -> anyhow::Result<(FileModel, DecoderModel)> {
         let mut tally = Tally::new(alphabet_size);
         tally.add(symbols, contexts);
-        let file_model = tally.file_model().context("a model")?;
+        let file_model = tally.file_model();
         let model = read_model(
             &file_model.bytes,
             alphabet_size,
@@ -1252,34 +1084,6 @@ mod tests {
             decoder.get(u32::from(context));
         }
         assert!(!decoder.is_done());
-        Ok(())
-    }
-
-    /// A model over the decision limit (thousands of one-symbol own tables cost almost no
-    /// bytes) is made smaller until it holds, and still codes the stream.
-    #[test]
-    fn model_over_the_decision_limit_shrinks() -> anyhow::Result<()> {
-        let count = 60_000u32;
-        let contexts: Vec<u16> = (0..count).map(|index| (index % 3000) as u16).collect();
-        let symbols: Vec<u8> = contexts
-            .iter()
-            .map(|&context| (context % 4) as u8)
-            .collect();
-        let mut tally = Tally::new(256);
-        tally.add(&symbols, &contexts);
-        let full = build_model(&select(&tally));
-        assert!(
-            header_within_limit(&full).is_none(),
-            "the full model breaks rule M2"
-        );
-        let (file_model, model) = models(&symbols, &contexts, 256)?;
-        assert!(file_model.model.own.len() < full.own.len());
-        let body = encode_bytes(&symbols, &contexts, &file_model);
-        let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
-        for (index, &symbol) in symbols.iter().enumerate() {
-            assert_eq!(decoder.get(u32::from(contexts[index])), Some(symbol));
-        }
-        assert!(decoder.is_done());
         Ok(())
     }
 

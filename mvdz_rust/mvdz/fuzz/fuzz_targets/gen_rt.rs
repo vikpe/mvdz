@@ -16,13 +16,7 @@ fuzz_target!(|bytes: &[u8]| {
     }
     let threads = 1 + (bytes[0] as usize >> 2) % 3;
     let demo = mgen::demo(&bytes[1..]);
-    let (file, self_check_fallbacks) = mvdz::fuzz::encode_any(&demo, threads).expect("compress");
-    if self_check_fallbacks > 0 {
-        if std::env::var("REQUIRE_TRANSFORM_LOSSLESS").is_ok() {
-            panic!("the transform is lossy");
-        }
-        eprintln!("NOTE the transform is lossy here");
-    }
+    let file = mvdz::fuzz::encode_any(&demo, threads).expect("compress");
     assert_round_trip(&file, &demo, "one-shot");
     assert!(mvdz::decode(&file, 3).unwrap() == demo);
 });

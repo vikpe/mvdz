@@ -8,15 +8,25 @@ use std::io::Cursor;
 
 #[test]
 fn header_describes_the_demo() -> anyhow::Result<()> {
+    /// Of `duration_ms` in a segment's fields.
+    const DURATION_OFFSET: usize = 4;
     let small = synthetic(&[(0, "{\"x\":1}")], false);
     for demo in [small.clone(), several_segments(&small)] {
-        let frames = crate::segment::frame_scan(&demo);
-        assert_eq!(frames.framed_len, demo.len());
         let file = compress(&demo)?;
         let header = parse_header(&file)?;
         assert_eq!(&file[..4], b"MVDZ");
         assert_eq!(header.size_bytes, demo.len() as u64);
-        assert_eq!(header.duration_ms, frames.duration_ms);
+        assert_eq!(
+            header.duration_ms,
+            u64::from(crate::segment::duration_ms(&demo))
+        );
+        let segment_durations: u64 = parts(&file)?
+            .segments
+            .iter()
+            .filter_map(|segment| crate::fields::read_u32(&mut &segment[DURATION_OFFSET..]))
+            .map(u64::from)
+            .sum();
+        assert_eq!(segment_durations, header.duration_ms);
         assert_eq!(header.crc32, crc32fast::hash(&demo));
         assert_eq!(header.sha256, <[u8; 32]>::from(Sha256::digest(&demo)));
         assert_eq!(header_bytes(&header), file[..HEADER_LEN]);
@@ -42,11 +52,9 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     assert!(file_parts.segments.len() >= 3);
     assert_eq!(file_parts.build(), file);
     #[expect(clippy::type_complexity, reason = "a table of named edits")]
-    let cases: [(&str, fn(&mut Header)); 5] = [
+    let cases: [(&str, fn(&mut Header)); 3] = [
         ("size + 1", |header| header.size_bytes += 1),
         ("size - 1", |header| header.size_bytes -= 1),
-        ("duration + 1", |header| header.duration_ms += 1),
-        ("duration - 1", |header| header.duration_ms -= 1),
         ("crc", |header| header.crc32 ^= 1),
     ];
     for (what, edit) in cases {

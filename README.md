@@ -3,7 +3,7 @@
 **mvdz** is a lossless compressor and file format for QuakeWorld MVD demos
 (`.mvd`). An `.mvdz` file is about a fifth of the raw demo and a third of
 the demo's gzip, decodes back to the exact original bytes (checked by
-CRC-32), and can be read in order from a pipe as it arrives. Its 64-byte
+CRC-32), and can be read in order from a pipe as it arrives. Its 60-byte
 header gives the demo's size, duration and identity (the SHA-256 of the
 raw demo) without decoding.
 
@@ -158,11 +158,11 @@ early (`mvdz info *.mvdz | head`), the tool stops quietly.
 
 ## Hashes and trust
 
-* **Identity**: the SHA-256 of the original `.mvd`, in the file's 64-byte
+* **Identity**: the SHA-256 of the original `.mvd`, in the file's 60-byte
   header. Decoding does not recompute it: a consumer that must
   authenticate a demo hashes the decoded bytes.
 * **Integrity**: CRC-32 (as in zlib) per segment and over the whole demo,
-  and the demo's size and duration, checked on every decode.
+  and the demo's size, checked on every decode.
 
 Files from elsewhere are untrusted input: decoders bound their memory
 (a few segments at a time when streaming; whole-file decoding refuses a
@@ -180,12 +180,6 @@ user builds no command-line code. Not on crates.io yet: depend on it by git
 // whole buffers; `max_threads` (u8) is capped at the logical cores, 0: one per core
 let file = mvdz::encode(&demo, 0)?;
 let demo2 = mvdz::decode(&file, 4)?;
-
-// streaming, as gzip libraries do; the encoder needs the whole demo, so it writes the
-// file in finish()
-let mut encoder = mvdz::Encoder::new(std::fs::File::create("game.mvdz")?).max_threads(4);
-std::io::copy(&mut std::fs::File::open("game.mvd")?, &mut encoder)?;
-encoder.finish()?;
 
 // in order from any io::Read, up to `max_threads` segments decoded at once
 let mut decoder = mvdz::Decoder::new(std::fs::File::open("game.mvdz")?)?;

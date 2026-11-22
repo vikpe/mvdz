@@ -7,11 +7,7 @@ use std::io::Cursor;
 
 fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
-        let (one, self_check_fallbacks) = compress_unchecked(&src)?;
-        assert_eq!(
-            self_check_fallbacks, 0,
-            "{what} {how}: the transform is lossy"
-        );
+        let one = compress_unchecked(&src)?;
         let back = readers_agree(&one, what).with_context(|| format!("{what} {how}: refused"))?;
         assert!(back == src, "{what} {how}");
     }
@@ -232,7 +228,7 @@ fn segments_are_capped() -> anyhow::Result<()> {
         ("unframed", unframed, 3),
         ("oversized frame", oversized.0, 2),
     ] {
-        let (file, _) = compress_unchecked(&src)?;
+        let file = compress_unchecked(&src)?;
         let file_segments = parts(&file)?.segments;
         let count = file_segments.len();
         assert!(count >= segments, "{what}: {count} segments");
@@ -319,7 +315,7 @@ fn constructed_demos() -> anyhow::Result<()> {
             .to_string();
         if crate::encode::check_demo(&src).is_err() {
             assert_matches!(compress(&src), Err(crate::Error::NotMvd(_)));
-            let (file, _) = compress_unchecked(&src)?;
+            let file = compress_unchecked(&src)?;
             assert!(decompress(&file, 2)? == src, "{name}");
             continue;
         }
@@ -374,23 +370,6 @@ fn proto_change_mid_demo() -> anyhow::Result<()> {
         "threads change the output"
     );
     assert!(decompress(&file, 4)? == demo.0);
-    Ok(())
-}
-
-#[test]
-fn encoder_matches_encode() -> anyhow::Result<()> {
-    let src = several_segments(&synthetic(&[(0, "{}")], false));
-    let mut encoder = crate::Encoder::new(Vec::new()).max_threads(2);
-    for chunk in src.chunks(1000) {
-        std::io::Write::write_all(&mut encoder, chunk)?;
-    }
-    let file = encoder.finish()?;
-    assert!(file == crate::encode(&src, 2)?);
-    assert!(decompress(&file, 1)? == src);
-    assert_matches!(
-        crate::Encoder::new(Vec::new()).finish(),
-        Err(crate::Error::NotMvd(_))
-    );
     Ok(())
 }
 

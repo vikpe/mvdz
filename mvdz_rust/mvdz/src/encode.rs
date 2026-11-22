@@ -9,9 +9,8 @@ use crate::format::{
 };
 use crate::parallel::{HAS_THREADS, par_map, thread_count};
 use crate::proto::{DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, Proto, frame_len};
-use crate::segment::{self, Numerics, Walked, cut_points, frame_scan};
+use crate::segment::{self, Numerics, Walked, cut_points};
 use sha2::{Digest, Sha256};
-use std::io::Write;
 
 /// `max_threads` 0 is all logical cores.
 ///
@@ -21,53 +20,7 @@ use std::io::Write;
 /// segments, [`Error::Internal`] when the output fails its self-check (a bug).
 pub fn encode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     check_demo(bytes)?;
-    compress(bytes, thread_count(max_threads)).map(|(file, _)| file)
-}
-
-/// Nothing is written before `finish`; dropping it without `finish` writes nothing.
-#[derive(Debug)]
-pub struct Encoder<W: Write> {
-    writer: W,
-    max_threads: u8,
-    bytes: Vec<u8>,
-}
-
-impl<W: Write> Encoder<W> {
-    pub fn new(writer: W) -> Self {
-        Self {
-            writer,
-            max_threads: 0,
-            bytes: Vec::new(),
-        }
-    }
-
-    /// Capped at the logical cores; 0, the default, is all of them.
-    #[must_use]
-    pub fn max_threads(mut self, max_threads: u8) -> Self {
-        self.max_threads = max_threads;
-        self
-    }
-
-    /// # Errors
-    ///
-    /// Those of [`encode`], and [`Error::Io`] when writing fails.
-    pub fn finish(mut self) -> Result<W> {
-        self.writer
-            .write_all(&encode(&self.bytes, self.max_threads)?)?;
-        self.writer.flush()?;
-        Ok(self.writer)
-    }
-}
-
-impl<W: Write> Write for Encoder<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.bytes.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+    compress(bytes, thread_count(max_threads))
 }
 
 /// FORMAT.md section 8 rule 1: a damaged demo with an intact start passes.
@@ -133,7 +86,6 @@ struct SegmentPlan<'a> {
     raw: &'a [u8],
     start_proto: Proto,
     is_walkable: bool,
-    duration_ms: u64,
 }
 
 /// A pass 1 walk of one segment.
@@ -190,7 +142,6 @@ fn run_first_pass<'a>(segments: &[&'a [u8]], threads: usize) -> FirstPass<'a> {
                 raw,
                 start_proto: counted.start_proto,
                 is_walkable: counted.walked.is_some(),
-                duration_ms: frame_scan(raw).duration_ms,
             });
         }
         let walked_segments: Vec<(&Walked, &Numerics)> = batch
@@ -207,9 +158,8 @@ fn run_first_pass<'a>(segments: &[&'a [u8]], threads: usize) -> FirstPass<'a> {
     }
 }
 
-/// The file, and the count of segments that failed the self-check: nonzero only for a
-/// transform bug. Threads never change the file written.
-pub(crate) fn compress(src: &[u8], threads: usize) -> Result<(Vec<u8>, usize)> {
+/// Threads never change the file written.
+pub(crate) fn compress(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     // an empty demo has no segment
     let cuts = if src.is_empty() {
         vec![0]
@@ -236,31 +186,22 @@ pub(crate) fn compress(src: &[u8], threads: usize) -> Result<(Vec<u8>, usize)> {
     };
     let header = Header {
         size_bytes: src.len() as u64,
-        duration_ms: first_pass
-            .segments
+        duration_ms: segments
             .iter()
-            .map(|plan| plan.duration_ms)
+            .map(|raw| u64::from(segment::duration_ms(raw)))
             .sum(),
         crc32: crc,
         sha256,
     };
-    let mut bodies = code_segments(&first_pass, threads)?;
-    let mut fallbacks = 0;
-    loop {
-        let out = assemble(&header, &first_pass.file_models, &bodies);
-        let Some(failing) = first_failing_segment(&out, &segments, threads)? else {
-            return Ok((out, fallbacks));
-        };
-        if bodies[failing].is_all_tail {
-            return Err(SELF_CHECK_FAILED);
-        }
-        bodies[failing] = tail_body(&first_pass.segments[failing])?;
-        fallbacks += 1;
+    let bodies = code_segments(&first_pass, threads)?;
+    let out = assemble(&header, &first_pass.file_models, &bodies);
+    if !decodes_to(&out, &segments, threads) {
+        return Err(Error::Internal(
+            "the encoder's output does not decode to its input",
+        ));
     }
+    Ok(out)
 }
-
-const SELF_CHECK_FAILED: Error =
-    Error::Internal("the encoder's output does not decode to its input");
 
 fn code_segments(first_pass: &FirstPass, threads: usize) -> Result<Vec<Body>> {
     let bodies = par_map(threads, &first_pass.segments, |plan| {
@@ -269,7 +210,7 @@ fn code_segments(first_pass: &FirstPass, threads: usize) -> Result<Vec<Body>> {
             .then(|| segment::walk(plan.raw, plan.start_proto))
             .flatten();
         if let Some((walked, _)) = walked
-            && let Ok(body) = Body::new(plan, &walked, &first_pass.file_models, false)
+            && let Ok(body) = Body::new(plan, &walked, &first_pass.file_models)
         {
             return Ok(body);
         }
@@ -280,40 +221,30 @@ fn code_segments(first_pass: &FirstPass, threads: usize) -> Result<Vec<Body>> {
 
 fn tail_body(plan: &SegmentPlan) -> Result<Body> {
     let walked = segment::walk_tail(plan.raw, plan.start_proto);
-    Body::new(plan, &walked, &[], true)
+    Body::new(plan, &walked, &[])
 }
 
 #[derive(Debug)]
 struct Body {
     bytes: Vec<u8>,
-    is_all_tail: bool,
     model_ids: Vec<usize>,
 }
 
 impl Body {
-    fn new(
-        plan: &SegmentPlan,
-        walked: &Walked,
-        file_models: &[Option<FileModel>],
-        is_all_tail: bool,
-    ) -> Result<Self> {
+    fn new(plan: &SegmentPlan, walked: &Walked, file_models: &[Option<FileModel>]) -> Result<Self> {
         let raw = plan.raw;
         let numerics = segment::numerics(raw, walked);
         let mut model_ids = Vec::new();
         let mut bytes = segment_header_bytes(
             raw.len() as u32,
-            plan.duration_ms as u32,
+            segment::duration_ms(raw),
             crc32fast::hash(raw),
         );
         let coded = segment::encode(walked, &numerics, &mut model_ids, file_models)
             .filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)
             .ok_or(Error::Internal("a segment that cannot be coded"))?;
         bytes.extend_from_slice(&coded);
-        Ok(Self {
-            bytes,
-            is_all_tail,
-            model_ids,
-        })
+        Ok(Self { bytes, model_ids })
     }
 }
 
@@ -336,26 +267,15 @@ fn assemble(header: &Header, file_models: &[Option<FileModel>], bodies: &[Body])
     out
 }
 
-/// The first segment `file` does not decode to, `None` when it decodes to them all.
-/// [`SELF_CHECK_FAILED`] when the file fails outside a segment: nothing to fall back to.
-///
-/// ponytail: one decode of the file per failing segment, so a transform bug in every
-/// segment makes encoding quadratic; decoding on past a failed segment would find them all.
-fn first_failing_segment(file: &[u8], segments: &[&[u8]], threads: usize) -> Result<Option<usize>> {
+/// The self-check: never holds the decoded demo whole.
+fn decodes_to(file: &[u8], segments: &[&[u8]], threads: usize) -> bool {
     const NO_MEMORY_LIMIT: u64 = u64::MAX;
-    let mut decoder =
-        Decoder::with_max_memory(file, threads, NO_MEMORY_LIMIT).map_err(|_| SELF_CHECK_FAILED)?;
-    for (index, &raw) in segments.iter().enumerate() {
-        let is_decoded = decoder
-            .next_segment()
-            .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded == raw));
-        if !is_decoded {
-            return Ok(Some(index));
-        }
-    }
+    let Ok(mut decoder) = Decoder::with_max_memory(file, threads, NO_MEMORY_LIMIT) else {
+        return false;
+    };
+    let is_each_segment_decoded = segments
+        .iter()
+        .all(|&raw| matches!(decoder.next_segment(), Ok(Some(segment)) if segment == raw));
     // the whole-demo checks, and nothing after the last segment
-    match decoder.next_segment() {
-        Ok(None) => Ok(None),
-        _ => Err(SELF_CHECK_FAILED),
-    }
+    is_each_segment_decoded && matches!(decoder.next_segment(), Ok(None))
 }

@@ -88,11 +88,6 @@ fn structure_rules() -> anyhow::Result<()> {
         segment_block(&mut no_models, segment);
     }
     refused(&no_models, "no models block", is_corrupt);
-    let mut checksum_set = file.clone();
-    checksum_set[30] = 1;
-    refused(&checksum_set, "checksum field", |error| {
-        *error == Error::Corrupt("header checksum field")
-    });
     for (bytes, what) in [
         (&b""[..], "empty"),
         (b"MVDZ", "magic"),
@@ -195,11 +190,8 @@ fn model_amplification() -> anyhow::Result<()> {
             put_usize(&mut body, field);
         }
         body.extend_from_slice(rest);
-        let mut segment = segment_header_bytes(
-            u32::try_from(demo.len())?,
-            u32::try_from(file_parts.header.duration_ms)?,
-            crc32fast::hash(&demo),
-        );
+        let mut segment =
+            segment_header_bytes(u32::try_from(demo.len())?, 0, crc32fast::hash(&demo));
         segment.extend_from_slice(&body);
         let mut edited = file_parts.clone();
         edited.models = models;
@@ -238,39 +230,24 @@ fn mutations_agree() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Legal under rule M2; once built, every table takes a 16 KiB LUT.
-fn wide_model(table_count: u32) -> Vec<u8> {
-    use crate::coder::rc::{IntModel, RangeEncoder};
-    const NQC: usize = 306;
-    let mut encoder = RangeEncoder::new();
-    let mut int_model = IntModel::new(NQC + 8);
+/// Once built, every table takes a 16 KiB LUT.
+fn wide_model(table_count: u16) -> Vec<u8> {
     let mut state = 1u32;
-    let mut next_q = || {
+    let mut next_quantized = || {
         state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-        1 + (state >> 16) % 12
+        (1 + (state >> 16) % 12) as u8
     };
-    int_model.put(&mut encoder, NQC, 256);
-    int_model.put(&mut encoder, NQC + 1, table_count);
-    let fallback: Vec<u32> = Vec::from_fn(256, |_| next_q());
-    let mut previous = 0;
-    for &q_value in &fallback {
-        int_model.put(&mut encoder, 17 * 17 + previous.min(16) as usize, q_value);
-        previous = q_value;
+    let mut contexts_and_tables = Vec::new();
+    for context in 0..table_count {
+        contexts_and_tables.extend_from_slice(&context.to_le_bytes());
     }
-    for table in 0..table_count {
-        int_model.put(&mut encoder, NQC + 2, u32::from(table > 0));
-        let mut previous = 0u32;
-        for &fallback_q in &fallback {
-            let q_value = next_q();
-            int_model.put(
-                &mut encoder,
-                fallback_q.min(16) as usize * 17 + previous.min(16) as usize,
-                q_value,
-            );
-            previous = q_value;
-        }
+    for _ in 0..(usize::from(table_count) + 1) * 256 {
+        contexts_and_tables.push(next_quantized());
     }
-    encoder.finish()
+    let mut model = Vec::new();
+    put_usize(&mut model, usize::from(table_count));
+    model.extend_from_slice(&crate::deflate::compress(&contexts_and_tables));
+    model
 }
 
 #[test]
@@ -310,77 +287,4 @@ fn large_models_block() -> anyhow::Result<()> {
         start.elapsed()
     );
     Ok(())
-}
-
-/// A model header padded to pass the decision limit is refused before any table is built.
-#[test]
-fn padded_model_of_65535_tables_is_refused_quickly() {
-    use crate::coder::rc::{IntModel, RangeEncoder};
-    const NQC: usize = 17 * 18;
-    let table_count = 65535u32;
-    let mut encoder = RangeEncoder::new();
-    let mut int_model = IntModel::new(NQC + 8);
-    int_model.put(&mut encoder, NQC, 256);
-    int_model.put(&mut encoder, NQC + 1, table_count);
-    let mut previous = 0usize;
-    for _ in 0..256 {
-        int_model.put(&mut encoder, 17 * 17 + previous, 0);
-        previous = 0;
-    }
-    for table in 0..table_count {
-        int_model.put(&mut encoder, NQC + 2, u32::from(table > 0));
-        for _ in 0..256 {
-            int_model.put(&mut encoder, 0, 0);
-        }
-    }
-    let decisions = encoder.decisions;
-    let mut header = encoder.finish();
-    header.resize(
-        header
-            .len()
-            .max((decisions.saturating_sub(1024) / 128 + 1) as usize),
-        0,
-    );
-    let mut models = Vec::new();
-    for field in [1, 0, header.len()] {
-        put_usize(&mut models, field);
-    }
-    models.extend_from_slice(&header);
-    let mut rans_body = Vec::new();
-    put_usize(&mut rans_body, 0);
-    let raw_len = table_count + 100;
-    // fte, fte2, mvd1, tail; one entry (id 0, count, length); no blob body
-    let mut body = Vec::new();
-    for field in [
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        table_count as usize + 16,
-        rans_body.len(),
-        0,
-    ] {
-        put_usize(&mut body, field);
-    }
-    body.extend_from_slice(&rans_body);
-    let mut segment = segment_header_bytes(raw_len, 0, 0);
-    segment.extend_from_slice(&body);
-    let file = Parts {
-        header: Header {
-            size_bytes: u64::from(raw_len),
-            ..Default::default()
-        },
-        models,
-        segments: vec![segment],
-    }
-    .build();
-    let start = Instant::now();
-    let max_memory: u64 = 64 << 20;
-    assert_eq!(
-        crate::decode::decompress(&file, 1, max_memory).err(),
-        Some(Error::Corrupt("model"))
-    );
-    assert!(start.elapsed().as_secs_f64() < 5.0, "{:?}", start.elapsed());
 }

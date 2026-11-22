@@ -8,7 +8,7 @@ use crate::format::{MAX_MODELS_LEN, MAX_SEGMENT_RAW};
 use crate::numeric::{GROUPS, Group, NumericContext, NumericIo};
 use crate::parallel::par_map;
 use crate::proto::{Proto, frame_len};
-use crate::streams::{LAZY_STREAM_COUNT, RAW, STREAM_COUNT, TAIL, is_blob, is_lazy, is_numeric};
+use crate::streams::{LAZY_STREAM_COUNT, RAW, STREAM_COUNT, TAIL, is_blob};
 use crate::walk::{Records, SymbolIo, Walker};
 
 pub(crate) const SEGMENT_TARGET_RAW: usize = 256 * 1024;
@@ -332,7 +332,7 @@ impl ModelBuilder {
 
     pub(crate) fn models(self, threads: usize) -> Vec<Option<rans::FileModel>> {
         let mut models: Vec<Option<rans::FileModel>> = par_map(threads, &self.tallies, |tally| {
-            tally.as_ref().and_then(rans::Tally::file_model)
+            tally.as_ref().map(rans::Tally::file_model)
         });
         fit_models_block(&mut models, MAX_MODELS_LEN);
         models
@@ -476,19 +476,15 @@ pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     cuts
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct FrameScan {
-    pub(crate) duration_ms: u64,
-    pub(crate) framed_len: usize,
-}
-
-pub(crate) fn frame_scan(demo: &[u8]) -> FrameScan {
-    let mut scan = FrameScan::default();
-    while let Some(len) = frame_len(demo, scan.framed_len) {
-        scan.duration_ms += u64::from(demo[scan.framed_len]);
-        scan.framed_len += len;
+/// The time bytes of the whole frames `segment` starts with, summed.
+pub(crate) fn duration_ms(segment: &[u8]) -> u32 {
+    let mut duration_ms = 0;
+    let mut offset = 0;
+    while let Some(len) = frame_len(segment, offset) {
+        duration_ms += u32::from(segment[offset]);
+        offset += len;
     }
-    scan
+    duration_ms
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,7 +529,7 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     for _ in 0..stream_count {
         let id = read_usize(&mut rest).ok_or(table_error)?;
         let is_blob = is_blob(id);
-        if id >= STREAM_COUNT || !(is_lazy(id) || is_numeric(id) || is_blob) {
+        if id >= STREAM_COUNT {
             return bad("stream id");
         }
         let count = read_usize(&mut rest).ok_or(table_error)?;
@@ -639,7 +635,7 @@ pub(crate) fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streams::{UC, UC_A};
+    use crate::streams::{UC, UC_A, is_lazy, is_numeric};
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 

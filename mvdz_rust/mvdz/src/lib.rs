@@ -28,7 +28,7 @@ mod walk;
 mod tests;
 
 pub use decode::{Decoder, decode};
-pub use encode::{Encoder, encode};
+pub use encode::encode;
 pub use error::{Error, Result};
 pub use format::Header;
 

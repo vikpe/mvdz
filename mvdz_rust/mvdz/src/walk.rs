@@ -23,7 +23,7 @@ use crate::streams::{
 
 pub(crate) const NO_OFFSET: u32 = u32::MAX;
 
-/// Every `context` fits in 16 bits, the rANS table key (FORMAT.md section 6.4).
+/// Every `context` fits in 16 bits, the rANS table key (FORMAT.md section 6.2).
 pub(crate) trait SymbolIo {
     fn byte(&mut self, stream: usize, context: u32, value: u8) -> u8;
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);

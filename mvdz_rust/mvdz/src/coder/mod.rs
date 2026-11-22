@@ -2,7 +2,6 @@
 //! The stream's kind decides its coder; no stream carries a model or coder id of its own.
 
 pub(crate) mod rans;
-pub(crate) mod rc;
 
 use crate::error::{Error, Result};
 

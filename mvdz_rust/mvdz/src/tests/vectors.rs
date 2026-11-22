@@ -86,41 +86,8 @@ fn multi_demoinfo() -> Vec<u8> {
     demo
 }
 
-/// Robustness reviews 1 and 5: cheap to write, costly to build under an adaptive coder.
-fn amplifying_model(table_count: u32) -> Vec<u8> {
-    use crate::coder::rc::{IntModel, RangeEncoder};
-    const NQC: usize = 306;
-    let mut encoder = RangeEncoder::new();
-    let mut int_model = IntModel::new(NQC + 8);
-    int_model.put(&mut encoder, NQC, 256);
-    int_model.put(&mut encoder, NQC + 1, table_count);
-    let mut previous = 0usize;
-    for _ in 0..256 {
-        int_model.put(&mut encoder, 17 * 17 + previous.min(16), 1);
-        previous = 1;
-    }
-    for table in 0..table_count {
-        int_model.put(&mut encoder, NQC + 2, u32::from(table > 0));
-        let mut previous = 0usize;
-        for _ in 0..256 {
-            int_model.put(&mut encoder, 17 + previous.min(16), 1);
-            previous = 1;
-        }
-    }
-    let header = encoder.finish();
-    let mut body = Vec::new();
-    put_usize(&mut body, header.len());
-    body.extend_from_slice(&header);
-    put_usize(&mut body, 16);
-    body.extend_from_slice(&[0; 16]);
-    body
-}
-
 /// Returns (models block body, transform body).
-fn transform_body(
-    lazy: &[(usize, &[u8])],
-    blobs: &[(usize, &[u8])],
-) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+fn transform_body(lazy: &[(usize, &[u8])], blobs: &[(usize, &[u8])]) -> (Vec<u8>, Vec<u8>) {
     use crate::coder::rans;
     let mut models: Vec<Option<rans::FileModel>> = Vec::new();
     let mut ids = Vec::new();
@@ -129,7 +96,7 @@ fn transform_body(
         let contexts = vec![0u16; symbols.len()];
         let mut tally = rans::Tally::new(256);
         tally.add(symbols, &contexts);
-        let model = tally.file_model().context("a model")?;
+        let model = tally.file_model();
         bodies.push(rans::encode_bytes(symbols, &contexts, &model));
         models.resize_with(models.len().max(id + 1), || None);
         models[*id] = Some(model);
@@ -167,18 +134,18 @@ fn transform_body(
         body.extend_from_slice(stream_body);
     }
     body.extend_from_slice(&deflated);
-    Ok((crate::segment::models_body(&models, &ids), body))
+    (crate::segment::models_body(&models, &ids), body)
 }
 
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
-    let ms = crate::segment::frame_scan(demo).duration_ms;
     let crc = crc32fast::hash(demo);
-    let mut segment = segment_header_bytes(u32::try_from(demo.len())?, u32::try_from(ms)?, crc);
+    let duration_ms = crate::segment::duration_ms(demo);
+    let mut segment = segment_header_bytes(u32::try_from(demo.len())?, duration_ms, crc);
     segment.extend_from_slice(body);
     Ok(Parts {
         header: Header {
             size_bytes: demo.len() as u64,
-            duration_ms: ms,
+            duration_ms: u64::from(duration_ms),
             crc32: crc,
             sha256: Sha256::digest(demo).into(),
         },
@@ -212,25 +179,11 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     edited.header.size_bytes += 1;
     add("header-size", edited.build(), "the header's size + 1");
     let mut edited = file_parts.clone();
-    edited.header.duration_ms += 1;
-    add(
-        "header-duration",
-        edited.build(),
-        "the header's duration_ms + 1",
-    );
-    let mut edited = file_parts.clone();
     edited.header.crc32 ^= 1;
     add(
         "header-crc",
         edited.build(),
         "one bit of the header's CRC-32 flipped",
-    );
-    let mut edited_file = base.clone();
-    edited_file[30] = 1;
-    add(
-        "header-checksum-field",
-        edited_file,
-        "the high half of the header's checksum field set",
     );
     let mut edited_file = base.clone();
     edited_file[4] = 3;
@@ -278,16 +231,6 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         edited.build(),
         "the first segment padded with zeros to one byte over the largest coded length (2 MiB)",
     );
-    let mut edited = parts(&compress(&synthetic(&[], false))?)?;
-    assert_eq!(edited.segments.len(), 1);
-    let duration_ms = u32::from_le_bytes(edited.segments[0][4..8].try_into()?);
-    edited.segments[0][4..8].copy_from_slice(&(duration_ms + 1).to_le_bytes());
-    edited.header.duration_ms += 1;
-    add(
-        "segment-duration",
-        edited.build(),
-        "a segment whose dur_ms is 1 more than its frame times",
-    );
     let mut edited_file = base[..HEADER_LEN].to_vec();
     edited_file.extend_from_slice(&(256u32 << 20).to_le_bytes());
     edited_file.extend_from_slice(&[0; 100]);
@@ -326,7 +269,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         if let Some(misc) = misc {
             blobs.push((HIDMISC, misc));
         }
-        one_segment(&one, &transform_body(&lazy, &blobs)?)
+        one_segment(&one, &transform_body(&lazy, &blobs))
     };
     add(
         "ucmd-grid",
@@ -400,22 +343,11 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         "a model for a blob stream (text)",
     );
     let mut edited = entries.clone();
-    let at = edited
-        .iter()
-        .position(|entry| entry.0 > crate::streams::PI_NUM)
-        .context("a model after pi.num")?;
-    edited.insert(at, (crate::streams::PI_NUM, lazy_entry.1.clone()));
-    add(
-        "tables-plain-id",
-        with_entries(&edited),
-        "a model for a stream that has none (pi.num)",
-    );
-    let mut edited = entries.clone();
-    edited.insert(numeric_at, (40, lazy_entry.1.clone()));
+    edited.push((crate::streams::STREAM_COUNT, lazy_entry.1.clone()));
     add(
         "tables-unassigned-id",
         with_entries(&edited),
-        "a model for stream id 40 (unassigned)",
+        "a model for a stream id past the last",
     );
     add(
         "tables-empty",
@@ -445,29 +377,16 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     );
     let mut edited = entries.clone();
     edited[0].1 = {
-        use crate::coder::rc::{IntModel, RangeEncoder};
-        const NQC: usize = 306;
-        let mut encoder = RangeEncoder::new();
-        let mut int_model = IntModel::new(NQC + 8);
-        for (context, value) in [(NQC, 256), (NQC + 1, 65536)] {
-            int_model.put(&mut encoder, context, value);
-        }
-        encoder.finish()
+        const OVER_ONE_PER_CONTEXT: usize = (1 << 16) + 1;
+        let mut model = Vec::new();
+        crate::fields::put_usize(&mut model, OVER_ONE_PER_CONTEXT);
+        model.extend_from_slice(&crate::deflate::compress(&[]));
+        model
     };
     add(
-        "tables-m1",
+        "tables-own-count",
         with_entries(&edited),
-        "a model declaring 65536 own tables (rule M1)",
-    );
-    let amplifying = amplifying_model(2000);
-    let mut edited = entries.clone();
-    edited[0].1 = crate::fields::read_length_prefixed(&mut amplifying.as_slice())
-        .context("the model's header")?
-        .to_vec();
-    add(
-        "tables-decisions",
-        with_entries(&edited),
-        "a model breaking the decision limit (rule M2)",
+        "a model declaring 65537 own tables: more than there are contexts",
     );
     Ok(())
 }
@@ -477,7 +396,7 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
 fn hostile_vectors_are_refused() -> anyhow::Result<()> {
     let mut vectors = Vec::new();
     hostile(&mut vectors)?;
-    assert!(vectors.len() > 30);
+    assert!(vectors.len() > 20);
     for (name, file, _, _) in &vectors {
         assert!(readers_agree(file, name).is_none(), "{name}: accepted");
     }
@@ -575,7 +494,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         vectors.push((name.to_string(), file, Some(demo.to_vec()), how.to_string()));
     };
     // without the input check: some vectors hold non-demo input
-    let encode = |demo: &[u8]| anyhow::Ok(compress_unchecked(demo)?.0);
+    let encode = |demo: &[u8]| anyhow::Ok(compress_unchecked(demo)?);
     let duel_source = "duel = set8 demo 3fe477dc...1416";
     add(
         "duel.normal.mvdz",

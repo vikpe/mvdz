@@ -3,12 +3,12 @@
 use crate::coder::rans::read_models_block;
 use crate::error::{Error, Result, bad};
 use crate::format::{
-    HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, MAX_SEGMENT_RAW, SEGMENT_FIELDS_LEN,
-    SegmentHeader, check_coded_len, parse_segment_header,
+    HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_LEN, SegmentHeader,
+    check_coded_len, parse_segment_header,
 };
 use crate::memory::{DEFAULT_MAX_MEMORY, try_zeroed};
 use crate::parallel::{par_map, thread_count};
-use crate::segment::{self, FrameScan, frame_scan};
+use crate::segment;
 use std::collections::VecDeque;
 use std::io::{self, Read};
 
@@ -38,7 +38,7 @@ pub struct Decoder<R: Read> {
     failure: Option<Error>,
     threads: usize,
     max_memory: u64,
-    check: DemoCheck,
+    demo_crc32: crc32fast::Hasher,
 }
 
 impl<R: Read> Decoder<R> {
@@ -78,7 +78,7 @@ impl<R: Read> Decoder<R> {
             failure: None,
             threads,
             max_memory,
-            check: DemoCheck::default(),
+            demo_crc32: crc32fast::Hasher::new(),
         })
     }
 
@@ -155,7 +155,9 @@ impl<R: Read> Decoder<R> {
             return bad("trailing bytes");
         }
         self.layout.finish()?;
-        std::mem::take(&mut self.check).finish(&self.layout)?;
+        if self.demo_crc32.clone().finalize() != self.layout.header.crc32 {
+            return bad("checksum mismatch");
+        }
         self.is_done = true;
         Ok(())
     }
@@ -190,7 +192,7 @@ impl<R: Read> Decoder<R> {
         check_coded_len(coded)?;
         let body = self.read_body(coded + SEGMENT_FIELDS_LEN as u64)?;
         let header = parse_segment_header(&body[..SEGMENT_FIELDS_LEN])?;
-        self.layout.add_segment(&header)?;
+        self.layout.add_segment(header)?;
         Ok((header, body))
     }
 
@@ -211,16 +213,15 @@ impl<R: Read> Decoder<R> {
         let layout = &self.layout;
         let decoded = par_map(self.threads, &segments, |(header, body)| {
             let mut bytes = try_zeroed(header.raw_len as usize)?;
-            let scan = decode_segment(layout, body, header, &mut bytes)?;
-            Ok((bytes, scan))
+            decode_segment(layout, body, *header, &mut bytes)?;
+            Ok(bytes)
         });
         for result in decoded {
-            let checked = result.and_then(|(bytes, scan)| {
-                self.check.segment(&bytes, scan)?;
-                Ok(bytes)
-            });
-            match checked {
-                Ok(segment) => self.ready.push_back(segment),
+            match result {
+                Ok(segment) => {
+                    self.demo_crc32.update(&segment);
+                    self.ready.push_back(segment);
+                }
                 Err(error) => {
                     // earlier in the demo than any error met while reading on
                     self.deferred_error = Some(error);
@@ -255,9 +256,9 @@ fn read_up_to(input: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 fn decode_segment(
     layout: &Layout,
     body: &[u8],
-    header: &SegmentHeader,
+    header: SegmentHeader,
     dst: &mut [u8],
-) -> Result<FrameScan> {
+) -> Result<()> {
     if dst.len() as u64 != u64::from(header.raw_len) {
         return bad("segment length");
     }
@@ -269,45 +270,7 @@ fn decode_segment(
     if crc32fast::hash(dst) != header.crc32 {
         return bad("segment checksum");
     }
-    let scan = frame_scan(dst);
-    if scan.duration_ms != u64::from(header.duration_ms) {
-        return bad("segment duration");
-    }
-    Ok(scan)
-}
-
-/// Decoding does not recompute the header's SHA-256.
-#[derive(Debug, Default)]
-struct DemoCheck {
-    crc32: crc32fast::Hasher,
-    size_bytes: u64,
-    duration_ms: u64,
-    is_inside_frame: bool,
-}
-
-impl DemoCheck {
-    fn segment(&mut self, out: &[u8], scan: FrameScan) -> Result<()> {
-        if self.is_inside_frame {
-            return bad("segment ends inside a frame");
-        }
-        self.crc32.update(out);
-        self.size_bytes += out.len() as u64;
-        self.duration_ms += scan.duration_ms;
-        let has_tail = scan.framed_len != out.len();
-        let is_cut_at_max = out.len() as u64 == MAX_SEGMENT_RAW;
-        self.is_inside_frame = has_tail && !is_cut_at_max;
-        Ok(())
-    }
-    fn finish(self, layout: &Layout) -> Result<()> {
-        let header = &layout.header;
-        if self.crc32.finalize() != header.crc32 || self.size_bytes != header.size_bytes {
-            return bad("checksum mismatch");
-        }
-        if self.duration_ms != header.duration_ms {
-            return bad("demo timing");
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result<Vec<u8>> {
