@@ -52,12 +52,11 @@ func (groups *numericGroups) playerOrigins(records []playerInfoRecord, axis int)
 		isSent := record.flags&(dfOrigin<<axis) != 0
 		earlierOrigins := uint32(bits.OnesCount16(record.flags & (1<<axis - 1)))
 		switch {
-		case record.hasFloatCoords && isSent:
-			groups.floatOrigin(streamPlayerFloatOrigin+axis, record.offset+4*earlierOrigins, axis, track)
+		case !isSent:
+			track.hold()
 		case record.hasFloatCoords:
-			track.floatPreviousBits = track.floatLastBits
-			track.floatResidualBits = 0
-		case isSent:
+			groups.floatOrigin(streamPlayerFloatOrigin+axis, record.offset+4*earlierOrigins, axis, track)
+		default:
 			velocity := int32(int16(track.last - track.previous))
 			context := min(residualBucket(track.residual), 19) | min(residualBucket(velocity), 19)<<5
 			prediction := predictTimeScaled(track.last, track.previous, now, before)
@@ -65,9 +64,6 @@ func (groups *numericGroups) playerOrigins(records []playerInfoRecord, axis int)
 			track.residual = residual
 			track.previous = track.last
 			track.last = value
-		default:
-			track.residual = 0
-			track.previous = track.last
 		}
 	}
 }
@@ -109,10 +105,7 @@ func (groups *numericGroups) entityOrigins(records []packetEntityRecord, axis in
 		offset := record.originOffsets[axis]
 		switch {
 		case offset == noOffset:
-			track.previous = track.last
-			track.residual = 0
-			track.floatPreviousBits = track.floatLastBits
-			track.floatResidualBits = 0
+			track.hold()
 		case record.hasFloatCoords:
 			groups.floatOrigin(streamEntityFloatOrigin+axis, offset, axis, track)
 		default:
@@ -127,6 +120,15 @@ func (groups *numericGroups) entityOrigins(records []packetEntityRecord, axis in
 			track.last = value
 		}
 	}
+}
+
+// hold notes an origin left out of its update: it did not move, at either
+// width.
+func (track *axisTrack) hold() {
+	track.previous = track.last
+	track.residual = 0
+	track.floatPreviousBits = track.floatLastBits
+	track.floatResidualBits = 0
 }
 
 // floatOrigin decodes a float coordinate as its bit pattern.

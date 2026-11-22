@@ -920,7 +920,16 @@ div_round(a i32, b i32 > 0) -> i32:          // halves round away from zero
 
 `AxisTrack` (per player or entity and axis, all zero initially): `last,
 previous, before_previous: u16; residual: i32; float_last_bits,
-float_previous_bits: u32; float_residual_bits: i32`.
+float_previous_bits: u32; float_residual_bits: i32`. The 16-bit and the
+float fields are two states: a coded coordinate updates the one of its
+width, and an origin left out of its update holds both
+(`numeric.rs:AxisTrack::hold`):
+
+```
+hold(track):
+    previous = last; residual = 0
+    float_previous_bits = float_last_bits; float_residual_bits = 0
+```
 
 ### 5.3 Player origins: streams 17-19 and 28-30 (`player_origin_step`)
 
@@ -932,27 +941,23 @@ record of that player whatever its flags; then with `s = tracks[p.number]`
 and `sent = p.flags & (1 << a)`:
 
 ```
-if p.has_float_coords:                                  // stream 28 + a
-    if sent:
-        offset = p.offset + 4 * popcount(p.flags & ((1 << a) - 1))
+if sent:
+    earlier = popcount(p.flags & ((1 << a) - 1))
+    if p.has_float_coords:                              // stream 28 + a
+        offset = p.offset + 4 * earlier
         pred   = float_last_bits + (float_last_bits - float_previous_bits)   // u32 wrapping
         f      = [residual_bucket(float_residual_bits), a]
         v, r'  = 32-bit field (offset, pred, f)
         float_previous_bits = float_last_bits; float_last_bits = v; float_residual_bits = r'
-    else:
-        float_previous_bits = float_last_bits; float_residual_bits = 0
-    // the 16-bit state is untouched
-else:                                                   // stream 17 + a
-    if sent:
+    else:                                               // stream 17 + a
+        offset   = p.offset + 2 * earlier
         pred     = predict_time_scaled(last, previous, now, before)
-        offset   = p.offset + 2 * popcount(p.flags & ((1 << a) - 1))
         velocity = (last - previous) as i16 as i32
         f        = [residual_bucket(residual), residual_bucket(velocity)]
         v, r'    = 16-bit field (offset, pred, f); residual = r'
-    else:
-        residual = 0; v = last
-    previous = last; last = v
-    // the float state is untouched
+        previous = last; last = v
+else:
+    hold(s)
 ```
 
 ### 5.4 Player angles: streams 20-22 (`player_angle_step`)
@@ -1001,8 +1006,7 @@ if e.bits & (1 << (2 * a)):                                      // origin a sen
         v, r' = 16-bit field (offset, pred, f); residual = r'
         previous = last; last = v
 else:
-    previous = last; residual = 0
-    float_previous_bits = float_last_bits; float_residual_bits = 0
+    hold(s)
 ```
 
 `origin_offsets(e)` (`walker.rs:PacketEntityRecord::origin_offsets`):

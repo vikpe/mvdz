@@ -244,6 +244,14 @@ impl AxisTrack {
         self.previous = self.last;
         self.last = value;
     }
+    /// An origin left out of its update did not move, at either width.
+    #[inline(always)]
+    fn hold(&mut self) {
+        self.push(self.last);
+        self.residual = 0;
+        self.float_previous_bits = self.float_last_bits;
+        self.float_residual_bits = 0;
+    }
     /// last + velocity * `time_delta_now` / `time_delta_previous`, rounded, wrapping at 16 bits.
     #[inline(always)]
     fn predict_time_scaled(&self, time_deltas: TimeDeltas) -> u16 {
@@ -325,34 +333,28 @@ fn player_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
     stream_index: usize,
 ) {
     let is_sent = record.flags & (DF_ORIGIN << axis) != 0;
+    if !is_sent {
+        track.hold();
+        return;
+    }
+    let earlier_origins = (record.flags & ((1 << axis) - 1)).count_ones();
     if record.has_float_coords {
-        if is_sent {
-            let offset = record.offset + 4 * (record.flags & ((1 << axis) - 1)).count_ones();
-            track.code_float::<IS_ENCODE, IO>(offset, axis, io, stream_index + 1);
-        } else {
-            track.float_previous_bits = track.float_last_bits;
-            track.float_residual_bits = 0;
-        }
+        let offset = record.offset + 4 * earlier_origins;
+        track.code_float::<IS_ENCODE, IO>(offset, axis, io, stream_index + 1);
     } else {
-        let value = if is_sent {
-            let prediction = track.predict_time_scaled(time_deltas);
-            let offset = record.offset + 2 * (record.flags & ((1 << axis) - 1)).count_ones();
-            let context = NumericContext {
-                features: [
-                    residual_bucket(track.residual),
-                    residual_bucket(track.velocity()),
-                    0,
-                    0,
-                ],
-            };
-            let (value, residual) =
-                code_u16::<IS_ENCODE, IO>(offset, prediction, io, stream_index, context);
-            track.residual = residual;
-            value
-        } else {
-            track.residual = 0;
-            track.last
+        let prediction = track.predict_time_scaled(time_deltas);
+        let offset = record.offset + 2 * earlier_origins;
+        let context = NumericContext {
+            features: [
+                residual_bucket(track.residual),
+                residual_bucket(track.velocity()),
+                0,
+                0,
+            ],
         };
+        let (value, residual) =
+            code_u16::<IS_ENCODE, IO>(offset, prediction, io, stream_index, context);
+        track.residual = residual;
         track.push(value);
     }
 }
@@ -422,10 +424,7 @@ fn entity_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
             track.push(value);
         }
     } else {
-        track.push(track.last);
-        track.residual = 0;
-        track.float_previous_bits = track.float_last_bits;
-        track.float_residual_bits = 0;
+        track.hold();
     }
 }
 
