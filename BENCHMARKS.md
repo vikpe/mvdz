@@ -126,8 +126,9 @@ segments: about 2.3 times the demo for a large one, 1.9 to 2.8 times less than r
 * The test suite (`cargo nextest run`, 51 tests) with the set8 demos and the FTE float
   demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
   `vectors/` are refused or decoded as `MANIFEST.tsv` records.
-* Fuzzing (`mvdz_rust/mvdz/fuzz/`: `decode`, `stream_reader`, `compress_rt`,
-  `gen_rt`): not yet run on format version 2.
+* Fuzzing, one hour per target, no failure: Rust (`mvdz_rust/mvdz/fuzz/`) `decode`
+  (78k runs, seeded with the vectors), `stream_reader` (4.5M), `compress_rt` (438k),
+  `gen_rt` (290k); Go `FuzzDecode` (2.5M) and `FuzzEncode` (816k).
 
 ## Reproducing
 
