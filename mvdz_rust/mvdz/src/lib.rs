@@ -9,7 +9,6 @@
 //! # }
 //! ```
 
-mod budget;
 mod coder;
 mod decode;
 mod deflate;
@@ -17,6 +16,7 @@ mod encode;
 mod error;
 mod fields;
 mod format;
+mod memory;
 mod numeric;
 mod parallel;
 mod proto;

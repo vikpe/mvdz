@@ -6,7 +6,6 @@ use crate::fields::put_usize;
 use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
-use std::assert_matches;
 use std::io::{Cursor, Read as _};
 use std::time::Instant;
 
@@ -140,17 +139,17 @@ fn declared_sizes() -> anyhow::Result<()> {
     past_end.extend_from_slice(&u32::MAX.to_le_bytes());
     past_end.extend_from_slice(&file_parts.segments[0]);
     refused(&past_end, "segment length", is_corrupt);
-    let (demo, file) = small_demo_and_file(false)?;
-    let max_memory = demo.len() as u64 / 2;
-    assert_matches!(
-        crate::decode::decompress(&file, 1, max_memory),
-        Err(Error::MemoryLimit(_))
+    // whole-file decoding stops at the limit; streaming holds a few segments only
+    let (demo, file) = small_demo_and_file(true)?;
+    let max_memory = demo.len() as u64 - 1;
+    assert_eq!(
+        crate::decode::decompress(&file, 1, max_memory).err(),
+        Some(Error::MemoryLimit("demo size"))
     );
-    assert!(
-        crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)
-            .and_then(|mut reader| reader.read_demo(&mut [0; 10]))
-            .is_err()
-    );
+    let mut streamed = Vec::new();
+    crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?
+        .read_to_end(&mut streamed)?;
+    assert!(streamed == demo);
     Ok(())
 }
 
@@ -293,19 +292,18 @@ fn large_models_block() -> anyhow::Result<()> {
     }
     file_parts.models = models;
     let read_models = |max_memory: u64| {
-        let budget = crate::budget::Budget::new(max_memory);
-        crate::coder::rans::ModelsBlock::new(&file_parts.models, 1, &budget).map(|_| ())
+        crate::coder::rans::read_models_block(&file_parts.models, 1, max_memory).map(|_| ())
     };
     // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
     let max_memory: u64 = 128 << 20;
     assert_eq!(
         read_models(max_memory).err(),
-        Some(Error::MemoryLimit("memory"))
+        Some(Error::MemoryLimit("models"))
     );
     let error = crate::decode::decompress(&file_parts.build(), 1, max_memory).err();
-    assert_eq!(error, Some(Error::MemoryLimit("memory")));
+    assert_eq!(error, Some(Error::MemoryLimit("models")));
     let start = Instant::now();
-    read_models(crate::budget::DEFAULT_MAX_MEMORY)?;
+    read_models(crate::memory::DEFAULT_MAX_MEMORY)?;
     assert!(
         start.elapsed().as_secs_f64() < 10.0,
         "reading the models took {:?}",
@@ -385,30 +383,4 @@ fn padded_model_of_65535_tables_is_refused_quickly() {
         Some(Error::Corrupt("model"))
     );
     assert!(start.elapsed().as_secs_f64() < 5.0, "{:?}", start.elapsed());
-}
-
-/// No reader keeps a record per segment: many tiny segments decode within a limit just
-/// over the demo's size.
-#[test]
-fn many_tiny_segments_decode_in_little_memory() -> anyhow::Result<()> {
-    // the encoder cuts at 256 KiB, so one segment per frame is built by hand
-    let frame = [0, 1, 1, 0, 0, 0, 1]; // dem_read holding one svc_nop
-    let segment_count = 60_000;
-    let demo = frame.repeat(segment_count);
-    let one = parts(&compress(&frame)?)?;
-    assert_eq!(one.segments.len(), 1);
-    let file = Parts {
-        header: parts(&compress(&demo)?)?.header,
-        models: one.models,
-        segments: vec![one.segments[0].clone(); segment_count],
-    }
-    .build();
-    // the demo is 0.4 MB
-    let max_memory: u64 = 1 << 20;
-    assert_eq!(crate::decode::decompress(&file, 1, max_memory)?, demo);
-    let mut reader = crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?;
-    let mut streamed = Vec::new();
-    reader.read_to_end(&mut streamed)?;
-    assert_eq!(streamed, demo);
-    Ok(())
 }

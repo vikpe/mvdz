@@ -1,12 +1,12 @@
 //! Decoding: the container reader, segment by segment, and the checks over the demo.
 
-use crate::budget::{Budget, Charge, DEFAULT_MAX_MEMORY, try_zeroed};
-use crate::coder::rans::ModelsBlock;
+use crate::coder::rans::read_models_block;
 use crate::error::{Error, Result, bad};
 use crate::format::{
     HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, MAX_SEGMENT_RAW, SEGMENT_FIELDS_LEN,
     SegmentHeader, check_coded_len, parse_segment_header,
 };
+use crate::memory::{DEFAULT_MAX_MEMORY, try_zeroed};
 use crate::parallel::{par_map, thread_count};
 use crate::segment::{self, FrameScan, frame_scan};
 use std::collections::VecDeque;
@@ -17,7 +17,8 @@ use std::io::{self, Read};
 /// # Errors
 ///
 /// [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for another file type or version,
-/// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] past the memory limit.
+/// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] for a demo of more than 1 GiB:
+/// read that one with [`Decoder`].
 pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     decompress(bytes, thread_count(max_threads), DEFAULT_MAX_MEMORY)
 }
@@ -27,23 +28,17 @@ pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
 pub struct Decoder<R: Read> {
     input: R,
     layout: Layout,
-    current: Option<DecodedSegment>,
+    current: Option<Vec<u8>>,
     /// Into `current`.
     at: usize,
-    ready: VecDeque<DecodedSegment>,
+    ready: VecDeque<Vec<u8>>,
     /// Met after the segments in `ready`; reported once they are read.
     deferred_error: Option<Error>,
     is_done: bool,
     failure: Option<Error>,
     threads: usize,
-    budget: Budget,
+    max_memory: u64,
     check: DemoCheck,
-}
-
-#[derive(Debug)]
-pub(crate) struct DecodedSegment {
-    pub(crate) bytes: Vec<u8>,
-    _charge: Charge,
 }
 
 impl<R: Read> Decoder<R> {
@@ -71,8 +66,7 @@ impl<R: Read> Decoder<R> {
     pub(crate) fn with_max_memory(mut input: R, threads: usize, max_memory: u64) -> Result<Self> {
         let mut header = [0u8; HEADER_LEN];
         let filled = read_up_to(&mut input, &mut header)?;
-        let budget = Budget::new(max_memory);
-        let layout = Layout::new(&header[..filled], &budget)?;
+        let layout = Layout::new(&header[..filled])?;
         Ok(Self {
             input,
             layout,
@@ -83,7 +77,7 @@ impl<R: Read> Decoder<R> {
             is_done: false,
             failure: None,
             threads,
-            budget,
+            max_memory,
             check: DemoCheck::default(),
         })
     }
@@ -101,7 +95,7 @@ impl<R: Read> Decoder<R> {
     }
 
     /// `None` at the end of the demo. The first error is sticky.
-    pub(crate) fn next_segment(&mut self) -> Result<Option<DecodedSegment>> {
+    pub(crate) fn next_segment(&mut self) -> Result<Option<Vec<u8>>> {
         if let Some(error) = self.failure {
             return Err(error);
         }
@@ -114,10 +108,10 @@ impl<R: Read> Decoder<R> {
     }
 
     fn current_bytes(&self) -> &[u8] {
-        self.current.as_ref().map_or(&[], |segment| &segment.bytes)
+        self.current.as_deref().unwrap_or_default()
     }
 
-    fn advance(&mut self) -> Result<Option<DecodedSegment>> {
+    fn advance(&mut self) -> Result<Option<Vec<u8>>> {
         loop {
             if let Some(segment) = self.ready.pop_front() {
                 return Ok(Some(segment));
@@ -145,13 +139,14 @@ impl<R: Read> Decoder<R> {
         if len > MAX_MODELS_LEN {
             return bad("models too large");
         }
-        let models_block = if len > 0 {
-            let (body, _charge) = self.read_body(len)?;
-            Some(ModelsBlock::new(&body, self.threads, &self.budget)?)
+        let models = if len > 0 {
+            let body = self.read_body(len)?;
+            Some(read_models_block(&body, self.threads, self.max_memory)?)
         } else {
             None
         };
-        self.layout.models(models_block)
+        self.layout.set_models(models);
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<()> {
@@ -175,8 +170,7 @@ impl<R: Read> Decoder<R> {
         }
     }
 
-    fn read_body(&mut self, len: u64) -> Result<(Vec<u8>, Charge)> {
-        let charge = self.budget.alloc(len)?;
+    fn read_body(&mut self, len: u64) -> Result<Vec<u8>> {
         // the data arrives before the buffer grows: a lying length on a
         // short stream allocates nothing
         let mut body = Vec::new();
@@ -184,20 +178,20 @@ impl<R: Read> Decoder<R> {
         if body.len() as u64 != len {
             return bad("incomplete file");
         }
-        Ok((body, charge))
+        Ok(body)
     }
 
-    fn read_segment(&mut self) -> Result<(SegmentHeader, Vec<u8>, Charge)> {
+    fn read_segment(&mut self) -> Result<(SegmentHeader, Vec<u8>)> {
         // the stream may end here, short of the demo: `decode_batch` delivers the
         // complete segments before it first
         let Some(coded) = self.read_len()? else {
             return bad("incomplete file");
         };
         check_coded_len(coded)?;
-        let (body, charge) = self.read_body(coded + SEGMENT_FIELDS_LEN as u64)?;
+        let body = self.read_body(coded + SEGMENT_FIELDS_LEN as u64)?;
         let header = parse_segment_header(&body[..SEGMENT_FIELDS_LEN])?;
         self.layout.add_segment(&header)?;
-        Ok((header, body, charge))
+        Ok((header, body))
     }
 
     /// ponytail: reading and decoding take turns and a batch waits for its
@@ -214,20 +208,16 @@ impl<R: Read> Decoder<R> {
                 Err(error) => return Err(error),
             }
         }
-        let (layout, budget) = (&self.layout, &self.budget);
-        let decoded = par_map(self.threads, &segments, |(header, body, _)| {
-            let charge = budget.alloc(u64::from(header.raw_len))?;
+        let layout = &self.layout;
+        let decoded = par_map(self.threads, &segments, |(header, body)| {
             let mut bytes = try_zeroed(header.raw_len as usize)?;
-            let scan = decode_segment(layout, body, header, &mut bytes, budget)?;
-            Ok((bytes, charge, scan))
+            let scan = decode_segment(layout, body, header, &mut bytes)?;
+            Ok((bytes, scan))
         });
         for result in decoded {
-            let checked = result.and_then(|(bytes, charge, scan)| {
+            let checked = result.and_then(|(bytes, scan)| {
                 self.check.segment(&bytes, scan)?;
-                Ok(DecodedSegment {
-                    bytes,
-                    _charge: charge,
-                })
+                Ok(bytes)
             });
             match checked {
                 Ok(segment) => self.ready.push_back(segment),
@@ -267,9 +257,7 @@ fn decode_segment(
     body: &[u8],
     header: &SegmentHeader,
     dst: &mut [u8],
-    budget: &Budget,
 ) -> Result<FrameScan> {
-    let models_block = layout.models_block.as_ref();
     if dst.len() as u64 != u64::from(header.raw_len) {
         return bad("segment length");
     }
@@ -277,7 +265,7 @@ fn decode_segment(
         .get(SEGMENT_FIELDS_LEN..)
         .ok_or(Error::Corrupt("segment header"))?;
     let transform_header = segment::parse_transform_header(coded, dst.len())?;
-    segment::decode(coded, &transform_header, dst, models_block, budget)?;
+    segment::decode(coded, &transform_header, dst, layout.models.as_ref())?;
     if crc32fast::hash(dst) != header.crc32 {
         return bad("segment checksum");
     }
@@ -324,13 +312,15 @@ impl DemoCheck {
 
 pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result<Vec<u8>> {
     let mut decoder = Decoder::with_max_memory(file, threads, max_memory)?;
-    let mut demo_charge = Charge::none(&decoder.budget);
     let mut demo = Vec::new();
     while let Some(segment) = decoder.next_segment()? {
-        demo_charge.grow(segment.bytes.len() as u64)?;
-        demo.try_reserve(segment.bytes.len())
+        // the bytes decoded, not the header's size: a lying header allocates nothing
+        if (demo.len() + segment.len()) as u64 > max_memory {
+            return Err(Error::MemoryLimit("demo size"));
+        }
+        demo.try_reserve(segment.len())
             .map_err(|_| Error::MemoryLimit("out of memory"))?;
-        demo.extend_from_slice(&segment.bytes);
+        demo.extend_from_slice(&segment);
     }
     Ok(demo)
 }

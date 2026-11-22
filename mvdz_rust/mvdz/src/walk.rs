@@ -1,7 +1,6 @@
 //! The structural walker, one routine both ways. Numeric fields are only reserved and
 //! listed in [`Records`]; `numeric.rs` fills them in after the walk.
 
-use crate::budget::Charge;
 use crate::fields::{read_u16, read_u32, read_usize};
 use crate::proto::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
@@ -19,8 +18,7 @@ use crate::streams::{
     CMD, ESCLEN, FRAGS, GEN_BASE, HIDDMG, HIDLEN, HIDMISC, HIDTAG, HIDTYPE, MASK, NAILS, PE_A,
     PE_BITS, PE_ENT, PE_FRAME, PE_HDR, PE_MISC, PE_MODEL, PE_MORE, PI_EFF, PI_FLAGS, PI_FRAME,
     PI_MODEL, PI_NUM, PI_SKIN, PI_WFRAME, PING, PR_LEVEL, RAW, SET, SND_CH, SND_MISC, SND_NUM,
-    SNDF, ST_IDX, ST_VAL, STL_IDX, STL_VAL, STREAM_COUNT, TAIL, TE_MISC, TE_TYPE, TEF, TEXT, TIME,
-    TYPE, UC, UC_MIN_SYMBOLS,
+    SNDF, ST_IDX, ST_VAL, STL_IDX, STL_VAL, TAIL, TE_MISC, TE_TYPE, TEF, TEXT, TIME, TYPE, UC,
 };
 
 pub(crate) const NO_OFFSET: u32 = u32::MAX;
@@ -101,70 +99,23 @@ pub(crate) struct UsercmdRecord {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RecordList<T> {
-    records: Vec<T>,
-    capacity: usize,
-}
-
-impl<T> RecordList<T> {
-    fn fixed(capacity: usize, charge: &mut Charge) -> crate::error::Result<Self> {
-        charge.grow((capacity * std::mem::size_of::<T>()) as u64)?;
-        Ok(Self {
-            records: crate::budget::try_with_capacity(capacity)?,
-            capacity,
-        })
-    }
-    fn growable(reserve: usize) -> Self {
-        Self {
-            records: Vec::with_capacity(reserve),
-            capacity: usize::MAX,
-        }
-    }
-    #[inline(always)]
-    pub(crate) fn push(&mut self, record: T) -> bool {
-        if self.records.len() == self.capacity {
-            return false;
-        }
-        self.records.push(record);
-        true
-    }
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
-        self.records.iter()
-    }
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct Records {
-    pub(crate) player_infos: RecordList<PlayerInfoRecord>,
-    pub(crate) packet_entities: RecordList<PacketEntityRecord>,
-    pub(crate) sounds: RecordList<SoundRecord>,
-    pub(crate) temp_entities: RecordList<TempEntityRecord>,
-    pub(crate) usercmds: RecordList<UsercmdRecord>,
+    pub(crate) player_infos: Vec<PlayerInfoRecord>,
+    pub(crate) packet_entities: Vec<PacketEntityRecord>,
+    pub(crate) sounds: Vec<SoundRecord>,
+    pub(crate) temp_entities: Vec<TempEntityRecord>,
+    pub(crate) usercmds: Vec<UsercmdRecord>,
 }
 
 impl Records {
-    pub(crate) fn growable(len: usize) -> Self {
+    pub(crate) fn for_segment(len: usize) -> Self {
         Self {
-            player_infos: RecordList::growable(len / 18),
-            packet_entities: RecordList::growable(len / 32),
-            sounds: RecordList::growable(len / 400),
-            temp_entities: RecordList::growable(len / 400),
-            usercmds: RecordList::growable(0),
+            player_infos: Vec::with_capacity(len / 18),
+            packet_entities: Vec::with_capacity(len / 32),
+            sounds: Vec::with_capacity(len / 400),
+            temp_entities: Vec::with_capacity(len / 400),
+            usercmds: Vec::new(),
         }
-    }
-    /// Sized by the symbol counts of the streams that hold one symbol per record, and charged
-    /// to `charge`.
-    pub(crate) fn fixed(
-        stream_counts: &[usize; STREAM_COUNT],
-        charge: &mut Charge,
-    ) -> crate::error::Result<Self> {
-        Ok(Self {
-            player_infos: RecordList::fixed(stream_counts[PI_NUM], charge)?,
-            packet_entities: RecordList::fixed(stream_counts[PE_BITS], charge)?,
-            sounds: RecordList::fixed(stream_counts[SND_NUM], charge)?,
-            temp_entities: RecordList::fixed(stream_counts[TE_TYPE], charge)?,
-            usercmds: RecordList::fixed(stream_counts[UC] / UC_MIN_SYMBOLS, charge)?,
-        })
     }
 }
 
@@ -780,7 +731,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         let origin_count = (flags & ORIGIN_FLAGS).count_ones() as usize;
         let angle_count = (flags & ANGLE_FLAGS).count_ones() as usize;
         let offset = self.reserve(origin_count * coord_width + angle_count * 2);
-        self.has_error |= !self.records.player_infos.push(PlayerInfoRecord {
+        self.records.player_infos.push(PlayerInfoRecord {
             offset,
             time: self.time,
             flags,
@@ -1009,7 +960,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 }
             }
         }
-        self.has_error |= !self.records.packet_entities.push(record);
+        self.records.packet_entities.push(record);
         if more & U_FTE_TRANS != 0 && self.proto.fte & FTE_PEXT_TRANS != 0 {
             self.blob_byte(PE_MISC);
         }
@@ -1048,7 +999,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             ([NO_OFFSET; 3], 0)
         };
         let offset = self.reserve(6);
-        self.has_error |= !self.records.sounds.push(SoundRecord {
+        self.records.sounds.push(SoundRecord {
             offset,
             refs,
             kind,
@@ -1090,8 +1041,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             _ => ([NO_OFFSET; 3], 6),
         };
         let offset = self.reserve(len);
-        self.has_error |= !self
-            .records
+        self.records
             .temp_entities
             .push(TempEntityRecord { offset, refs, kind });
     }
@@ -1185,7 +1135,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
         }
         if grid != 0 {
-            self.has_error |= !self.records.usercmds.push(UsercmdRecord {
+            self.records.usercmds.push(UsercmdRecord {
                 pitch_offset: offset,
                 number: player,
                 grid_axes: grid,

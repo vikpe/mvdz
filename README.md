@@ -165,7 +165,8 @@ early (`mvdz info *.mvdz | head`), the tool stops quietly.
   and the demo's size and duration, checked on every decode.
 
 Files from elsewhere are untrusted input: decoders bound their memory
-(1 GiB on 64-bit targets, 256 MiB on 32-bit ones such as wasm32), and the
+(a few segments at a time when streaming; whole-file decoding refuses a
+demo of more than 1 GiB), and the
 format bounds their work by the input's size; demos can carry console commands (`svc_stufftext`) that players
 must filter.
 

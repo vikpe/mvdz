@@ -1,7 +1,6 @@
 //! The MVDZ container (FORMAT.md section 2) and the layout rules every reader applies.
 
-use crate::budget::{Budget, Charge};
-use crate::coder::rans::ModelsBlock;
+use crate::coder::rans::Models;
 use crate::error::{Error, Result, bad};
 use crate::fields::{put_u32, put_usize, read_array, read_u32, read_u64};
 
@@ -137,22 +136,20 @@ pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
 #[derive(Debug)]
 pub(crate) struct Layout {
     pub(crate) header: Header,
-    pub(crate) models_block: Option<ModelsBlock>,
+    pub(crate) models: Option<Models>,
     has_models: bool,
     raw_len: u64,
     duration_ms: u64,
-    charge: Charge,
 }
 
 impl Layout {
-    pub(crate) fn new(header: &[u8], budget: &Budget) -> Result<Self> {
+    pub(crate) fn new(header: &[u8]) -> Result<Self> {
         Ok(Self {
             header: parse_header(header)?,
-            models_block: None,
+            models: None,
             has_models: false,
             raw_len: 0,
             duration_ms: 0,
-            charge: Charge::none(budget),
         })
     }
 
@@ -160,13 +157,10 @@ impl Layout {
         self.has_models
     }
 
-    pub(crate) fn models(&mut self, models_block: Option<ModelsBlock>) -> Result<()> {
-        if let Some(models_block) = &models_block {
-            self.charge.grow(models_block.len())?;
-        }
-        self.models_block = models_block;
+    /// `None` for a file without models.
+    pub(crate) fn set_models(&mut self, models: Option<Models>) {
+        self.models = models;
         self.has_models = true;
-        Ok(())
     }
 
     pub(crate) fn add_segment(&mut self, header: &SegmentHeader) -> Result<()> {

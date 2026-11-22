@@ -2,12 +2,13 @@
 //! Giesen, "Interleaved entropy coders" (2014); written fresh.
 
 use super::rc::{IntModel, RangeDecoder, RangeEncoder};
-use crate::budget::{Budget, Charge, try_with_capacity};
 use crate::error::{Error, Result};
 use crate::fields::{put_usize, read_length_prefixed, read_usize};
+use crate::memory::try_with_capacity;
 use crate::numeric::{NumericContext, bucket, numeric_context};
 use crate::parallel::par_map;
 use crate::streams::{STREAM_COUNT, is_lazy, is_numeric};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const SCALE: u32 = 12;
 const FREQ_TOTAL: u32 = 1 << SCALE;
@@ -472,7 +473,6 @@ pub(crate) struct DecoderModel {
     chunks: usize,
     pool: Vec<u16>,
     luts: Vec<u32>,
-    _charge: Option<Charge>,
 }
 
 /// ponytail: about 6 % slower decode than the SSE2 search it replaced, which needs
@@ -490,15 +490,11 @@ fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
     counts.iter().map(|&count| usize::from(count)).sum()
 }
 
-/// Own contexts, quantized counts of every table (the fallback first), budget charge.
-type ModelHeader = (Vec<u32>, Vec<u8>, Charge);
+/// Own contexts, quantized counts of every table (the fallback first).
+type ModelHeader = (Vec<u32>, Vec<u8>);
 
 /// FORMAT.md section 6.4.
-fn read_model_header(
-    header: &[u8],
-    required_alphabet_size: usize,
-    budget: &Budget,
-) -> Result<ModelHeader> {
+fn read_model_header(header: &[u8], required_alphabet_size: usize) -> Result<ModelHeader> {
     let corrupt = Error::Corrupt("model");
     let max_decisions = (header.len() as u64)
         .saturating_mul(DECISIONS_PER_BYTE)
@@ -511,7 +507,6 @@ fn read_model_header(
         return Err(corrupt);
     }
     // the quantized tables (u8: quantized <= 160) until the layout is known
-    let charge = budget.alloc(((own_count + 1) * alphabet_size + 4 * (own_count + 1)) as u64)?;
     let mut quantized_tables: Vec<u8> = try_with_capacity((own_count + 1) * alphabet_size)?;
     let mut keys: Vec<u32> = try_with_capacity(own_count)?;
     let fallback = read_table(&mut decoder, &mut int_model, alphabet_size, None);
@@ -540,15 +535,42 @@ fn read_model_header(
     if decoder.pos() != header.len() || decoder.decisions > max_decisions {
         return Err(corrupt);
     }
-    Ok((keys, quantized_tables, charge))
+    Ok((keys, quantized_tables))
 }
 
-pub(crate) fn read_model(
+/// The decoder tables of a file's models, against the reader's memory limit.
+#[derive(Debug)]
+struct TableMemory {
+    used: AtomicU64,
+    max: u64,
+}
+
+impl TableMemory {
+    fn new(max: u64) -> Self {
+        Self {
+            used: AtomicU64::new(0),
+            max,
+        }
+    }
+
+    fn reserve(&self, len: u64) -> Result<()> {
+        let used = self
+            .used
+            .fetch_add(len, Ordering::Relaxed)
+            .saturating_add(len);
+        if used > self.max {
+            return Err(Error::MemoryLimit("models"));
+        }
+        Ok(())
+    }
+}
+
+fn read_model(
     header: &[u8],
     alphabet_size: usize,
-    budget: &Budget,
+    table_memory: &TableMemory,
 ) -> Result<DecoderModel> {
-    let (keys, quantized_tables, _charge) = read_model_header(header, alphabet_size, budget)?;
+    let (keys, quantized_tables) = read_model_header(header, alphabet_size)?;
     // present (frequency >= 1) exactly when the quantized count is non-zero (`normalize`):
     // the layout is known before any table is built
     let present = |quantized: &[u8]| quantized.iter().filter(|&&count| count > 0).count();
@@ -570,14 +592,13 @@ pub(crate) fn read_model(
         }
     }
     let map_len = keys.last().map_or(0, |&context| context as usize + 1);
-    let charge = budget.alloc((pool_len * 2 + lut_len * 4 + map_len * 4) as u64)?;
+    table_memory.reserve((pool_len * 2 + lut_len * 4 + map_len * 4) as u64)?;
     let mut model = DecoderModel {
         map: try_with_capacity(map_len)?,
         fallback: ENTRY_EMPTY,
         chunks,
         pool: try_with_capacity(pool_len)?,
         luts: try_with_capacity(lut_len)?,
-        _charge: Some(charge),
     };
     let mut entries = try_with_capacity(keys.len() + 1)?;
     for quantized in quantized_tables.chunks(alphabet_size) {
@@ -614,7 +635,6 @@ static EMPTY_MODEL: DecoderModel = DecoderModel {
     chunks: 1,
     pool: Vec::new(),
     luts: Vec::new(),
-    _charge: None,
 };
 
 impl DecoderModel {
@@ -853,32 +873,13 @@ pub(crate) struct FileModel {
 /// By stream id.
 pub(crate) type Models = Vec<Option<DecoderModel>>;
 
-#[derive(Debug)]
-pub(crate) struct ModelsBlock {
-    len: u64,
-    models: Models,
-}
-
-impl ModelsBlock {
-    pub(crate) fn new(body: &[u8], threads: usize, budget: &Budget) -> Result<Self> {
-        Ok(Self {
-            len: body.len() as u64,
-            models: read_models_block(body, threads, budget)?,
-        })
-    }
-
-    pub(crate) fn len(&self) -> u64 {
-        self.len
-    }
-
-    pub(crate) fn models(&self) -> &Models {
-        &self.models
-    }
-}
-
 /// `n u32 | n x { id u32 | len u32 | model }`, ids strictly increasing. The models are
 /// independent, so they are built in parallel.
-fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Models> {
+///
+/// # Errors
+///
+/// [`Error::MemoryLimit`] when their decoder tables take more than `max_memory` bytes.
+pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) -> Result<Models> {
     let corrupt = Error::Corrupt("tables");
     let mut rest = body;
     let count = read_usize(&mut rest).ok_or(corrupt)?;
@@ -907,8 +908,9 @@ fn read_models_block(body: &[u8], threads: usize, budget: &Budget) -> Result<Mod
     if !rest.is_empty() {
         return Err(corrupt);
     }
+    let table_memory = TableMemory::new(max_memory);
     let built = par_map(threads, &entries, |&(_, alphabet_size, header)| {
-        read_model(header, alphabet_size, budget)
+        read_model(header, alphabet_size, &table_memory)
     });
     let mut models: Models = Vec::from_fn(STREAM_COUNT, |_| None);
     for (entry, model) in entries.iter().zip(built) {
@@ -1192,7 +1194,11 @@ mod tests {
         let mut tally = Tally::new(alphabet_size);
         tally.add(symbols, contexts);
         let file_model = tally.file_model().context("a model")?;
-        let model = read_model(&file_model.bytes, alphabet_size, &Budget::new(u64::MAX))?;
+        let model = read_model(
+            &file_model.bytes,
+            alphabet_size,
+            &TableMemory::new(u64::MAX),
+        )?;
         Ok((file_model, model))
     }
 
@@ -1231,7 +1237,14 @@ mod tests {
         }
         assert!(decoder.is_done());
         // the model of a byte stream is refused as a numeric stream's
-        assert!(read_model(&file_model.bytes, NUMERIC_ALPHABET, &Budget::new(u64::MAX)).is_err());
+        assert!(
+            read_model(
+                &file_model.bytes,
+                NUMERIC_ALPHABET,
+                &TableMemory::new(u64::MAX)
+            )
+            .is_err()
+        );
         // a body cut short is refused; a symbol short does not finish
         assert!(ByteDecoder::new(&body[..body.len() - 2], symbols.len(), &model).is_err());
         let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;

@@ -1,7 +1,7 @@
 //! Raw DEFLATE (RFC 1951): no wrapper, no preset dictionary, nothing after the final block.
 
-use crate::budget::try_zeroed;
 use crate::error::{Error, Result};
+use crate::memory::try_zeroed;
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::core::{DecompressorOxide, decompress as inflate, inflate_flags};
 
@@ -10,7 +10,6 @@ pub(crate) fn compress(bytes: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec(bytes, LEVEL)
 }
 
-/// The caller has charged `len` bytes to its budget.
 pub(crate) fn decompress(bytes: &[u8], len: usize) -> Result<Vec<u8>> {
     let mut out = try_zeroed(len)?;
     // one call: with the whole output at hand the DEFLATE stream either ends or does not fit

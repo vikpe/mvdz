@@ -37,9 +37,6 @@ pub(crate) const PR_LEVEL: usize = 32;
 pub(crate) const FRAGS: usize = 33;
 /// usercmd blocks: every field but the angles on the grid
 pub(crate) const UC: usize = 34;
-/// Player, dropnum, msec, grid, three 2-byte moves, buttons, impulse. Bounds the usercmd
-/// record list (FORMAT.md section 4.3).
-pub(crate) const UC_MIN_SYMBOLS: usize = 12;
 pub(crate) const LAZY_STREAM_COUNT: usize = 35;
 
 pub(crate) const PI_OX: usize = 48;

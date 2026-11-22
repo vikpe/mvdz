@@ -240,7 +240,7 @@ impl Group {
             }),
             Self::EntityOrigin(axis) => {
                 let mut tracks = vec![Track::default(); 2048];
-                for record in records.packet_entities.iter() {
+                for record in &records.packet_entities {
                     pe_origin_step::<IS_ENCODE, IO>(
                         axis as usize,
                         &mut tracks[(record.number & 2047) as usize],
@@ -368,7 +368,7 @@ fn player_steps<IO: NumericIo>(
 ) {
     let mut tracks = vec![Track::default(); 256];
     let mut frame_times = vec![(0u32, 0u32); 256];
-    for record in records.player_infos.iter() {
+    for record in &records.player_infos {
         let deltas = time_deltas(&mut frame_times[record.number as usize], record.time);
         step(&mut tracks[record.number as usize], record, deltas, io);
     }
@@ -499,7 +499,7 @@ fn pe_origin_step<const IS_ENCODE: bool, IO: NumericIo>(
 /// FORMAT.md section 5.6: per player and axis, linear prediction from the last two grid values.
 fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
     let mut tracks = vec![[Track::default(); 3]; 256];
-    for record in records.usercmds.iter() {
+    for record in &records.usercmds {
         let player_tracks = &mut tracks[record.number as usize];
         for (axis, track) in player_tracks.iter_mut().enumerate() {
             if record.grid_axes & (1 << axis) == 0 {
@@ -548,7 +548,7 @@ fn read_reference(bytes: &[u8], reference: u32) -> u16 {
 }
 
 fn sound_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
-    for record in records.sounds.iter() {
+    for record in &records.sounds {
         for axis in 0..3u32 {
             let prediction = read_reference(io.segment(), record.refs[axis as usize]);
             let context = NumericContext {
@@ -561,7 +561,7 @@ fn sound_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &m
 
 fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &mut IO) {
     let mut last = [0u16; 3];
-    for record in records.temp_entities.iter() {
+    for record in &records.temp_entities {
         if matches!(
             record.kind,
             TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3

@@ -348,7 +348,7 @@ fn first_failing_segment(file: &[u8], segments: &[&[u8]], threads: usize) -> Res
     for (index, &raw) in segments.iter().enumerate() {
         let is_decoded = decoder
             .next_segment()
-            .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded.bytes == raw));
+            .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded == raw));
         if !is_decoded {
             return Ok(Some(index));
         }

@@ -1,8 +1,6 @@
 //! Transform-coded segments: the structural walk, the numeric groups and the stream bodies
 //! (FORMAT.md section 3).
 
-use crate::budget::Budget;
-use crate::coder::rans::ModelsBlock;
 use crate::coder::{self, rans};
 use crate::error::{Error, Result, bad};
 use crate::fields::{put_usize, read_bytes, read_u32, read_usize};
@@ -212,7 +210,7 @@ impl Walked {
 
 /// `None`: the transform cannot represent the segment.
 pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
-    let mut records = Records::growable(src.len());
+    let mut records = Records::for_segment(src.len());
     let (io, tail, end_proto, has_error) = {
         let mut walker = Walker::encoder(src, &mut records, EncodeIo::new(), proto);
         let tail = walker.run(0);
@@ -235,7 +233,7 @@ pub(crate) fn walk(src: &[u8], proto: Proto) -> Option<(Walked, Proto)> {
 pub(crate) fn walk_tail(src: &[u8], proto: Proto) -> Walked {
     let mut io = EncodeIo::new();
     io.blobs[TAIL] = src.to_vec();
-    let records = Records::growable(0);
+    let records = Records::for_segment(0);
     Walked {
         io,
         records,
@@ -506,8 +504,6 @@ pub(crate) struct TransformHeader {
     proto: Proto,
     tail: usize,
     entries: Vec<StreamEntry>,
-    /// By stream id; 0 for a stream not in the table.
-    counts: [usize; STREAM_COUNT],
     /// The blob body, as stored and decompressed.
     blob_len: usize,
     blob_total: usize,
@@ -531,7 +527,6 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     }
     let table_error = Error::Corrupt("stream table");
     let mut entries = Vec::with_capacity(stream_count);
-    let mut counts = [0usize; STREAM_COUNT];
     let mut was_seen = [false; STREAM_COUNT];
     let mut total = 0usize;
     let mut blob_total = 0usize;
@@ -558,9 +553,12 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
         if count > raw_len.saturating_add(16) {
             return bad("stream count");
         }
-        counts[id] = count;
         total = total.checked_add(len).ok_or(table_error)?;
         entries.push(StreamEntry { id, count, len });
+    }
+    // implied by the walk (FORMAT.md section 7): refused here, before the blob bytes are allocated
+    if blob_total > raw_len.saturating_mul(2) {
+        return bad("blob streams");
     }
     let blob_len = read_usize(&mut rest).ok_or(table_error)?;
     if (blob_total == 0) != (blob_len == 0) {
@@ -574,7 +572,6 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
         proto: Proto::new(fte, fte2, mvd1),
         tail,
         entries,
-        counts,
         blob_len,
         blob_total,
         body_offset: body.len() - rest.len(),
@@ -586,10 +583,8 @@ pub(crate) fn decode(
     body: &[u8],
     transform_header: &TransformHeader,
     dst: &mut [u8],
-    models_block: Option<&ModelsBlock>,
-    budget: &Budget,
+    file_models: Option<&rans::Models>,
 ) -> Result<()> {
-    let file_models = models_block.map(ModelsBlock::models);
     let mut rest = body
         .get(transform_header.body_offset..)
         .ok_or(Error::Corrupt("stream body"))?;
@@ -605,8 +600,7 @@ pub(crate) fn decode(
     }
     let blob_body =
         read_bytes(&mut rest, transform_header.blob_len).ok_or(Error::Corrupt("stream body"))?;
-    let mut charge = budget.alloc(transform_header.blob_total as u64)?;
-    let mut records = Records::fixed(&transform_header.counts, &mut charge)?;
+    let mut records = Records::for_segment(dst.len());
     let blob_bytes = if transform_header.blob_total > 0 {
         crate::deflate::decompress(blob_body, transform_header.blob_total)?
     } else {
@@ -645,8 +639,7 @@ pub(crate) fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::budget::Budget;
-    use crate::streams::{UC, UC_A, UC_MIN_SYMBOLS};
+    use crate::streams::{UC, UC_A};
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
@@ -660,31 +653,24 @@ mod tests {
         body: &[u8],
         transform_header: &TransformHeader,
         len: usize,
-        models_block: Option<&ModelsBlock>,
+        file_models: Option<&rans::Models>,
     ) -> anyhow::Result<Vec<u8>> {
         let mut dst = vec![0u8; len];
-        decode(
-            body,
-            transform_header,
-            &mut dst,
-            models_block,
-            &Budget::new(u64::MAX),
-        )?;
+        decode(body, transform_header, &mut dst, file_models)?;
         Ok(dst)
     }
 
-    fn coded(src: &[u8]) -> anyhow::Result<(Vec<u8>, ModelsBlock)> {
+    fn coded(src: &[u8]) -> anyhow::Result<(Vec<u8>, rans::Models)> {
         let (walked, _) = walk(src, Proto::default()).context("the demo walks")?;
         let numerics = numerics(src, &walked);
         let models = build_models(&[(&walked, &numerics)]);
         let ids: Vec<usize> = (0..models.len())
             .filter(|&stream| models[stream].is_some())
             .collect();
-        let models_block =
-            ModelsBlock::new(&models_body(&models, &ids), 1, &Budget::new(u64::MAX))?;
+        let file_models = rans::read_models_block(&models_body(&models, &ids), 1, u64::MAX)?;
         let body =
             encode(&walked, &numerics, &mut Vec::new(), &models).context("a transform body")?;
-        Ok((body, models_block))
+        Ok((body, file_models))
     }
 
     fn demo() -> Vec<u8> {
@@ -715,9 +701,9 @@ mod tests {
     #[test]
     fn segment_round_trip() -> anyhow::Result<()> {
         let src = demo();
-        let (body, models_block) = coded(&src)?;
+        let (body, file_models) = coded(&src)?;
         let transform_header = parse_transform_header(&body, src.len())?;
-        let dst = decoded(&body, &transform_header, src.len(), Some(&models_block))?;
+        let dst = decoded(&body, &transform_header, src.len(), Some(&file_models))?;
         assert!(dst == src);
         Ok(())
     }
@@ -725,6 +711,8 @@ mod tests {
     /// `UC_A` only where a segment has one.
     #[test]
     fn usercmd_round_trip() -> anyhow::Result<()> {
+        // FORMAT.md section 4.3: player, dropnum, msec, grid, three 2-byte moves, buttons, impulse
+        const USERCMD_MIN_SYMBOLS: usize = 12;
         let mut src = demo();
         let odd = [-0.0f32, f32::NAN, 180.0, -180.0, 1.2345, 359.99];
         for frame in 0..300u32 {
@@ -760,7 +748,7 @@ mod tests {
             src.extend_from_slice(&payload);
         }
         src.extend(demo());
-        let (body, models_block) = coded(&src)?;
+        let (body, file_models) = coded(&src)?;
         let transform_header = parse_transform_header(&body, src.len())?;
         let uc_count = transform_header
             .entries
@@ -768,8 +756,8 @@ mod tests {
             .find(|entry| entry.id == UC)
             .context("a uc stream")?
             .count;
-        assert!(uc_count >= (300 + 9) * UC_MIN_SYMBOLS, "{uc_count}");
-        let dst = decoded(&body, &transform_header, src.len(), Some(&models_block))?;
+        assert!(uc_count >= (300 + 9) * USERCMD_MIN_SYMBOLS, "{uc_count}");
+        let dst = decoded(&body, &transform_header, src.len(), Some(&file_models))?;
         assert!(dst == src);
         // without usercmd blocks neither stream is in the table
         let plain = demo();
@@ -782,6 +770,32 @@ mod tests {
                 .all(|entry| entry.id != UC && entry.id != UC_A)
         );
         Ok(())
+    }
+
+    #[test]
+    fn blob_streams_over_twice_the_segment_are_refused() {
+        use crate::streams::SET;
+        let raw_len = 100;
+        // fte, fte2, mvd1, tail, the stream count; then (id, count) per blob stream and the
+        // length of the blob body
+        let header = |blob_streams: &[(usize, usize)]| {
+            let mut body = Vec::new();
+            for field in [0, 0, 0, 0, blob_streams.len()] {
+                put_usize(&mut body, field);
+            }
+            for &(id, count) in blob_streams {
+                put_usize(&mut body, id);
+                put_usize(&mut body, count);
+            }
+            put_usize(&mut body, 1);
+            body.push(0);
+            parse_transform_header(&body, raw_len).map(|_| ())
+        };
+        assert_eq!(header(&[(RAW, raw_len), (TAIL, raw_len)]), Ok(()));
+        assert_eq!(
+            header(&[(RAW, raw_len), (TAIL, raw_len), (SET, 1)]),
+            Err(Error::Corrupt("blob streams"))
+        );
     }
 
     /// Over the limit, the largest headers go first; their segments are not transform-coded.

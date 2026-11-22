@@ -1443,10 +1443,15 @@ Each hostile vector breaks one rule only.
 With these, every size a decoder allocates is bounded by the bytes present: a segment
 yields at most 2^20 bytes and takes at least its 16 header bytes of the file, and a
 model at most 34 (one per modelled stream) is read once per file, its work bounded by
-M2. A decoder may cap its memory on top (the reference: 1 GiB on 64-bit targets,
-256 MiB on 32-bit ones; `budget.rs:DEFAULT_MAX_MEMORY`) and refuse a file that needs
-more with `MemoryLimit`. The reference charges to that cap the models, each segment's
-decode scratch (record lists, blob bytes) and the output it holds. A decoder must never
+M2. The blob streams of a segment that decodes hold at most `2 x raw_len` bytes: each is
+a byte of the output, except the `ESCLEN` and `HIDTAG` bytes (section 4), at most 5 for
+every 6 bytes of output. A decoder may so refuse a stream table whose blob counts sum to
+more before it allocates them, as the reference does.
+
+A decoder may cap its memory on top and refuse a file that needs more with `MemoryLimit`.
+The reference (`memory.rs:DEFAULT_MAX_MEMORY`) refuses models whose decoder tables take
+more than 1 GiB, and whole-file decoding refuses a demo of more than 1 GiB; in-order
+streaming holds a few segments at a time whatever the demo's size. A decoder must never
 abort the process on a declared size.
 
 **Not checked.** The header's SHA-256 (section 10): no reader recomputes it. The `fte2` field
