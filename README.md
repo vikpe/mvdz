@@ -86,14 +86,14 @@ are in [BENCHMARKS.md](BENCHMARKS.md).
 | format | size / raw | decode, 1 process |
 |---|---|---|
 | mvdz, `-j 1` | 0.194 [0.191-0.197] | 81 MB/s |
-| mvdz, `-j 4` | 0.194 | 211 MB/s |
-| gzip -9 | 0.566 | 144 MB/s |
+| mvdz, `-j 4` | 0.194 | 222 MB/s |
+| gzip -9 | 0.566 | 143 MB/s |
 | xz -9e | 0.429 | 38 MB/s |
-| zstd -19 | 0.508 | 406 MB/s |
+| zstd -19 | 0.508 | 403 MB/s |
 
 The decode speeds of the last three rows are for `gzip -9`, `xz -9` and
 `zstd -19` files of the 8 demos. The archive's own gzip files are 0.593 of
-raw; the whole archive would take about 23.6 GB as mvdz.
+raw; the whole archive would take about 23.5 GB as mvdz.
 
 MB = 10^6 bytes of raw demo. Recent demos compress better: about 0.18 for
 2023-24 and 0.16 for 2025-26, against 0.24 to 0.26 before 2021. Current
@@ -101,8 +101,8 @@ mvdsv records a snapshot every server frame (`sv_demofps 77`; about 62 a
 second in practice) where older demos mostly hold 20-27; the smaller time
 step makes each snapshot easier to predict. Every decode checks the CRC-32
 of each segment and of the whole demo; it does not recompute the SHA-256
-(see Hashes and trust). Compression runs at about 30 MB/s on one thread
-and 73 MB/s with `-j 4`, including a check that the output decodes to the
+(see Hashes and trust). Compression runs at about 28 MB/s on one thread
+and 71 MB/s with `-j 4`, including a check that the output decodes to the
 input.
 
 ## Command line

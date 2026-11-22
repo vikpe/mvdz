@@ -12,9 +12,9 @@ on how well it compresses.
 An Intel Core i5-12400F (6 cores, 12 threads; AVX2 and SHA extensions), 62 GB of
 memory, Linux 6.8, Rust 1.100, `cargo build --release` (glibc, system allocator,
 portable `x86-64`). Speeds ran pinned to four physical cores (`taskset -c 0,2,4,6`)
-with an editor using about one core in the background; master and this version ran
-in rotated order in every round, so background load falls on both alike. Figures are
-the median over rounds, with [min-max].
+with an editor using about one core in the background. The rc.4 figures are from an
+earlier session on the same machine. Figures are the median over rounds, with
+[min-max].
 
 ## Samples
 
@@ -43,16 +43,16 @@ demos:
 
 | format | size / raw | size / archive gzip |
 |---|---|---|
-| **mvdz** | **0.194** [0.191-0.197] | 0.328 |
+| **mvdz** | **0.194** [0.191-0.197] | 0.327 |
 | mvdz rc.4, `-s 256K` | 0.192 | |
 | archive gzip | 0.593 [0.581-0.603] | 1 |
 | gzip -9 | 0.566 [0.554-0.577] | 0.956 |
 | xz -9e | 0.429 [0.422-0.435] | 0.724 |
 | zstd -19 | 0.508 [0.498-0.517] | 0.858 |
 
-Projected onto the whole archive (72.0 GB as gzip): 23.6 GB. Unweighted, the 379
-demos (968,979,765 bytes raw) compress to 212,494,368 bytes (0.2193); the median demo
-to 0.244. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
+Projected onto the whole archive (72.0 GB as gzip): 23.5 GB. Unweighted, the 379
+demos (968,979,765 bytes raw) compress to 212,044,254 bytes (0.2188); the median demo
+to 0.243. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
 -9e.
 
 Against rc.4 at the same segment size: +1.1 % (the blob streams as LZ77 tokens coded
@@ -66,7 +66,7 @@ with rANS instead of zstd, fixed-width integers).
 | 2007-2010 | 95 | 0.239 [0.232-0.244] | 0.609 | 0.492 | 0.552 |
 | 2011-2020 | 49 | 0.252 [0.242-0.264] | 0.622 | 0.508 | 0.566 |
 | 2021-2022 | 19 | 0.180 [0.176-0.185] | 0.610 | 0.442 | 0.546 |
-| 2023-2024 | 43 | 0.181 [0.176-0.185] | 0.599 | 0.433 | 0.536 |
+| 2023-2024 | 43 | 0.180 [0.175-0.185] | 0.599 | 0.433 | 0.536 |
 | 2025-2026 | 45 | 0.156 [0.147-0.164] | 0.493 | 0.359 | 0.439 |
 
 (One undated demo is not listed.) Current mvdsv records a snapshot every server frame
@@ -81,26 +81,26 @@ once.
 
 | | rc.4 `-s 256K` | **this version** |
 |---|---|---|
-| size / raw (set8) | 0.2207 | 0.2218 |
-| compress, `-j 1` | 22.1 [21.3-22.5] | **29.5** [28.8-29.6] |
-| compress, `-j 4` | 41.1 [38.6-41.5] | **73.0** [66.1-73.8] |
-| decompress, `-j 1` | 72.1 [71.3-72.4] | **80.7** [78.4-81.6] |
-| decompress, `-j 4` | 142.1 [136.9-142.8] | **222.6** [178.4-224.0] |
+| size / raw (set8) | 0.2207 | 0.2225 |
+| compress, `-j 1` | 22.1 [21.3-22.5] | **28.1** [27.8-28.5] |
+| compress, `-j 4` | 41.1 [38.6-41.5] | **71.1** [70.2-71.4] |
+| decompress, `-j 1` | 72.1 [71.3-72.4] | **82.9** [82.2-83.8] |
+| decompress, `-j 4` | 142.1 [136.9-142.8] | **226.7** [225.8-227.3] |
 
-Compression is 1.3 times faster on one thread and 1.8 times on four (raw DEFLATE
-instead of zstd for the blob streams; segments encode in parallel). Decompression is
-1.1 times faster on one thread and 1.6 times on four (segments decode in parallel).
+Compression is 1.3 times faster on one thread and 1.7 times on four (segments encode
+in parallel). Decompression is 1.1 times faster on one thread and 1.6 times on four
+(segments decode in parallel).
 
 **Against general-purpose decompressors** (`scripts/bench_cli.sh`, same files, one
 process per file; "batch" = 4 processes in parallel, one thread each; 3 rounds):
 
 | format | size / raw | decode, 1 process | decode, batch of 4 |
 |---|---|---|---|
-| mvdz, `-j 1` | 0.222 | 80.5 [79.6-80.8] | 171.6 [170.4-173.8] |
-| mvdz, `-j 4` | 0.222 | 211.1 [200.8-219.1] | 251.9 [249.4-253.0] |
-| gzip -9 (`gzip -dc`) | 0.603 | 144.2 [138.2-146.0] | 310.2 [309.1-310.4] |
-| xz -9 (`xz -dc`) | 0.475 | 37.9 [37.8-38.2] | 80.8 [80.5-81.3] |
-| zstd -19 (`zstd -dc`) | 0.545 | 406.1 [397.5-408.0] | 773.3 [767.8-781.0] |
+| mvdz, `-j 1` | 0.223 | 80.9 [79.6-81.9] | 178.4 [168.3-179.8] |
+| mvdz, `-j 4` | 0.223 | 221.7 [214.2-221.7] | 256.8 [243.8-260.9] |
+| gzip -9 (`gzip -dc`) | 0.603 | 142.8 [142.7-143.3] | 307.9 [306.8-309.1] |
+| xz -9 (`xz -dc`) | 0.475 | 37.8 [37.7-38.0] | 80.2 [80.1-80.3] |
+| zstd -19 (`zstd -dc`) | 0.545 | 403.4 [402.8-404.7] | 750.2 [748.3-776.4] |
 
 ## Memory
 
@@ -109,9 +109,9 @@ this version:
 
 | demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
 |---|---|---|---|---|
-| 14.2 MB (sample40) | 93 -> **33** MiB | 102 -> **41** MiB | 23 -> **5.9** MiB | 24 -> **8.1** MiB |
-| 6.2 MB (set8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.2** MiB | 15 -> **7.4** MiB |
-| 2.0 MB (set8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.5** MiB | 8.8 -> **6.2** MiB |
+| 14.2 MB (sample40) | 93 -> **33** MiB | 102 -> **42** MiB | 23 -> **5.5** MiB | 24 -> **7.9** MiB |
+| 6.2 MB (set8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.1** MiB | 15 -> **7.3** MiB |
+| 2.0 MB (set8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.4** MiB | 8.8 -> **5.8** MiB |
 
 Decompression streams: its memory is a few segments (at most 1 MiB raw each) however
 large the demo; rc.4's grows with the demo. Compression holds the demo and its walked
@@ -123,7 +123,7 @@ segments: about 2.3 times the demo for a large one, 1.9 to 2.8 times less than r
   MB raw, compressed and decoded by both the whole-file decoder and the streaming
   `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
 * The Go encoder (`mvdz_go/`) writes the same bytes as the Rust one for all 387.
-* The test suite (`cargo nextest run`, 51 tests) with the set8 demos and the FTE float
+* The test suite (`cargo nextest run`, 54 tests) with the set8 demos and the FTE float
   demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
   `vectors/` are refused or decoded as `MANIFEST.tsv` records.
 * Fuzzing, one hour per target, no failure: Rust (`mvdz_rust/mvdz/fuzz/`) `decode`
