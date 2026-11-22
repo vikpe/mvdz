@@ -394,9 +394,6 @@ func (decoder *streamDecoder) symbol(context uint16) (uint8, bool) {
 	if len(table.symbols) == 0 {
 		return 0, false
 	}
-	if len(table.symbols) == 1 {
-		return table.symbols[0], true
-	}
 	slot := uint16(decoder.state & (frequencyTotal - 1))
 	index := 0
 	for table.cumulative[index+1] <= slot {
@@ -471,10 +468,6 @@ func encodeStream(model *streamModel, values []codedValue, isNumeric bool) ([]by
 		start, frequency, isPresent := table.find(symbol)
 		if !isPresent {
 			return nil, false
-		}
-		isSingleSymbol := len(table.symbols) == 1
-		if isSingleSymbol {
-			continue
 		}
 		if uint64(state) >= uint64(frequency)<<20 {
 			reversedWords = append(reversedWords, uint16(state))

@@ -897,9 +897,6 @@ reference runs them in `GROUPS` order after the walk (`segment.rs:decode`).
 * Every slot lies inside the segment's output: `reserve` checked it
   (section 4).
 
-The encoder's residual is `(v - pred) as i16 as i32` for a 16-bit field
-and `(v - pred) as i32` for a 32-bit field.
-
 ### 5.2 Prediction helpers (`numeric.rs:time_deltas`, `predict_time_scaled`; `math.rs:div_round`)
 
 ```
@@ -1037,8 +1034,7 @@ before_previous = previous; previous = last; last = v
 ```
 
 `grid_f32(g)` (`math.rs:grid_f32`) is the f32 `(g as i16) * 45/8192`,
-which is exact. The encoder's residual is `(g - pred) as i16 as i32` for
-the grid value `g` of the angle (`math.rs:on_grid`, section 4).
+which is exact.
 
 **Sounds, stream 26** (`numeric.rs:sound_origins`). For each sound record
 `s` (section 4: `offset`, `references[3]`, `kind`, `number`), for `i` in 0..3:
@@ -1153,7 +1149,7 @@ decode(context):
     if table is empty: error
     slot = x & 4095
     s = the symbol with cumulative[s] <= slot < cumulative[s + 1]
-    x = freq[s] * (x >> 12) + slot - cumulative[s]      // u32 wrapping
+    x = freq[s] * (x >> 12) + slot - cumulative[s]      // fits u32: freq[s] <= 4096
     if x < 2^16: x = (x << 16) | word()
     return s
 ```
@@ -1176,12 +1172,9 @@ v = (b is even) ? (m as i32).wrapping_neg() : m as i32                  // b = 0
 
 `bits` reads `extra` as an LSB-first bit stream (bit `k` of the stream is
 bit `k % 8` of byte `k / 8`); a bit past the end is an over-read
-(section 1). `get(n)` reads `n` bits,
-the first one read being bit 0 of the result; `get(0) = 0`. Buckets 63
-and 64 (n = 32) give `m` up to 2^32 - 1; `m` is reinterpreted as i32
-before the sign, and the negation wraps. The encoder's bucket is `2n - 1 +
-(v < 0)` with mantissa `|v|` without its leading 1, `n - 1` bits
-(`residual_bucket`, section 1).
+(section 1). `get(n)` reads `n` bits, the first one read being bit 0 of the
+result; `get(0) = 0`. Buckets 63 and 64 (n = 32) give `m` up to 2^32 - 1;
+`m` is reinterpreted as i32 before the sign, and the negation wraps.
 
 `numeric_context(stream, f)` (`rans.rs:numeric_context`), with `c(v, m) =
 min(v, m)`:
@@ -1477,6 +1470,10 @@ its blob parser (rule 10) on its own.
     * **Hidden payload** (section 4.11): tag 2 at the end of the payload; tag 0 (an escape
       of the rest) when fewer than 6 bytes remain or the block length is 0 or runs past
       the payload. The grid bits of a usercmd block are `math.rs:on_grid`.
+13. **Residuals** (section 5): `(v - pred) as i16 as i32` for a 16-bit field of value `v`,
+    `(v - pred) as i32` for a 32-bit field, and `(g - pred) as i16 as i32` for a usercmd
+    angle of grid value `g` (`math.rs:on_grid`). Appendix A has their buckets and
+    mantissa bits.
 
 ---------------------------------------------------------------------------
 
@@ -1495,17 +1492,12 @@ its blob parser (rule 10) on its own.
    back; sounds and temp entities then read the low 16 bits of that field as their
    prediction. `observe_server_data` takes effect within a payload: later commands of the
    same payload use the new coordinate width.
-4. **Temp entity references** use a player's origin only for entities 1 to 32; beams from
-   other entities predict their start from 0.
-5. **The `TEXT` blob is shared** by `svc_print` (after the level byte), `svc_stufftext`
-   and `svc_centerprint`, all sized as a NUL-terminated string. The `PING` and `NAILS`
-   blobs are shared by several commands, each sized by its own rule.
-6. **Time is segment-relative**: every walker and predictor state starts fresh in each
+4. **Time is segment-relative**: every walker and predictor state starts fresh in each
    segment, time at 0. A player's second record in a segment measures its previous
    time delta from 0.
-7. **Per-player timing**: player origins and angles keep the last two frame times per
+5. **Per-player timing**: player origins and angles keep the last two frame times per
    player and advance them on every record, sent or not. Entity origins use no time.
-8. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
+6. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
    CRC-32s and lengths (zlib's `crc32_combine`), as the reference does
    (`decode.rs:Decoder::decode_batch`). Hashing the output again gives the same value.
 

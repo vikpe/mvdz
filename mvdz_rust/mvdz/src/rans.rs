@@ -492,20 +492,15 @@ impl DecoderModel {
             let index = count_le(&table[1..], self.chunks, slot);
             let lo = u32::from(table[index]);
             let hi = u32::from(table[index + 1]);
-            // wrapping: a hostile initial state may overflow; the stream checks refuse the result
             (
                 u32::from(table[width + 1 + index]),
-                (hi - lo)
-                    .wrapping_mul(state >> SCALE)
-                    .wrapping_add(slot - lo),
+                (hi - lo) * (state >> SCALE) + (slot - lo),
             )
         } else {
             let lut_entry = self.luts[(entry & !ENTRY_LUT) as usize + slot as usize];
             (
                 lut_entry & 0xff,
-                ((lut_entry >> 8) & 0xfff)
-                    .wrapping_mul(state >> SCALE)
-                    .wrapping_add(lut_entry >> 20),
+                ((lut_entry >> 8) & 0xfff) * (state >> SCALE) + (lut_entry >> 20),
             )
         };
         if state < STATE_MIN {
