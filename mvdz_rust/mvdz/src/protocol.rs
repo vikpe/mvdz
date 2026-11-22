@@ -379,6 +379,19 @@ impl ProtocolState {
     }
 }
 
+/// Tells frames from bytes that frame by chance.
+pub(crate) fn has_frame_run(src: &[u8], start: usize) -> bool {
+    const FRAME_RUN_LEN: usize = 16;
+    let mut offset = start;
+    for _ in 0..FRAME_RUN_LEN {
+        match frame_len(src, offset) {
+            Some(len) => offset += len,
+            None => return false,
+        }
+    }
+    true
+}
+
 /// Includes the frame header.
 pub(crate) fn frame_len(src: &[u8], start: usize) -> Option<usize> {
     let remaining = src.len().checked_sub(start)?;

@@ -77,8 +77,7 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 		return nil, corrupt("transform header")
 	}
 
-	// size is the length of the body of a structural or numeric stream, the
-	// number of bytes of a blob stream.
+	// size: the body length of a structural or numeric stream, the byte count of a blob stream
 	type streamEntry struct {
 		id, size uint32
 	}

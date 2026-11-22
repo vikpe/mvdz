@@ -122,8 +122,7 @@ func (groups *numericGroups) entityOrigins(records []packetEntityRecord, axis in
 	}
 }
 
-// hold notes an origin left out of its update: it did not move, at either
-// width.
+// hold notes an origin left out of its update: neither width moved.
 func (track *axisTrack) hold() {
 	track.previous = track.last
 	track.residual = 0

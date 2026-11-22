@@ -7,7 +7,7 @@ use crate::format::{MAX_MODELS_LEN, MAX_MODELS_RAW_LEN, MAX_SEGMENT_RAW};
 use crate::lz;
 use crate::numeric::{GROUPS, Group, NumericContext, NumericIo};
 use crate::parallel::par_map;
-use crate::protocol::{ProtocolState, frame_len};
+use crate::protocol::{ProtocolState, frame_len, has_frame_run};
 use crate::rans;
 use crate::streams::{
     FIRST_NUMERIC_STREAM, LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL, RAW, STREAM_COUNT, TAIL, is_blob,
@@ -94,8 +94,7 @@ impl SymbolIo for DecodeIo<'_> {
             value
         } else {
             self.is_over = true;
-            // a stream that is absent or meets an empty table reads as end tokens so every
-            // loop stops
+            // 255 ends every loop of the walk
             255
         }
     }
@@ -490,23 +489,29 @@ pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
     out
 }
 
-/// The first frame boundary at least [`SEGMENT_TARGET_RAW`] bytes in. Past a frame or unframed data
-/// longer than [`MAX_SEGMENT_RAW`] the rest is cut at that length.
+/// FORMAT.md section 8 rule 2.
 pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     let max_segment = MAX_SEGMENT_RAW as usize;
     let mut cuts = vec![0];
     let mut segment_start = 0;
     let mut frame_start = 0;
     while frame_start < src.len() {
-        let frame_end = frame_len(src, frame_start).map_or(src.len(), |len| frame_start + len);
-        let is_frame_past_max = frame_end - segment_start > max_segment;
-        if is_frame_past_max {
-            while src.len() - segment_start > max_segment {
+        let frame_end = frame_len(src, frame_start).map(|len| frame_start + len);
+        let walkable_frame_end = frame_end.filter(|&end| end - segment_start <= max_segment);
+        let Some(frame_end) = walkable_frame_end else {
+            let resume_offset =
+                frame_end.unwrap_or_else(|| next_frame_run(src, frame_start, segment_start));
+            while resume_offset - segment_start > max_segment {
                 segment_start += max_segment;
                 cuts.push(segment_start);
             }
-            break;
-        }
+            if resume_offset < src.len() {
+                cuts.push(resume_offset);
+            }
+            segment_start = resume_offset;
+            frame_start = resume_offset;
+            continue;
+        };
         let is_segment_full = frame_end - segment_start >= SEGMENT_TARGET_RAW;
         if is_segment_full && frame_end < src.len() {
             segment_start = frame_end;
@@ -516,6 +521,14 @@ pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     }
     cuts.push(src.len());
     cuts
+}
+
+fn next_frame_run(src: &[u8], unframed_start: usize, segment_start: usize) -> usize {
+    // not before the target length: a break in the frames makes no segment short
+    let search_start = (unframed_start + 1).max(segment_start + SEGMENT_TARGET_RAW);
+    (search_start..src.len())
+        .find(|&offset| has_frame_run(src, offset))
+        .unwrap_or(src.len())
 }
 
 /// The time bytes of the whole frames `segment` starts with, summed.
@@ -532,8 +545,7 @@ pub(crate) fn duration_ms(segment: &[u8]) -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StreamEntry {
     id: usize,
-    /// A structural or numeric stream: the length of its body. A blob stream: the number of
-    /// its bytes, which come from the tokens.
+    /// The body length of a structural or numeric stream, the byte count of a blob stream.
     size: usize,
 }
 

@@ -8,7 +8,7 @@ use crate::format::{
 };
 use crate::parallel::{HAS_THREADS, par_map, thread_count};
 use crate::protocol::{
-    DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, ProtocolState, frame_len,
+    DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, ProtocolState, frame_len, has_frame_run,
 };
 use crate::rans::FileModel;
 use crate::segment::{self, Numerics, Walked, cut_points};
@@ -41,9 +41,6 @@ pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
 }
 
 pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
-    let is_bad_frame = |bytes: &[u8], offset: usize| {
-        bytes.len() >= offset + 2 && !(DEM_READ..=DEM_ALL).contains(&(bytes[offset + 1] & 7))
-    };
     if bytes.len() < 2 {
         return false;
     }
@@ -63,17 +60,7 @@ pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
     {
         return true;
     }
-    let mut offset = first_len;
-    for _ in 0..16 {
-        if is_bad_frame(bytes, offset) {
-            return false;
-        }
-        match frame_len(bytes, offset) {
-            Some(len) => offset += len,
-            None => return false,
-        }
-    }
-    true
+    has_frame_run(bytes, first_len)
 }
 
 #[derive(Debug)]

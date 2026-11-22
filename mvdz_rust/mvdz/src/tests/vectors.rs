@@ -725,9 +725,8 @@ fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
 }
 
 /// Every frame type, every command the sizer knows (FORMAT.md section 4.2 and section 8
-/// rule 12) and the
-/// playerinfo, packet-entity, sound and temp-entity forms, first without and then with
-/// FTE extensions. The walk escapes nothing.
+/// rule 12) and the playerinfo, packet-entity, sound and temp-entity forms, first without
+/// and then with FTE extensions. The walk escapes nothing.
 fn commands_demo() -> Vec<u8> {
     const FTE_EXTENSIONS: u32 = 1 << 3 | 1 << 19; // FTE_PEXT_TRANS, FTE_PEXT_COLOR_MOD
     let coords = |x: i16, y: i16, z: i16| [x, y, z].map(i16::to_le_bytes).concat();
@@ -1001,6 +1000,23 @@ fn second_match_starts_from_its_own_server_data() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn truncated_match_demo() -> Vec<u8> {
+    let small = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
+    let mut demo = small[..small.len() - 3].to_vec();
+    demo.extend(several_segments(&small));
+    demo
+}
+
+#[test]
+fn frames_are_walked_again_after_a_truncated_match() -> anyhow::Result<()> {
+    let demo = truncated_match_demo();
+    let file = compress(&demo)?;
+    let unframed_segment_or_two = 2 * crate::segment::SEGMENT_TARGET_RAW;
+    assert!(unstructured_len(&file)? < unframed_segment_or_two);
+    assert_eq!(decompress(&file, 1)?, demo);
+    Ok(())
+}
+
 /// None without the sample demos.
 fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let sources = || {
@@ -1115,12 +1131,19 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         &two_matches,
         "synthetic demo of two matches: float coordinates (MVD1), then a server data without extensions, which resets the protocol state",
     );
+    let truncated_match = truncated_match_demo();
+    add(
+        "truncated-match.normal.mvdz",
+        encode(&truncated_match)?,
+        &truncated_match,
+        "synthetic demo of a match cut off inside its last frame, then whole matches: the frames are walked again after the break (rule 2)",
+    );
     let oversized = oversized_frame_demo();
     add(
         "oversized-frame.normal.mvdz",
         encode(&oversized)?,
         &oversized,
-        "synthetic demo with a 1.5 MiB frame of nops: the rest is cut every 2^20 bytes (rule 2)",
+        "synthetic demo with a 1.5 MiB frame of nops: it is cut every 2^20 bytes and the frames go on after it (rule 2)",
     );
     let entity_words = entity_words_demo();
     add(

@@ -27,7 +27,7 @@ func Encode(demo []byte) ([]byte, error) {
 const (
 	segmentTargetSize = 1 << 18
 	maxSegmentCount   = 1 << 16
-	firstFramesNeeded = 16
+	frameRunLen       = 16
 )
 
 // encodeAny codes any bytes as an MVDZ file: Encode without the input check.
@@ -122,45 +122,70 @@ func startsLikeDemo(demo []byte) bool {
 	if !hasEscape {
 		return true
 	}
-	rest := demo[firstLen:]
-	for range firstFramesNeeded {
-		length, isFrame := frameLen(rest)
+	return hasFrameRun(demo[firstLen:])
+}
+
+// hasFrameRun tells frames from bytes that frame by chance.
+func hasFrameRun(data []byte) bool {
+	for range frameRunLen {
+		length, isFrame := frameLen(data)
 		if !isFrame {
 			return false
 		}
-		rest = rest[length:]
+		data = data[length:]
 	}
 	return true
 }
 
-// cutSegments cuts a demo into segments, FORMAT.md section 8 rule 2: after
-// the first frame that takes a segment to segmentTargetSize, and every
-// maxRawLen once a frame does not fit or the bytes do not frame.
+// cutSegments cuts a demo into segments, FORMAT.md section 8 rule 2.
 func cutSegments(demo []byte) [][]byte {
 	var segments [][]byte
 	framedLen := 0
 	for framedLen < len(demo) {
 		frameLen, isFrame := frameLen(demo[framedLen:])
-		isFramed := isFrame && framedLen+frameLen <= maxRawLen
-		if !isFramed {
+		frameEnd := framedLen + frameLen
+		isWalkable := isFrame && frameEnd <= maxRawLen
+		if isWalkable {
+			framedLen = frameEnd
+			isCut := framedLen >= segmentTargetSize && framedLen < len(demo)
+			if isCut {
+				segments = append(segments, demo[:framedLen])
+				demo = demo[framedLen:]
+				framedLen = 0
+			}
+			continue
+		}
+		resumeOffset := frameEnd
+		if !isFrame {
+			resumeOffset = nextFrameRun(demo, framedLen)
+		}
+		for resumeOffset > maxRawLen {
+			segments = append(segments, demo[:maxRawLen])
+			demo = demo[maxRawLen:]
+			resumeOffset -= maxRawLen
+		}
+		if resumeOffset == len(demo) {
 			break
 		}
-		framedLen += frameLen
-		isCut := framedLen >= segmentTargetSize && framedLen < len(demo)
-		if isCut {
-			segments = append(segments, demo[:framedLen])
-			demo = demo[framedLen:]
-			framedLen = 0
-		}
-	}
-	for len(demo) > maxRawLen {
-		segments = append(segments, demo[:maxRawLen])
-		demo = demo[maxRawLen:]
+		segments = append(segments, demo[:resumeOffset])
+		demo = demo[resumeOffset:]
+		framedLen = 0
 	}
 	if len(demo) > 0 {
 		segments = append(segments, demo)
 	}
 	return segments
+}
+
+// nextFrameRun is where frames follow the unframed bytes of a segment.
+func nextFrameRun(segment []byte, unframedStart int) int {
+	// not before the target size: a break in the frames makes no segment short
+	for offset := max(unframedStart+1, segmentTargetSize); offset < len(segment); offset++ {
+		if hasFrameRun(segment[offset:]) {
+			return offset
+		}
+	}
+	return len(segment)
 }
 
 // buildModels is the first pass, FORMAT.md section 8 rule 4: it counts the

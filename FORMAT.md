@@ -163,10 +163,10 @@ after its last whole frame are its tail (4.4).
 
 **Cut points written by the reference encoder** (`segment.rs:cut_points`):
 a segment ends at the first frame boundary at or after 256 KiB of its
-start. Where a frame, or data that does not frame, runs past 1 MiB from
-the segment start, the rest of the demo is cut every 1 MiB, and each piece
-is walked afresh. A reader must not depend on these cut points beyond the
-rules above.
+start. A frame that runs past 1 MiB from the segment start, and data that
+does not frame, are cut every 1 MiB up to where the frames go on, and each
+piece is walked afresh. A reader must not depend on these cut points
+beyond the rules above.
 
 ---------------------------------------------------------------------------
 
@@ -1323,14 +1323,22 @@ its blob parser (rule 10) on its own.
    an MVD demo (`NotMvd`): empty input, a gzip stream (bytes `1f 8b`), or a first frame
    that is not a whole frame of type 1, 3, 4, 5 or 6 carrying more than its header,
    unless that frame walks without an escape (section 4) or 16 more whole frames of type 1 to 6
-   follow it. A damaged demo with an intact start is encoded. The unchecked entry point
-   (the fuzz targets' `encode_any`) writes any bytes.
+   follow it (`has_frame_run`, rule 2). A damaged demo with an intact start is encoded.
+   The unchecked entry point (the fuzz targets' `encode_any`) writes any bytes.
 2. **Cut points** (`segment.rs:cut_points`): an empty demo has no segment. Otherwise walk
    the frames from the start (`frame_len`, rule 11) and cut after a frame whenever
-   at least 2^18 bytes have accumulated since the last cut and bytes remain. When a
-   frame would take the segment past 2^20 bytes, or the bytes no longer frame, the rest
-   of the demo is cut every 2^20 bytes from the last cut; the last piece is the last
-   segment. At most 65536 segments (`DemoTooLarge`): about 16 GiB of demo.
+   at least 2^18 bytes have accumulated since the last cut and bytes remain. Where a
+   frame would take the segment past 2^20 bytes, or the bytes do not frame, find where
+   the frames go on:
+   * after a frame too long: at its end;
+   * after bytes that do not frame: at the first offset from which 16 whole frames
+     follow each other (`protocol.rs:has_frame_run`), searched from the later of the byte
+     after the first one that does not frame and 2^18 bytes after the last cut; the end
+     of the demo if there is none.
+
+   Cut every 2^20 bytes from the last cut while more than 2^20 bytes remain up to that
+   offset, then at the offset itself unless it is the end of the demo, and walk the
+   frames on from there. At most 65536 segments (`DemoTooLarge`): about 16 GiB of demo.
 3. **Protocol state**: the first pass walks the segments in order (section 4). Segment k's
    `fte`, `fte2`, `mvd1` are the state at the end of the last segment before it whose
    walk succeeded (0 for the first).
