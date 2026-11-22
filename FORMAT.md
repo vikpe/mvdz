@@ -110,8 +110,8 @@ describes the `.mvdz` file.
 body := meta | n u32 | n x { id u32 | raw_len u32 | len u32 | stream[len] }
 ```
 
-* `len` 0: the file has no models. Otherwise `len` is at most 2^24
-  (16 MiB) and the body is consumed exactly.
+* `len` 0: the file has no models. Otherwise `len` is at most 2^22
+  (4 MiB) and the body is consumed exactly.
 * `meta` is the **meta model**: a raw model (section 6.2) of alphabet 256,
   stored as it is. Every other model of the block is coded with it.
 * `n >= 1`. Each `id` is a structural or numeric stream id (3.2), the ids
@@ -123,7 +123,7 @@ body := meta | n u32 | n x { id u32 | raw_len u32 | len u32 | stream[len] }
   stream `id`, with the alphabet of its kind: 256 for a structural stream,
   65 for a numeric one.
 * The length of `meta` and the `raw_len` of all entries sum to at most
-  2^24 (16 MiB). A decoder checks this before it decodes any model, so no
+  2^22 (4 MiB). A decoder checks this before it decodes any model, so no
   model takes more memory than the format allows.
 * The models block holds the only models: every structural or numeric
   stream that a segment codes (3.1) is decoded with the model of its id
@@ -1277,15 +1277,15 @@ Each hostile vector breaks one rule only.
 |---|---|---|
 | segment raw length (`raw_len`) | 1 to 2^20 bytes | section 2 |
 | segment coded length (`len`) | at most 2^21 bytes | section 2 |
-| models block | at most 2^24 bytes | section 2 |
-| raw models, the meta model included | at most 2^24 bytes together | section 2 |
+| models block | at most 2^22 bytes | section 2 |
+| raw models, the meta model included | at most 2^22 bytes together | section 2 |
 | stream table | ids strictly increasing | section 3 |
 | blob streams of a segment | at most `2 * raw_len` bytes together | section 3 |
 | own tables per model | at most 65536 | section 6 |
 
 With these, every size a decoder allocates is bounded: a segment yields at most 2^20
 bytes and takes at least its 16 header bytes of the file, its blob bytes are at most
-twice its length, and the raw models of a file are at most 16 MiB together, checked from
+twice its length, and the raw models of a file are at most 4 MiB together, checked from
 the models block's fields before any of them is decoded. The work is bounded with them:
 every round of a loop of the walk writes at least one byte of the segment or reads at
 least one blob byte, and every blob token gives at least one byte. Every decoder applies
@@ -1371,7 +1371,7 @@ its blob parser (rule 10) on its own.
    * A segment whose walk fails counts as all tail: only its blob tokens (streams 16, 35
      and 36) are counted. A segment whose walk succeeds is counted as walked, also when
      rule 5 then writes it another way: the models do not depend on pass 2.
-   * While the models block of all models would exceed 2^24 bytes, coded or raw
+   * While the models block of all models would exceed 2^22 bytes, coded or raw
      (section 7), the model with the longest raw model is dropped (ties: highest stream
      id), never those of streams 16, 35 and 36 (`segment.rs:fit_models_block`).
 5. **Segments** (`encode.rs:code_segments`): a segment is written the first of these

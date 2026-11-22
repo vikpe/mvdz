@@ -17,9 +17,9 @@ type Header struct {
 const (
 	headerSize    = 60
 	formatVersion = 3
-	maxModelsLen  = 1 << 24
+	maxModelsLen  = 1 << 22
 	// Of the models before they are coded, the meta model included.
-	maxModelsRawLen = 1 << 24
+	maxModelsRawLen = 1 << 22
 	maxCodedLen     = 1 << 21
 	maxRawLen       = 1 << 20
 )

@@ -615,11 +615,11 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         "a numeric stream's entry holding a structural model (the raw length of alphabet 256)",
     );
     let mut edited = entries.clone();
-    edited[0].raw_len = 1 << 24;
+    edited[0].raw_len = 1 << 22;
     add(
         "tables-raw-size",
         with_entries(&edited),
-        "a model declaring 16 MiB of raw bytes: the models together over the limit",
+        "a model declaring 4 MiB of raw bytes: the models together over the limit",
     );
     let own_count_only = OVER_ONE_PER_CONTEXT.to_le_bytes();
     let block = crate::rans::write_models_block(&[(entries[0].stream, &own_count_only)]);

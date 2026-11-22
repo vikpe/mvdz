@@ -13,9 +13,9 @@ pub(crate) const SEGMENT_FIELDS_LEN: usize = 4 + 4 + 4;
 pub(crate) const MAX_SEGMENT_RAW: u64 = 1 << 20;
 /// Twice [`MAX_SEGMENT_RAW`]: far above any segment the encoder writes.
 pub(crate) const MAX_SEGMENT_CODED: u64 = 2 << 20;
-pub(crate) const MAX_MODELS_LEN: u64 = 1 << 24;
+pub(crate) const MAX_MODELS_LEN: u64 = 1 << 22;
 /// Of the models before they are coded, the meta model included.
-pub(crate) const MAX_MODELS_RAW_LEN: u64 = 1 << 24;
+pub(crate) const MAX_MODELS_RAW_LEN: u64 = 1 << 22;
 /// An encoder rule, not a reader rule.
 pub(crate) const MAX_SEGMENTS: usize = 1 << 16;
 

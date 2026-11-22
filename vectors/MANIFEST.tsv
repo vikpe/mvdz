@@ -58,5 +58,5 @@ hostile-tables-empty.mvdz	error: corrupt: tables	-	a models block with n = 0
 hostile-tables-trailing.mvdz	error: corrupt: tables	-	a models block with one byte after its last entry
 hostile-tables-padding.mvdz	error: corrupt: rans stream	-	a model whose coded stream has one byte of padding (not consumed exactly)
 hostile-tables-alphabet.mvdz	error: corrupt: model	-	a numeric stream's entry holding a structural model (the raw length of alphabet 256)
-hostile-tables-raw-size.mvdz	error: corrupt: models size	-	a model declaring 16 MiB of raw bytes: the models together over the limit
+hostile-tables-raw-size.mvdz	error: corrupt: models size	-	a model declaring 4 MiB of raw bytes: the models together over the limit
 hostile-tables-own-count.mvdz	error: corrupt: model	-	a model declaring 65537 own tables: more than there are contexts

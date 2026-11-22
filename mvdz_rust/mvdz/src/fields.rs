@@ -4,7 +4,7 @@ pub(crate) fn put_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-/// As a u32: callers' values are bounded by the 1 MiB segment, 2 MiB coded segment or 16 MiB
+/// As a u32: callers' values are bounded by the 1 MiB segment, 2 MiB coded segment or 4 MiB
 /// models block.
 pub(crate) fn put_usize(out: &mut Vec<u8>, value: usize) {
     debug_assert!(
