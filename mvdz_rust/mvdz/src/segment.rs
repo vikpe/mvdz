@@ -559,7 +559,6 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     }
     let table_error = Error::Corrupt("stream table");
     let mut entries = Vec::with_capacity(stream_count);
-    let mut was_seen = [false; STREAM_COUNT];
     let mut total = 0usize;
     let mut blob_total = 0usize;
     for _ in 0..stream_count {
@@ -573,10 +572,12 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
         } else {
             total = total.checked_add(size).ok_or(table_error)?;
         }
-        if was_seen[id] {
-            return bad("duplicate stream");
+        if entries
+            .last()
+            .is_some_and(|previous: &StreamEntry| id <= previous.id)
+        {
+            return bad("stream order");
         }
-        was_seen[id] = true;
         entries.push(StreamEntry { id, size });
     }
     // refused here, before the blob bytes are allocated

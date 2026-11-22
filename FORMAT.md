@@ -177,14 +177,14 @@ rules above.
 ```
 coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
          | n x { id u32 | size u32 }
-         | stream bodies, in table order
+         | stream bodies, in id order
 ```
 
 * `fte`, `fte2`, `mvd1`: the protocol extension state at the segment
   start (4.1).
 * `n`: `n = 0` is a stored segment (below). Per entry:
-  * `id`: a structural, numeric or blob stream id (3.2), each at most
-    once, in any order: so `n` is at most 322;
+  * `id`: a structural, numeric or blob stream id (3.2), the ids strictly
+    increasing: so `n` is at most 322;
   * `size`: for a structural or numeric stream the length of its body;
     for a blob stream the number of its bytes. A blob stream has no body.
 * The stream bodies fill `coded` exactly to its end.
@@ -193,7 +193,7 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
   (section 6.1).
 * **Blob bytes**: the blob streams' sizes sum to `blob_total`, at most
   `2 * raw_len`. The blob tokens (section 6.6) give that many bytes; the
-  blob streams take them in table order, `size` bytes each.
+  blob streams take them in id order, `size` bytes each.
 * A structural or numeric stream absent from the table has no symbols:
   reading from it is an error. An absent blob stream is empty: reading 0
   bytes from it succeeds, reading more is an error.
@@ -287,7 +287,7 @@ An id of 322 or above is an error.
 3. Construct a rANS decoder for every structural and numeric stream in the
    table, with its model from the models block.
 4. Expand the blob tokens (section 6.6) to `blob_total` bytes and split
-   them among the blob streams in table order. Afterwards streams 35 and
+   them among the blob streams in id order. Afterwards streams 35 and
    36 must be complete.
 5. **Walk** (section 4), producing the structural bytes of the segment and
    the record lists of the numeric fields. Afterwards every structural
@@ -1202,7 +1202,7 @@ holds: the walk and the numeric groups decide how many they read.
 
 ### 6.6 Blob tokens (`lz.rs`)
 
-The blob streams of a segment, in stream table order, form one string of
+The blob streams of a segment, in id order, form one string of
 `blob_total` bytes (section 3.1). It is coded as LZ77 tokens: a literal
 byte, or a match that copies bytes the tokens before it produced. Three
 streams hold the tokens, each coded as any other stream of its kind:
@@ -1279,7 +1279,7 @@ Each hostile vector breaks one rule only.
 | segment coded length (`len`) | at most 2^21 bytes | section 2 |
 | models block | at most 2^24 bytes | section 2 |
 | raw models, the meta model included | at most 2^24 bytes together | section 2 |
-| stream table | each id once | section 3 |
+| stream table | ids strictly increasing | section 3 |
 | blob streams of a segment | at most `2 * raw_len` bytes together | section 3 |
 | own tables per model | at most 65536 | section 6 |
 

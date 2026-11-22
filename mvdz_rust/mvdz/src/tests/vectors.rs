@@ -415,6 +415,16 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         with_table(&edited),
         "the last blob stream's id set to the one before it (the same id twice)",
     );
+    let mut edited = table.clone();
+    let (first_len, second_len) = (table.entries[0].1, table.entries[1].1);
+    anyhow::ensure!(blob_at[0] >= 2, "two coded streams");
+    edited.entries.swap(0, 1);
+    edited.bodies[..first_len + second_len].rotate_left(first_len);
+    add(
+        "table-order",
+        with_table(&edited),
+        "the first two streams swapped, entries and bodies (stream ids not increasing)",
+    );
     let blob_total: usize = blob_at.iter().map(|&index| table.entries[index].1).sum();
     let mut edited = table.clone();
     edited.entries[last_blob].1 += 2 * raw_len + 1 - blob_total;

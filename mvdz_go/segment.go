@@ -83,17 +83,16 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 		id, size uint32
 	}
 	entries := make([]streamEntry, entryCount)
-	var isListed [streamCount]bool
+	nextId := uint32(0)
 	blobSize := uint64(0)
 	for index := range entries {
 		entry := &entries[index]
 		entry.id = fields.u32()
 		entry.size = fields.u32()
-		isIdValid := entry.id < streamCount && !isListed[entry.id]
-		if fields.isShort || !isIdValid {
+		if fields.isShort || entry.id < nextId || entry.id >= streamCount {
 			return nil, corrupt("stream table")
 		}
-		isListed[entry.id] = true
+		nextId = entry.id + 1
 		if entry.id >= firstBlobStream {
 			blobSize += uint64(entry.size)
 		}

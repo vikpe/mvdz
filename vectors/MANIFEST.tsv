@@ -41,7 +41,8 @@ hostile-tail-long.mvdz	error: corrupt: structure	-	a `TAIL` stream of raw_len + 
 hostile-stored-len.mvdz	error: corrupt: stored segment	-	a stored segment of 4 bytes holding 3
 hostile-table-count.mvdz	error: corrupt: stream count	-	a stream table declaring 323 streams
 hostile-table-id.mvdz	error: corrupt: stream id	-	a blob stream with id 322, past the last
-hostile-table-dup-id.mvdz	error: corrupt: duplicate stream	-	the last blob stream's id set to the one before it (the same id twice)
+hostile-table-dup-id.mvdz	error: corrupt: stream order	-	the last blob stream's id set to the one before it (the same id twice)
+hostile-table-order.mvdz	error: corrupt: stream order	-	the first two streams swapped, entries and bodies (stream ids not increasing)
 hostile-table-blob-total.mvdz	error: corrupt: blob streams	-	the last blob stream's size raised so the blob sizes sum to 2 * raw_len + 1
 hostile-table-trailing.mvdz	error: corrupt: stream bodies	-	one byte after the last stream body
 hostile-blob-split.mvdz	error: corrupt: structure	-	the first two blob streams' sizes moved by one byte: the same blob bytes, split differently
