@@ -98,7 +98,7 @@ fn transform_body(
     let blob_counts: Vec<(usize, usize)> =
         (blobs.iter()).map(|&(id, blob)| (id, blob.len())).collect();
     let tokens = crate::lz::tokens(&blob_bytes);
-    token_body(structural, &blob_counts, &tokens, 0)
+    token_body(structural, &blob_counts, &tokens)
 }
 
 /// As [`transform_body`], with the blob streams' counts and their tokens given.
@@ -106,7 +106,6 @@ fn token_body(
     structural: &[(usize, &[u8])],
     blob_counts: &[(usize, usize)],
     tokens: &crate::lz::Tokens,
-    tail: usize,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     use crate::rans;
     use crate::streams::{LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL};
@@ -141,8 +140,8 @@ fn token_body(
     }
     coded.sort_by_key(|&(id, ..)| id);
     let mut body = Vec::new();
-    // fte, fte2, mvd1, tail; the number of streams
-    for field in [0, 0, 0, tail, coded.len() + blob_counts.len()] {
+    // fte, fte2, mvd1; the number of streams
+    for field in [0, 0, 0, coded.len() + blob_counts.len()] {
         put_usize(&mut body, field);
     }
     for (id, count, _, stream_body) in &coded {
@@ -337,8 +336,8 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
 /// The transform header and bodies of a segment (FORMAT.md section 3.1).
 #[derive(Clone)]
 struct StreamTable {
-    /// fte, fte2, mvd1, tail
-    fields: [usize; 4],
+    /// fte, fte2, mvd1
+    fields: [usize; 3],
     stream_count: usize,
     /// (id, count, body length; None for a blob stream)
     entries: Vec<(usize, usize, Option<usize>)>,
@@ -350,7 +349,7 @@ impl StreamTable {
         use crate::fields::read_usize;
         let mut rest = transform;
         let mut next = || read_usize(&mut rest).context("a transform header field");
-        let fields = [next()?, next()?, next()?, next()?];
+        let fields = [next()?, next()?, next()?];
         let stream_count = next()?;
         let mut entries = Vec::new();
         for _ in 0..stream_count {
@@ -442,9 +441,6 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         "the last blob stream's count raised so the blob counts sum to 2 * raw_len + 1",
     );
     let mut edited = table.clone();
-    edited.fields[3] = raw_len + 1;
-    add("table-tail", with_table(&edited), "a tail of raw_len + 1");
-    let mut edited = table.clone();
     edited.bodies.push(0);
     add(
         "table-trailing",
@@ -502,33 +498,26 @@ fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> 
         ),
     ] {
         let tokens = crate::lz::code(demo, &tokens);
-        let body = token_body(&[], &[(TAIL, demo.len())], &tokens, demo.len())?;
+        let body = token_body(&[], &[(TAIL, demo.len())], &tokens)?;
         add(name, one_segment(demo, &body)?, how);
     }
-    let stored = |raw: &[u8]| {
-        let mut body = Vec::new();
-        // fte, fte2, mvd1, tail; no stream
-        for field in [0, 0, 0, demo.len(), 0] {
-            put_usize(&mut body, field);
-        }
-        body.extend_from_slice(raw);
-        one_segment(demo, &(Vec::new(), body))
-    };
+    let longer = b"aaaaa";
+    let body = token_body(&[], &[(TAIL, longer.len())], &crate::lz::tokens(longer))?;
     add(
-        "stored-len",
-        stored(&demo[..3])?,
-        "a stored segment of 4 bytes holding 3",
+        "tail-long",
+        one_segment(demo, &body)?,
+        "a `TAIL` stream of raw_len + 1 bytes",
     );
     let mut body = Vec::new();
-    // fte, fte2, mvd1, tail; no stream
-    for field in [0, 0, 0, demo.len() - 1, 0] {
+    // fte, fte2, mvd1; no stream
+    for field in [0, 0, 0, 0] {
         put_usize(&mut body, field);
     }
-    body.extend_from_slice(demo);
+    body.extend_from_slice(&demo[..3]);
     add(
-        "stored-tail",
+        "stored-len",
         one_segment(demo, &(Vec::new(), body))?,
-        "a stored segment whose tail is raw_len - 1",
+        "a stored segment of 4 bytes holding 3",
     );
     Ok(())
 }

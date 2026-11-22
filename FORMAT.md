@@ -160,7 +160,7 @@ no segment.
 predictor state starts fresh in each segment, and the protocol state at
 its start is in its transform header (3.1). A reader does not check where
 a demo is cut: a segment may start or end inside a frame, and the bytes
-after its last whole frame are its tail (3.1).
+after its last whole frame are its tail (4.4).
 
 **Cut points written by the reference encoder** (`segment.rs:cut_points`):
 a segment ends at the first frame boundary at or after 256 KiB of its
@@ -176,15 +176,13 @@ rules above.
 ### 3.1 Transform header and stream table (`segment.rs:parse_transform_header`)
 
 ```
-coded := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
+coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
          | n x { id u32 | count u32 | [len u32 if id is not a blob stream] }
          | stream bodies, in table order (body k is len_k bytes)
 ```
 
 * `fte`, `fte2`, `mvd1`: the protocol extension state at the segment
   start (4.1).
-* `tail`: length of the unframed bytes at the end of the segment, at most
-  `raw_len`.
 * `n`: `n = 0` is a stored segment (below). Per entry:
   * `id`: a structural, numeric or blob stream id (3.2), each at most
     once, in any order: so `n` is at most 322;
@@ -206,9 +204,9 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | tail u32 | n u32
   bytes from it succeeds, reading more is an error.
 
 **Stored segment.** A transform header with `n = 0` is followed by the
-segment's bytes as they are: `tail` must equal `raw_len`, and exactly
-`raw_len` bytes follow the 20 bytes of the header. It is the one layout
-whose size is bounded, for a segment the models cannot code (section 8).
+segment's bytes as they are: exactly `raw_len` bytes follow the 16 bytes
+of the header. It is the one layout whose size is bounded, for a segment
+the models cannot code (section 8).
 
 ### 3.2 Stream ids (`streams.rs`)
 
@@ -507,7 +505,9 @@ stream, so the stream table's counts bound them (section 9, note 1).
 ### 4.4 Segment walk and frames (`SegmentWalker::run`, `SegmentWalker::frame`)
 
 ```
-stop = raw_len - tail                  // tail <= raw_len, section 3.1
+tail = the count of blob stream TAIL (0 if absent)
+if tail > raw_len: error
+stop = raw_len - tail
 while no error and p < stop: frame()
 if p != stop: error
 copy_blob(TAIL, tail)
@@ -1387,7 +1387,7 @@ its blob parser (rule 10) on its own.
 5. **Segments** (`encode.rs:code_segments`): a segment is written the first of these
    ways that works:
    * transform-coded (section 3), if its walk succeeds;
-   * all tail: no walker stream, every byte in the `TAIL` blob stream, `tail = raw_len`;
+   * all tail: no walker stream, every byte in the `TAIL` blob stream;
    * stored (section 3.1).
 
    A way works if every structural and numeric stream it codes has a model with a code

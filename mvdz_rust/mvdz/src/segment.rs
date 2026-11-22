@@ -146,7 +146,6 @@ fn walk_decode<'a>(
     dst: &mut [u8],
     records: &mut RecordLists,
     protocol: ProtocolState,
-    tail: usize,
 ) -> Result<()> {
     let io = DecodeIo {
         structural,
@@ -154,7 +153,7 @@ fn walk_decode<'a>(
         is_over: false,
     };
     let mut walker = SegmentWalker::decoder(dst, records, io, protocol);
-    walker.run(tail);
+    walker.run();
     if walker.has_error || walker.io.is_over {
         return bad("structure");
     }
@@ -212,7 +211,6 @@ pub(crate) struct Walked {
     blob_lens: rans::NumericSymbols,
     blob_dists: rans::NumericSymbols,
     raw_len: usize,
-    tail: usize,
     start_protocol: ProtocolState,
 }
 
@@ -221,7 +219,6 @@ impl Walked {
         mut io: EncodeIo,
         records: RecordLists,
         raw_len: usize,
-        tail: usize,
         protocol: ProtocolState,
     ) -> Self {
         let blob_bytes: Vec<u8> = (io.blobs.iter()).flatten().copied().collect();
@@ -234,7 +231,6 @@ impl Walked {
             blob_lens: tokens.lens,
             blob_dists: tokens.dists,
             raw_len,
-            tail,
             start_protocol: protocol,
         }
     }
@@ -247,30 +243,21 @@ impl Walked {
 /// `None`: the transform cannot represent the segment.
 pub(crate) fn walk(src: &[u8], protocol: ProtocolState) -> Option<(Walked, ProtocolState)> {
     let mut records = RecordLists::for_segment(src.len());
-    let (io, tail, end_protocol, has_error) = {
+    let (io, end_protocol, has_error) = {
         let mut walker = SegmentWalker::encoder(src, &mut records, EncodeIo::new(), protocol);
-        let tail = walker.run(0);
-        (walker.io, tail, walker.protocol, walker.has_error)
+        walker.run();
+        (walker.io, walker.protocol, walker.has_error)
     };
     if has_error {
         return None;
     }
-    Some((
-        Walked::new(io, records, src.len(), tail, protocol),
-        end_protocol,
-    ))
+    Some((Walked::new(io, records, src.len(), protocol), end_protocol))
 }
 
 pub(crate) fn walk_tail(src: &[u8], protocol: ProtocolState) -> Walked {
     let mut io = EncodeIo::new();
     io.blobs[TAIL] = src.to_vec();
-    Walked::new(
-        io,
-        RecordLists::for_segment(0),
-        src.len(),
-        src.len(),
-        protocol,
-    )
+    Walked::new(io, RecordLists::for_segment(0), src.len(), protocol)
 }
 
 /// Of one stream in a segment's stream table (FORMAT.md section 3.1). Most streams hold
@@ -495,7 +482,6 @@ pub(crate) fn encode(
     for flags in [protocol.fte, protocol.fte2, protocol.mvd1] {
         out.extend_from_slice(&flags.to_le_bytes());
     }
-    put_usize(&mut out, walked.tail);
     put_usize(&mut out, coded_streams.len() + blobs.len());
     for coded in &coded_streams {
         put_usize(&mut out, coded.stream);
@@ -516,14 +502,13 @@ pub(crate) fn encode(
 /// The segment as it is, behind a transform header without streams (FORMAT.md section 3.1):
 /// the one layout with a size bound, for a segment no model fits.
 pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
-    /// `fte`, `fte2`, `mvd1`, the tail length and the stream count.
-    const TRANSFORM_FIELDS_LEN: usize = 5 * 4;
+    /// `fte`, `fte2`, `mvd1` and the stream count.
+    const TRANSFORM_FIELDS_LEN: usize = 4 * 4;
     const NO_STREAMS: usize = 0;
     let mut out = Vec::with_capacity(TRANSFORM_FIELDS_LEN + raw.len());
     for flags in [protocol.fte, protocol.fte2, protocol.mvd1] {
         out.extend_from_slice(&flags.to_le_bytes());
     }
-    put_usize(&mut out, raw.len());
     put_usize(&mut out, NO_STREAMS);
     out.extend_from_slice(raw);
     out
@@ -579,7 +564,6 @@ struct StreamEntry {
 #[derive(Debug)]
 pub(crate) struct TransformHeader {
     protocol: ProtocolState,
-    tail: usize,
     /// Empty for a stored segment.
     entries: Vec<StreamEntry>,
     blob_total: usize,
@@ -593,11 +577,7 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     let fte = read_u32(&mut rest).ok_or(header_error)?;
     let fte2 = read_u32(&mut rest).ok_or(header_error)?;
     let mvd1 = read_u32(&mut rest).ok_or(header_error)?;
-    let tail = read_usize(&mut rest).ok_or(header_error)?;
     let stream_count = read_usize(&mut rest).ok_or(header_error)?;
-    if tail > raw_len {
-        return bad("tail length");
-    }
     if stream_count > STREAM_COUNT {
         return bad("stream count");
     }
@@ -637,7 +617,7 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     }
     let is_stored = stream_count == 0;
     if is_stored {
-        if tail != raw_len || rest.len() != raw_len {
+        if rest.len() != raw_len {
             return bad("stored segment");
         }
     } else if total != rest.len() {
@@ -645,7 +625,6 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     }
     Ok(TransformHeader {
         protocol: ProtocolState::new(fte, fte2, mvd1),
-        tail,
         entries,
         blob_total,
         body_offset: body.len() - rest.len(),
@@ -715,7 +694,6 @@ pub(crate) fn decode(
         dst,
         &mut records,
         transform_header.protocol,
-        transform_header.tail,
     )?;
     for group in GROUPS {
         run_group(group, &records, dst, &stream_bodies, file_models)?;
@@ -863,10 +841,10 @@ mod tests {
     fn blob_streams_over_twice_the_segment_are_refused() {
         use crate::streams::SET;
         let raw_len = 100;
-        // fte, fte2, mvd1, tail, the stream count; then (id, count) per blob stream
+        // fte, fte2, mvd1, the stream count; then (id, count) per blob stream
         let header = |blob_streams: &[(usize, usize)]| {
             let mut body = Vec::new();
-            for field in [0, 0, 0, 0, blob_streams.len()] {
+            for field in [0, 0, 0, blob_streams.len()] {
                 put_usize(&mut body, field);
             }
             for &(id, count) in blob_streams {

@@ -13,9 +13,8 @@ func maxBlobTotal(rawLen uint32) uint64 {
 	return 2 * uint64(rawLen)
 }
 
-// The fields of a transform header: fte, fte2, mvd1, the tail length and the
-// stream count.
-const transformFieldsLen = 5 * 4
+// The fields of a transform header: fte, fte2, mvd1 and the stream count.
+const transformFieldsLen = 4 * 4
 
 // fileModels holds the model of every structural and numeric stream id; nil
 // where the models block has none.
@@ -26,8 +25,7 @@ type fileModels [firstBlobStream]*streamModel
 // groups code.
 type segmentStreams struct {
 	protocol   protocolState // at the segment start
-	tail       uint32
-	stored     []byte // decoding: the bytes of a stored segment, else nil
+	stored     []byte        // decoding: the bytes of a stored segment, else nil
 	isEncoding bool
 	decoders   [firstBlobStream]*streamDecoder // decoding: nil for a stream not in the table
 	collected  [firstBlobStream][]codedValue   // encoding
@@ -53,7 +51,7 @@ func decodeSegment(coded []byte, rawLen uint32, models *fileModels) ([]byte, err
 	}
 	output := make([]byte, rawLen)
 	walker := newWalker(output, streams)
-	walker.run(streams.tail)
+	walker.run(uint32(len(streams.blobs[streamTail])))
 	if walker.err != nil {
 		return nil, walker.err
 	}
@@ -81,9 +79,8 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 	streams.protocol.fte = fields.u32()
 	streams.protocol.fte2 = fields.u32()
 	streams.protocol.mvd1 = fields.u32()
-	streams.tail = fields.u32()
 	entryCount := fields.u32()
-	if fields.isShort || streams.tail > rawLen || entryCount > streamCount {
+	if fields.isShort || entryCount > streamCount {
 		return nil, corrupt("transform header")
 	}
 
@@ -115,7 +112,7 @@ func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStrea
 	isStored := entryCount == 0
 	if isStored {
 		streams.stored = fields.bytes(rawLen)
-		if streams.tail != rawLen || !fields.isAtEnd() {
+		if !fields.isAtEnd() {
 			return nil, corrupt("stored segment")
 		}
 		return streams, nil

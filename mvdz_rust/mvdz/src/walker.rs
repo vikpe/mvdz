@@ -402,19 +402,18 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         offset as u32
     }
 
-    /// Encode returns the tail length; decode takes it.
-    pub(crate) fn run(&mut self, tail: usize) -> usize {
+    /// The tail is the bytes after the last whole frame: all of the `TAIL` blob stream.
+    pub(crate) fn run(&mut self) {
         if IS_ENCODE {
             while !self.has_error && frame_len(self.src, self.offset).is_some() {
                 self.frame();
             }
             if self.has_error {
-                return 0;
+                return;
             }
-            let tail_len = self.src.len() - self.offset;
-            self.copy_blob(TAIL, tail_len);
-            tail_len
+            self.copy_blob(TAIL, self.src.len() - self.offset);
         } else {
+            let tail = self.io.blob_rest(TAIL).len();
             let stop = self.dst.len().saturating_sub(tail);
             while !self.has_error && self.offset < stop {
                 self.frame();
@@ -423,7 +422,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 self.has_error = true;
             }
             self.copy_blob(TAIL, tail);
-            tail
         }
     }
 

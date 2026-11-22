@@ -137,6 +137,10 @@ func newWalker(segment []byte, streams *segmentStreams) *segmentWalker {
 
 // FORMAT.md section 4.4
 func (walker *segmentWalker) run(tail uint32) {
+	if tail > uint32(len(walker.segment)) {
+		walker.fail("tail longer than the segment")
+		return
+	}
 	stop := uint32(len(walker.segment)) - tail
 	for walker.err == nil && walker.position < stop {
 		walker.frame()

@@ -245,10 +245,10 @@ func modelsBlock(models *fileModels, isListed *[firstBlobStream]bool) (count int
 // walk fails: it does not reproduce the segment.
 func collectStreams(segment []byte, protocol protocolState) (*segmentStreams, protocolState, bool) {
 	framedLen, _ := scanFrames(segment)
-	streams := &segmentStreams{isEncoding: true, protocol: protocol, tail: uint32(len(segment) - framedLen)}
+	streams := &segmentStreams{isEncoding: true, protocol: protocol}
 	walked := bytes.Clone(segment)
 	walker := newWalker(walked, streams)
-	walker.run(streams.tail)
+	walker.run(uint32(len(segment) - framedLen))
 	if walker.err != nil {
 		return nil, protocol, false
 	}
@@ -265,7 +265,7 @@ func collectStreams(segment []byte, protocol protocolState) (*segmentStreams, pr
 // allTailStreams is a segment with every byte in the tail blob stream: the
 // fallback layout of FORMAT.md section 8 rule 5.
 func allTailStreams(segment []byte, protocol protocolState) *segmentStreams {
-	streams := &segmentStreams{isEncoding: true, protocol: protocol, tail: uint32(len(segment))}
+	streams := &segmentStreams{isEncoding: true, protocol: protocol}
 	streams.blobs[streamTail] = segment
 	collectBlobTokens(streams)
 	return streams
@@ -325,7 +325,7 @@ func encodeStreams(streams *segmentStreams, rawLen uint32, models *fileModels) (
 		entryCount++
 	}
 
-	coded := appendTransformFields(nil, streams.protocol, streams.tail, entryCount)
+	coded := appendTransformFields(nil, streams.protocol, entryCount)
 	coded = append(coded, table...)
 	coded = append(coded, bodies...)
 	return coded, len(coded) <= maxCodedLen
@@ -336,15 +336,14 @@ func encodeStreams(streams *segmentStreams, rawLen uint32, models *fileModels) (
 func storedSegment(segment []byte, protocol protocolState) []byte {
 	const noStreams = 0
 	coded := make([]byte, 0, transformFieldsLen+len(segment))
-	coded = appendTransformFields(coded, protocol, uint32(len(segment)), noStreams)
+	coded = appendTransformFields(coded, protocol, noStreams)
 	return append(coded, segment...)
 }
 
-func appendTransformFields(coded []byte, protocol protocolState, tail uint32, entryCount uint32) []byte {
+func appendTransformFields(coded []byte, protocol protocolState, entryCount uint32) []byte {
 	coded = binary.LittleEndian.AppendUint32(coded, protocol.fte)
 	coded = binary.LittleEndian.AppendUint32(coded, protocol.fte2)
 	coded = binary.LittleEndian.AppendUint32(coded, protocol.mvd1)
-	coded = binary.LittleEndian.AppendUint32(coded, tail)
 	return binary.LittleEndian.AppendUint32(coded, entryCount)
 }
 

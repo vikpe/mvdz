@@ -103,11 +103,11 @@ pub(crate) fn all_stored(src: &[u8]) -> Vec<u8> {
 pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
     use crate::fields::{read_usize, skip};
     use crate::streams::{RAW, TAIL, is_blob};
-    const PROTO_AND_TAIL_LEN: usize = 4 * 4;
+    const PROTOCOL_FIELDS_LEN: usize = 3 * 4;
     let mut total = 0;
     for segment in parts(file)?.segments {
         let mut rest = &segment[SEGMENT_FIELDS_LEN..];
-        skip(&mut rest, PROTO_AND_TAIL_LEN).context("the transform header")?;
+        skip(&mut rest, PROTOCOL_FIELDS_LEN).context("the transform header")?;
         let stream_count = read_usize(&mut rest).context("the stream count")?;
         for _ in 0..stream_count {
             let id = read_usize(&mut rest).context("a stream id")?;

@@ -321,7 +321,7 @@ mod tests {
         };
         let file = assemble(&header, &first_pass.file_models, &bodies);
         assert!(decodes_to(&file, &[demo], 1));
-        let stored_len = demo.len() + 20;
+        let stored_len = demo.len() + 16;
         assert!(file.ends_with(demo) && bodies[0].bytes.len() == 12 + stored_len);
     }
 }
