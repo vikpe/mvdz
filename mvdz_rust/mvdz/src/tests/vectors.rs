@@ -987,6 +987,20 @@ fn commands_demo_is_walked() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A match with float coordinates, then one whose `svc_serverdata` announces no extension.
+fn two_matches_demo() -> Vec<u8> {
+    [mvd1_float_demo(), commands_demo()].concat()
+}
+
+#[test]
+fn second_match_starts_from_its_own_server_data() -> anyhow::Result<()> {
+    let demo = two_matches_demo();
+    let file = compress(&demo)?;
+    assert_eq!(unstructured_len(&file)?, 0);
+    assert_eq!(decompress(&file, 1)?, demo);
+    Ok(())
+}
+
 /// None without the sample demos.
 fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let sources = || {
@@ -1093,6 +1107,13 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         encode(&protocol_change)?,
         &protocol_change,
         "synthetic demo whose second segment announces FTE2 extensions: later segments start from the changed protocol (rule 3)",
+    );
+    let two_matches = two_matches_demo();
+    add(
+        "two-matches.normal.mvdz",
+        encode(&two_matches)?,
+        &two_matches,
+        "synthetic demo of two matches: float coordinates (MVD1), then a server data without extensions, which resets the protocol state",
     );
     let oversized = oversized_frame_demo();
     add(

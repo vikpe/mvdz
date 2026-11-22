@@ -25,6 +25,7 @@ var compressedVectors = map[string]bool{
 	"usercmd.normal.segments.mvdz": true,
 	"commands.normal.mvdz":         true,
 	"protocol-change.normal.mvdz":  true,
+	"two-matches.normal.mvdz":      true,
 	"oversized-frame.normal.mvdz":  true,
 	"entity-words.normal.mvdz":     true,
 }

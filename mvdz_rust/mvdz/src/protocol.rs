@@ -122,10 +122,12 @@ impl ProtocolState {
         if self.has_fte_float_coords { 2 } else { 1 }
     }
 
+    /// A server data starts a match: an extension it does not announce is off.
     pub(crate) fn observe_server_data(&mut self, body: &[u8]) {
         const PROTOCOL_VERSION_FTE: u32 = u32::from_le_bytes(*b"FTEX");
         const PROTOCOL_VERSION_FTE_2: u32 = u32::from_le_bytes(*b"FTE2");
         const PROTOCOL_VERSION_MVD_1: u32 = u32::from_le_bytes(*b"MVD1");
+        *self = Self::default();
         let mut rest = body;
         while let Some(protocol) = read_u32(&mut rest) {
             if protocol == PROTOCOL_VERSION {

@@ -365,10 +365,12 @@ angle      = has_fte_float_coords ? 2 : 1
 ```
 
 A segment starts with the state in its transform header (`fte`, `fte2`,
-`mvd1`; section 3). `observe_server_data(body)` updates it after an
-`SVC_SERVER_DATA` body has been written:
+`mvd1`; section 3). `observe_server_data(body)` replaces it after an
+`SVC_SERVER_DATA` body has been written. A server data starts a match: an
+extension it does not announce is off.
 
 ```
+fte = fte2 = mvd1 = 0
 i = 0
 while i + 4 <= len(body):
     v = le32(body[i..]); i += 4

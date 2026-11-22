@@ -156,7 +156,9 @@ func (protocol protocolState) angleSize() uint32 {
 }
 
 // observeServerData takes the extensions an SVC_SERVER_DATA body announces.
+// A server data starts a match: an extension it does not announce is off.
 func (protocol *protocolState) observeServerData(body []byte) {
+	*protocol = protocolState{}
 	fields := byteCursor{data: body}
 	for {
 		version := fields.u32()
