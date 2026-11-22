@@ -19,51 +19,54 @@ const (
 	streamSoundNumber       = 13 // snd.num
 	streamTempEntityType    = 14 // te.type
 	streamUsercmd           = 15 // uc
+	streamLzLit             = 16 // lz.lit: literal bytes of the blob tokens
 
-	// Numeric streams: rANS residuals, decoded by the numeric groups.
+	// Numeric streams: rANS values, decoded by the numeric groups and the blob tokens.
 	// Origins and angles have one stream per axis: the id below plus the axis.
-	streamPlayerOrigin      = 16 // pi.ox, pi.oy, pi.oz
-	streamPlayerAngle       = 19 // pi.ap, pi.ay, pi.ar
-	streamEntityOrigin      = 22 // pe.ox, pe.oy, pe.oz
-	streamSoundOrigin       = 25 // snd.o
-	streamTempEntityOrigin  = 26 // te.o
-	streamPlayerFloatOrigin = 27 // pi.fx, pi.fy, pi.fz
-	streamEntityFloatOrigin = 30 // pe.fx, pe.fy, pe.fz
-	streamUsercmdAngle      = 33 // uc.a
+	streamPlayerOrigin      = 17 // pi.ox, pi.oy, pi.oz
+	streamPlayerAngle       = 20 // pi.ap, pi.ay, pi.ar
+	streamEntityOrigin      = 23 // pe.ox, pe.oy, pe.oz
+	streamSoundOrigin       = 26 // snd.o
+	streamTempEntityOrigin  = 27 // te.o
+	streamPlayerFloatOrigin = 28 // pi.fx, pi.fy, pi.fz
+	streamEntityFloatOrigin = 31 // pe.fx, pe.fy, pe.fz
+	streamUsercmdAngle      = 34 // uc.a
+	streamLzLen             = 35 // lz.len: match lengths of the blob tokens, 0 for a literal
+	streamLzDist            = 36 // lz.dist: match distances of the blob tokens
 
-	// Blob streams: plain bytes from the blob body, consumed by the walker.
-	streamMask            = 34 // mask
-	streamEscapeLength    = 35 // esclen
-	streamHiddenTag       = 36 // hid.tag
-	streamHiddenLength    = 37 // hid.len
-	streamHiddenType      = 38 // hid.type
-	streamHiddenDamage    = 39 // hid.dmg
-	streamPlayerNumber    = 40 // pi.num
-	streamPlayerModel     = 41 // pi.model
-	streamPlayerSkin      = 42 // pi.skin
-	streamPlayerEffects   = 43 // pi.eff
-	streamEntityHeader    = 44 // pe.hdr
-	streamEntityModel     = 45 // pe.model
-	streamEntityFrame     = 46 // pe.frame
-	streamEntityMisc      = 47 // pe.misc
-	streamStatLongIndex   = 48 // stl.idx
-	streamSoundMisc       = 49 // snd.misc
-	streamTempEntityMisc  = 50 // te.misc
-	streamPrintLevel      = 51 // pr.level
-	streamFrags           = 52 // frags
-	streamStatLongValue   = 53 // stl.val
-	streamRaw             = 54 // raw
-	streamTail            = 55 // tail
-	streamSet             = 56 // set
-	streamText            = 57 // text
-	streamPing            = 58 // ping
-	streamNails           = 59 // nails
-	streamHiddenMisc      = 60 // hid.misc
-	streamSoundFloat      = 61 // snd.f
-	streamTempEntityFloat = 62 // te.f
-	streamGeneric         = 63 // gen.c: the id is 63 plus the command byte
+	// Blob streams: plain bytes from the blob tokens, consumed by the walker.
+	streamMask            = 37 // mask
+	streamEscapeLen       = 38 // esclen
+	streamHiddenTag       = 39 // hid.tag
+	streamHiddenLen       = 40 // hid.len
+	streamHiddenType      = 41 // hid.type
+	streamHiddenDamage    = 42 // hid.dmg
+	streamPlayerNumber    = 43 // pi.num
+	streamPlayerModel     = 44 // pi.model
+	streamPlayerSkin      = 45 // pi.skin
+	streamPlayerEffects   = 46 // pi.eff
+	streamEntityHeader    = 47 // pe.hdr
+	streamEntityModel     = 48 // pe.model
+	streamEntityFrame     = 49 // pe.frame
+	streamEntityMisc      = 50 // pe.misc
+	streamStatLongIndex   = 51 // stl.idx
+	streamSoundMisc       = 52 // snd.misc
+	streamTempEntityMisc  = 53 // te.misc
+	streamPrintLevel      = 54 // pr.level
+	streamFrags           = 55 // frags
+	streamStatLongValue   = 56 // stl.val
+	streamRaw             = 57 // raw
+	streamTail            = 58 // tail
+	streamSet             = 59 // set
+	streamText            = 60 // text
+	streamPing            = 61 // ping
+	streamNails           = 62 // nails
+	streamHiddenMisc      = 63 // hid.misc
+	streamSoundFloat      = 64 // snd.f
+	streamTempEntityFloat = 65 // te.f
+	streamGeneric         = 66 // gen.c: the id is 66 plus the command byte
 
-	firstNumericStream = 16
-	firstBlobStream    = 34
-	streamCount        = 319
+	firstNumericStream = 17
+	firstBlobStream    = 37
+	streamCount        = 322
 )

@@ -86,55 +86,83 @@ fn multi_demoinfo() -> Vec<u8> {
     demo
 }
 
-/// Returns (models block body, transform body).
-fn transform_body(lazy: &[(usize, &[u8])], blobs: &[(usize, &[u8])]) -> (Vec<u8>, Vec<u8>) {
-    use crate::coder::rans;
-    let mut models: Vec<Option<rans::FileModel>> = Vec::new();
-    let mut ids = Vec::new();
-    let mut bodies = Vec::new();
-    for (id, symbols) in lazy {
-        let contexts = vec![0u16; symbols.len()];
-        let mut tally = rans::Tally::new(256);
-        tally.add(symbols, &contexts);
-        let model = tally.file_model();
-        bodies.push(rans::encode_bytes(symbols, &contexts, &model));
-        models.resize_with(models.len().max(id + 1), || None);
-        models[*id] = Some(model);
-        ids.push(*id);
-    }
-    let lazy: Vec<(usize, usize, &[u8])> = lazy
-        .iter()
-        .zip(&bodies)
-        .map(|((id, symbols), body)| (*id, symbols.len(), &body[..]))
+/// Returns (models block body, transform body). The structural streams are coded under
+/// context 0; the blob bytes go through the tokens as the encoder's do.
+fn transform_body(
+    lazy: &[(usize, &[u8])],
+    blobs: &[(usize, &[u8])],
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let blob_bytes: Vec<u8> = (blobs.iter())
+        .flat_map(|(_, blob)| blob.iter().copied())
         .collect();
-    let lazy = &lazy;
+    let blob_counts: Vec<(usize, usize)> =
+        (blobs.iter()).map(|&(id, blob)| (id, blob.len())).collect();
+    let tokens = crate::lz::tokens(&blob_bytes);
+    token_body(lazy, &blob_counts, &tokens, 0)
+}
+
+/// As [`transform_body`], with the blob streams' counts and their tokens given.
+fn token_body(
+    lazy: &[(usize, &[u8])],
+    blob_counts: &[(usize, usize)],
+    tokens: &crate::lz::Tokens,
+    tail: usize,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    use crate::rans;
+    use crate::streams::{LZ_DIST, LZ_LEN, LZ_LIT};
+    fn file_model(alphabet: usize, symbols: &[u8], contexts: &[u16]) -> rans::FileModel {
+        let mut tally = rans::Tally::new(alphabet);
+        tally.add(symbols, contexts);
+        tally.file_model()
+    }
+    const UNCODABLE: &str = "every symbol has a code";
+    // (id, count, model, body)
+    let mut coded: Vec<(usize, usize, rans::FileModel, Vec<u8>)> = Vec::new();
+    let structural = (lazy.iter())
+        .map(|&(id, symbols)| (id, symbols, vec![0u16; symbols.len()]))
+        .chain([(
+            LZ_LIT,
+            &tokens.literals[..],
+            tokens.literal_contexts.clone(),
+        )]);
+    for (id, symbols, contexts) in structural {
+        if !symbols.is_empty() {
+            let model = file_model(256, symbols, &contexts);
+            let body = rans::encode_bytes(symbols, &contexts, &model).context(UNCODABLE)?;
+            coded.push((id, symbols.len(), model, body));
+        }
+    }
+    for (id, numeric) in [(LZ_LEN, &tokens.lens), (LZ_DIST, &tokens.dists)] {
+        if !numeric.symbols.is_empty() {
+            let model = file_model(rans::NUMERIC_ALPHABET, &numeric.symbols, &numeric.contexts);
+            let body = rans::encode_num(numeric, &model).context(UNCODABLE)?;
+            coded.push((id, numeric.symbols.len(), model, body));
+        }
+    }
+    coded.sort_by_key(|&(id, ..)| id);
     let mut body = Vec::new();
     // fte, fte2, mvd1, tail; the number of streams
-    for field in [0, 0, 0, 0, lazy.len() + blobs.len()] {
+    for field in [0, 0, 0, tail, coded.len() + blob_counts.len()] {
         put_usize(&mut body, field);
     }
-    for (id, count, stream_body) in lazy {
+    for (id, count, _, stream_body) in &coded {
         for field in [*id, *count, stream_body.len()] {
             put_usize(&mut body, field);
         }
     }
-    let mut blob_bytes = Vec::new();
-    for (id, blob) in blobs {
-        put_usize(&mut body, *id);
-        put_usize(&mut body, blob.len());
-        blob_bytes.extend_from_slice(blob);
+    for &(id, count) in blob_counts {
+        put_usize(&mut body, id);
+        put_usize(&mut body, count);
     }
-    let deflated = if blob_bytes.is_empty() {
-        Vec::new()
-    } else {
-        crate::deflate::compress(&blob_bytes)
-    };
-    put_usize(&mut body, deflated.len());
-    for (_, _, stream_body) in lazy {
-        body.extend_from_slice(stream_body);
+    let mut ids = Vec::new();
+    let mut models: Vec<Option<rans::FileModel>> = Vec::new();
+    for (id, _, model, stream_body) in coded {
+        body.extend_from_slice(&stream_body);
+        models.resize_with(models.len().max(id + 1), || None);
+        models[id] = Some(model);
+        ids.push(id);
     }
-    body.extend_from_slice(&deflated);
-    (crate::segment::models_body(&models, &ids), body)
+    Ok((crate::segment::models_body(&models, &ids), body))
 }
 
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
@@ -186,8 +214,8 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         "one bit of the header's CRC-32 flipped",
     );
     let mut edited_file = base.clone();
-    edited_file[4] = 3;
-    add("version", edited_file, "version 3");
+    edited_file[4] = 4;
+    add("version", edited_file, "version 4");
     let mut edited = file_parts.clone();
     edited.segments.remove(2);
     add(
@@ -269,7 +297,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         if let Some(misc) = misc {
             blobs.push((HIDMISC, misc));
         }
-        one_segment(&one, &transform_body(&lazy, &blobs))
+        one_segment(&one, &transform_body(&lazy, &blobs)?)
     };
     add(
         "ucmd-grid",
@@ -282,10 +310,56 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         usercmd_segment(None, Some(&misc))?,
         "a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream",
     );
+    blob_tokens(&mut add)?;
     models_block(&mut add)
 }
 
+/// Four bytes of tail, with tokens no encoder writes.
+fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
+    use crate::lz::Token;
+    use crate::streams::TAIL;
+    let demo = b"aaaa";
+    let literal = Token::Literal(b'a');
+    for (name, tokens, how) in [
+        (
+            "lz-distance",
+            vec![literal, Token::Match { len: 3, dist: 2 }],
+            "a match reaching 2 bytes back after 1 byte",
+        ),
+        (
+            "lz-overrun",
+            vec![literal, Token::Match { len: 9, dist: 1 }],
+            "a match of 9 bytes where 3 are left",
+        ),
+        (
+            "lz-short",
+            vec![literal, literal],
+            "tokens for 2 of the 4 blob bytes",
+        ),
+    ] {
+        let tokens = crate::lz::code(demo, &tokens);
+        let body = token_body(&[], &[(TAIL, demo.len())], &tokens, demo.len())?;
+        add(name, one_segment(demo, &body)?, how);
+    }
+    let stored = |raw: &[u8]| {
+        let mut body = Vec::new();
+        // fte, fte2, mvd1, tail; no stream
+        for field in [0, 0, 0, demo.len(), 0] {
+            put_usize(&mut body, field);
+        }
+        body.extend_from_slice(raw);
+        one_segment(demo, &(Vec::new(), body))
+    };
+    add(
+        "stored-len",
+        stored(&demo[..3])?,
+        "a stored segment of 4 bytes holding 3",
+    );
+    Ok(())
+}
+
 fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
+    const OVER_ONE_PER_CONTEXT: u32 = (1 << 16) + 1;
     let usercmd = usercmd_demo();
     let file = compress(&several_segments(&usercmd))?;
     let file_parts = parts(&file)?;
@@ -293,11 +367,19 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         !file_parts.models.is_empty(),
         "a segmented normal file has models"
     );
-    let entries = models_entries(&file_parts.models)?;
-    let with_entries = |entries: &[(usize, Vec<u8>)]| {
+    let models = models_parts(&file_parts.models)?;
+    let entries = models.entries.clone();
+    let with_models = |models_body: Vec<u8>| {
         let mut edited = file_parts.clone();
-        edited.models = models_body(entries);
+        edited.models = models_body;
         edited.build()
+    };
+    let with_entries = |entries: &[ModelEntry]| {
+        let edited = ModelsParts {
+            meta: models.meta.clone(),
+            entries: entries.to_vec(),
+        };
+        with_models(edited.build())
     };
     let mut edited = entries.clone();
     edited.remove(0);
@@ -306,11 +388,9 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         with_entries(&edited),
         "the models block without the entry of a stream the segments code with rANS",
     );
-    let mut edited = file_parts.clone();
-    edited.models.clear();
     add(
         "tables-missing",
-        edited.build(),
+        with_models(Vec::new()),
         "an empty models block: rANS streams without a model",
     );
     let mut edited = entries.clone();
@@ -329,21 +409,25 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     );
     let lazy_entry = entries
         .iter()
-        .find(|entry| crate::streams::is_lazy(entry.0))
+        .find(|entry| crate::streams::is_lazy(entry.stream))
         .context("a structural stream's model")?;
     let numeric_at = entries
         .iter()
-        .position(|entry| crate::streams::is_numeric(entry.0))
+        .position(|entry| crate::streams::is_numeric(entry.stream))
         .context("a numeric stream's model")?;
+    let as_stream = |stream: usize| ModelEntry {
+        stream,
+        ..lazy_entry.clone()
+    };
     let mut edited = entries.clone();
-    edited.push((crate::streams::TEXT, lazy_entry.1.clone()));
+    edited.push(as_stream(crate::streams::TEXT));
     add(
         "tables-blob-id",
         with_entries(&edited),
         "a model for a blob stream (text)",
     );
     let mut edited = entries.clone();
-    edited.push((crate::streams::STREAM_COUNT, lazy_entry.1.clone()));
+    edited.push(as_stream(crate::streams::STREAM_COUNT));
     add(
         "tables-unassigned-id",
         with_entries(&edited),
@@ -354,38 +438,39 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         with_entries(&[]),
         "a models block with n = 0",
     );
-    let mut edited = file_parts.clone();
-    edited.models.push(0);
+    let mut edited = file_parts.models.clone();
+    edited.push(0);
     add(
         "tables-trailing",
-        edited.build(),
+        with_models(edited),
         "a models block with one byte after its last entry",
     );
     let mut edited = entries.clone();
-    edited[0].1.push(0);
+    edited[0].coded.push(0);
     add(
         "tables-padding",
         with_entries(&edited),
-        "a model with one byte of padding (not consumed exactly)",
+        "a model whose coded stream has one byte of padding (not consumed exactly)",
     );
     let mut edited = entries.clone();
-    edited[numeric_at].1.clone_from(&lazy_entry.1);
+    edited[numeric_at] = as_stream(entries[numeric_at].stream);
     add(
         "tables-alphabet",
         with_entries(&edited),
-        "a numeric stream's entry holding a structural model (alphabet 256)",
+        "a numeric stream's entry holding a structural model (the raw length of alphabet 256)",
     );
     let mut edited = entries.clone();
-    edited[0].1 = {
-        const OVER_ONE_PER_CONTEXT: usize = (1 << 16) + 1;
-        let mut model = Vec::new();
-        crate::fields::put_usize(&mut model, OVER_ONE_PER_CONTEXT);
-        model.extend_from_slice(&crate::deflate::compress(&[]));
-        model
-    };
+    edited[0].raw_len = 1 << 24;
+    add(
+        "tables-raw-size",
+        with_entries(&edited),
+        "a model declaring 16 MiB of raw bytes: the models together over the limit",
+    );
+    let own_count_only = OVER_ONE_PER_CONTEXT.to_le_bytes();
+    let block = crate::rans::write_models_block(&[(entries[0].stream, &own_count_only)]);
     add(
         "tables-own-count",
-        with_entries(&edited),
+        with_models(block.body),
         "a model declaring 65537 own tables: more than there are contexts",
     );
     Ok(())
@@ -549,6 +634,12 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         &framed,
         "synthetic demo with demoinfo, written as all tail (the encoder's fallback layout)",
     );
+    add(
+        "framed-as-stored.mvdz",
+        all_stored(&framed),
+        &framed,
+        "the same demo, written as a stored segment (the encoder's last fallback)",
+    );
     add("empty.normal.mvdz", encode(b"")?, b"", "an empty demo");
     let usercmd = usercmd_demo();
     add(
@@ -616,5 +707,62 @@ fn vectors_reproduce() -> anyhow::Result<()> {
             "{name}: the encoder no longer reproduces the committed vector"
         );
     }
+    Ok(())
+}
+
+/// The canonical parse (FORMAT.md section 8) on fixed inputs, for an encoder in another
+/// language to check its parser before it compares whole files.
+fn lz_tokens_text() -> String {
+    use crate::lz::Token;
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut noise = |bound: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound) as u8
+    };
+    // the fifth byte differs each time: only a chain longer than the limit finds the first
+    let mut over_the_chain_limit = Vec::new();
+    for occurrence in 0..40u8 {
+        over_the_chain_limit.extend_from_slice(b"wxyz");
+        over_the_chain_limit.push(b'0' + occurrence);
+    }
+    over_the_chain_limit.extend_from_slice(b"wxyz0");
+    let few_symbols: Vec<u8> = (0..400).map(|_| b'a' + noise(3)).collect();
+    let mut inputs: Vec<Vec<u8>> = [
+        &b"abc"[..],
+        b"abcXabc",
+        b"abcdXabcdYabcd",
+        b"aaaaaaaaaa",
+        b"\\name\\alice\\team\\red\\name\\bob\\team\\red\\name\\alice\\team\\blue",
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    inputs.push(over_the_chain_limit);
+    inputs.push(few_symbols);
+    let mut text = String::from(
+        "# input as hex\ttokens: L<byte as hex> for a literal, M<length>,<distance> for a match\n",
+    );
+    for input in inputs {
+        let tokens: Vec<String> = crate::lz::parse(&input)
+            .into_iter()
+            .map(|token| match token {
+                Token::Literal(byte) => format!("L{byte:02x}"),
+                Token::Match { len, dist } => format!("M{len},{dist}"),
+            })
+            .collect();
+        let _ = writeln!(text, "{}\t{}", hex(&input), tokens.join(" "));
+    }
+    text
+}
+
+#[test]
+fn lz_tokens_reproduce() -> anyhow::Result<()> {
+    let path = dir().join("lz-tokens.tsv");
+    if std::env::var_os("MVDZ_WRITE_VECTORS").is_some() {
+        std::fs::write(&path, lz_tokens_text())?;
+        return Ok(());
+    }
+    assert_eq!(std::fs::read_to_string(&path)?, lz_tokens_text());
     Ok(())
 }

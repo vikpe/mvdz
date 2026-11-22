@@ -1,9 +1,10 @@
 //! Numeric groups: each walks one record list from the walker, predicts every field from
 //! group-local state and codes the residual; one code path for both directions.
 
-use crate::proto::{TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3};
-use crate::streams::{PE_F0, PE_OX, PI_AP, PI_F0, PI_OX, SND_O, TE_O, UC_A};
-use crate::walk::{
+use crate::math::{div_round, grid_f32, on_grid, residual_bucket};
+use crate::protocol::{TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3};
+use crate::streams::{LZ_DIST, LZ_LEN, PE_F0, PE_OX, PI_AP, PI_F0, PI_OX, SND_O, TE_O, UC_A};
+use crate::walker::{
     NO_OFFSET, PE_FLOAT, PE_IN_PREVIOUS, PacketEntityRecord, PlayerInfoRecord, Records,
 };
 
@@ -41,56 +42,9 @@ pub(crate) fn numeric_context(stream: usize, context: &NumericContext) -> u32 {
                 | clamped(features[2], 15) << 10
                 | u32::from(features[3]) << 14
         }
+        LZ_LEN | LZ_DIST => u32::from(features[0]),
         _ => clamped(features[0], 63) | u32::from(features[1]) << 6,
     }
-}
-
-/// (symbol, mantissa bit count, mantissa): the symbol is 0 for zero, else
-/// 2 * bitlen(|value|) - 1 + sign (0..=64).
-#[inline(always)]
-pub(crate) fn bucket(value: i32) -> (u16, u32, u32) {
-    let magnitude = value.unsigned_abs();
-    if magnitude == 0 {
-        return (0, 0, 0);
-    }
-    let width = magnitude.bit_width();
-    let symbol = 2 * width - 1 + u32::from(value < 0);
-    (
-        symbol as u16,
-        width - 1,
-        magnitude & ((1u32 << (width - 1)) - 1),
-    )
-}
-
-#[inline(always)]
-pub(crate) fn residual_bucket(residual: i32) -> u8 {
-    bucket(residual).0 as u8
-}
-
-/// floor(2^40 / d) + 1: n * RECIPROCALS[d] >> 40 == n / d exactly for
-/// 0 <= n < 2^31, 1 <= d <= 255 (the error n/2^40 < 2^-9 < 1/d).
-static RECIPROCALS: [u64; 256] = {
-    let mut table = [0u64; 256];
-    let mut divisor = 1;
-    while divisor < 256 {
-        table[divisor] = (1u64 << 40) / divisor as u64 + 1;
-        divisor += 1;
-    }
-    table
-};
-
-/// `divisor` > 0; halves round away from zero.
-#[inline(always)]
-fn div_round(dividend: i32, divisor: i32) -> i32 {
-    let magnitude = dividend.unsigned_abs() + divisor.cast_unsigned() / 2;
-    let quotient = if divisor < 256 {
-        ((u128::from(magnitude) * u128::from(RECIPROCALS[divisor.cast_unsigned() as usize])) >> 40)
-            as u32
-    } else {
-        magnitude / divisor.cast_unsigned()
-    }
-    .cast_signed();
-    if dividend < 0 { -quotient } else { quotient }
 }
 
 /// Frame intervals are clamped so the scaled velocity fits 32 bits.
@@ -487,8 +441,8 @@ fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &
                 ],
             };
             let value = if IS_ENCODE {
-                let value = crate::walk::on_grid(read_u32(io.segment(), offset))
-                    .expect("the walker saw it on the grid");
+                let value =
+                    on_grid(read_u32(io.segment(), offset)).expect("the walker saw it on the grid");
                 io.code(
                     0,
                     context,
@@ -497,7 +451,7 @@ fn usercmd_angles<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, io: &
                 value
             } else {
                 let value = prediction.wrapping_add(io.code(0, context, 0).cast_unsigned() as u16);
-                write_u32(io.segment_mut(), offset, crate::walk::grid_f32(value));
+                write_u32(io.segment_mut(), offset, grid_f32(value));
                 value
             };
             track.residual = i32::from(value.wrapping_sub(prediction).cast_signed());
@@ -570,54 +524,6 @@ fn temp_entity_origins<const IS_ENCODE: bool, IO: NumericIo>(records: &Records, 
                     context,
                 )
                 .0;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-    fn div_round_ref(dividend: i64, divisor: i64) -> i64 {
-        if (dividend < 0) == (divisor < 0) {
-            (dividend + divisor / 2) / divisor
-        } else {
-            -((-dividend + divisor / 2) / divisor)
-        }
-    }
-    #[test]
-    fn div_round_matches_reference() {
-        let mut rng_state = 12345u64;
-        for divisor in 1..600i32 {
-            for _ in 0..2000 {
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                let dividend =
-                    (rng_state % (2 * 32768 * 32767) as u64).cast_signed() - 32768 * 32767;
-                assert_eq!(
-                    i64::from(div_round(dividend as i32, divisor)),
-                    div_round_ref(dividend, i64::from(divisor)),
-                    "{dividend} / {divisor}"
-                );
-            }
-            for dividend in [
-                -32768 * 32767,
-                32767 * 32767,
-                0,
-                1,
-                -1,
-                divisor / 2,
-                -(divisor / 2),
-                divisor,
-                -divisor,
-            ] {
-                assert_eq!(
-                    i64::from(div_round(dividend, divisor)),
-                    div_round_ref(i64::from(dividend), i64::from(divisor)),
-                    "{dividend} / {divisor}"
-                );
             }
         }
     }

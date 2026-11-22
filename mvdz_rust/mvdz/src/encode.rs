@@ -1,6 +1,5 @@
 //! Encoding: walk, code, assemble, and check that the file decodes to its input.
 
-use crate::coder::rans::FileModel;
 use crate::decode::Decoder;
 use crate::error::{Error, Result};
 use crate::format::{
@@ -8,7 +7,10 @@ use crate::format::{
     segment_header_bytes,
 };
 use crate::parallel::{HAS_THREADS, par_map, thread_count};
-use crate::proto::{DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, Proto, frame_len};
+use crate::protocol::{
+    DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, Protocol, frame_len,
+};
+use crate::rans::FileModel;
 use crate::segment::{self, Numerics, Walked, cut_points};
 use sha2::{Digest, Sha256};
 
@@ -56,7 +58,7 @@ pub(crate) fn starts_like_mvd(bytes: &[u8]) -> bool {
     if first_len <= head {
         return false;
     }
-    if segment::walk(&bytes[..first_len], Proto::default())
+    if segment::walk(&bytes[..first_len], Protocol::default())
         .is_some_and(|(walked, _)| walked.unstructured_len() == 0)
     {
         return true;
@@ -84,72 +86,74 @@ struct FirstPass<'a> {
 #[derive(Debug)]
 struct SegmentPlan<'a> {
     raw: &'a [u8],
-    start_proto: Proto,
+    start_protocol: Protocol,
     is_walkable: bool,
 }
 
 /// A pass 1 walk of one segment.
 struct Counted {
-    start_proto: Proto,
-    end_proto: Proto,
-    walked: Option<(Walked, Numerics)>,
+    start_protocol: Protocol,
+    end_protocol: Protocol,
+    is_walkable: bool,
+    /// All tail when the segment does not walk.
+    walked: Walked,
+    numerics: Numerics,
 }
 
-fn count_segment(raw: &[u8], start_proto: Proto) -> Counted {
-    match segment::walk(raw, start_proto) {
-        Some((walked, end_proto)) => {
-            let numerics = segment::numerics(raw, &walked);
-            Counted {
-                start_proto,
-                end_proto,
-                walked: Some((walked, numerics)),
-            }
-        }
-        None => Counted {
-            start_proto,
-            end_proto: start_proto,
-            walked: None,
-        },
+fn count_segment(raw: &[u8], start_protocol: Protocol) -> Counted {
+    let (walked, end_protocol, is_walkable) = match segment::walk(raw, start_protocol) {
+        Some((walked, end_protocol)) => (walked, end_protocol, true),
+        None => (
+            segment::walk_tail(raw, start_protocol),
+            start_protocol,
+            false,
+        ),
+    };
+    Counted {
+        start_protocol,
+        end_protocol,
+        is_walkable,
+        numerics: segment::numerics(raw, &walked),
+        walked,
     }
 }
 
 /// Pass 1 (FORMAT.md section 8) keeps only counts; pass 2 walks again. A segment starts in
-/// the proto the one before ends in, so the segments of a batch are walked in parallel from
-/// the end proto of the batch before, and the few that start in another proto walked again.
+/// the protocol the one before ends in, so the segments of a batch are walked in parallel from
+/// the end protocol of the batch before, and the few that start in another protocol walked again.
 fn run_first_pass<'a>(segments: &[&'a [u8]], threads: usize) -> FirstPass<'a> {
     let mut model_builder = segment::ModelBuilder::default();
-    let mut proto = Proto::default();
+    let mut protocol = Protocol::default();
     let mut plans = Vec::with_capacity(segments.len());
     let mut first = 0;
     while first < segments.len() {
-        // the first segment alone: it sets the proto of most demos
+        // the first segment alone: it sets the protocol of most demos
         let batch_len = if first == 0 {
             1
         } else {
             threads.min(segments.len() - first)
         };
-        let batch_proto = proto;
+        let batch_protocol = protocol;
         let batch_segments = &segments[first..first + batch_len];
         let mut batch = par_map(threads, batch_segments, |&raw| {
-            count_segment(raw, batch_proto)
+            count_segment(raw, batch_protocol)
         });
         for (&raw, counted) in batch_segments.iter().zip(batch.iter_mut()) {
-            if counted.start_proto != proto {
-                *counted = count_segment(raw, proto);
+            if counted.start_protocol != protocol {
+                *counted = count_segment(raw, protocol);
             }
-            proto = counted.end_proto;
+            protocol = counted.end_protocol;
             plans.push(SegmentPlan {
                 raw,
-                start_proto: counted.start_proto,
-                is_walkable: counted.walked.is_some(),
+                start_protocol: counted.start_protocol,
+                is_walkable: counted.is_walkable,
             });
         }
-        let walked_segments: Vec<(&Walked, &Numerics)> = batch
+        let counted_segments: Vec<(&Walked, &Numerics)> = batch
             .iter()
-            .filter_map(|counted| counted.walked.as_ref())
-            .map(|(walked, numerics)| (walked, numerics))
+            .map(|counted| (&counted.walked, &counted.numerics))
             .collect();
-        model_builder.add(&walked_segments, threads);
+        model_builder.add(&counted_segments, threads);
         first += batch_len;
     }
     FirstPass {
@@ -193,7 +197,7 @@ pub(crate) fn compress(src: &[u8], threads: usize) -> Result<Vec<u8>> {
         crc32: crc,
         sha256,
     };
-    let bodies = code_segments(&first_pass, threads)?;
+    let bodies = code_segments(&first_pass, threads);
     let out = assemble(&header, &first_pass.file_models, &bodies);
     if !decodes_to(&out, &segments, threads) {
         return Err(Error::Internal(
@@ -203,25 +207,21 @@ pub(crate) fn compress(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn code_segments(first_pass: &FirstPass, threads: usize) -> Result<Vec<Body>> {
-    let bodies = par_map(threads, &first_pass.segments, |plan| {
-        let walked = plan
-            .is_walkable
-            .then(|| segment::walk(plan.raw, plan.start_proto))
+/// FORMAT.md section 8 rule 5: transform-coded, else all tail, else stored.
+fn code_segments(first_pass: &FirstPass, threads: usize) -> Vec<Body> {
+    let file_models = &first_pass.file_models;
+    par_map(threads, &first_pass.segments, |plan| {
+        let walked = (plan.is_walkable)
+            .then(|| segment::walk(plan.raw, plan.start_protocol))
             .flatten();
-        if let Some((walked, _)) = walked
-            && let Ok(body) = Body::new(plan, &walked, &first_pass.file_models)
-        {
-            return Ok(body);
-        }
-        tail_body(plan)
-    });
-    bodies.into_iter().collect()
-}
-
-fn tail_body(plan: &SegmentPlan) -> Result<Body> {
-    let walked = segment::walk_tail(plan.raw, plan.start_proto);
-    Body::new(plan, &walked, &[])
+        let transform_coded =
+            walked.and_then(|(walked, _)| Body::coded(plan, &walked, file_models));
+        let coded = transform_coded.or_else(|| {
+            let all_tail = segment::walk_tail(plan.raw, plan.start_protocol);
+            Body::coded(plan, &all_tail, file_models)
+        });
+        coded.unwrap_or_else(|| Body::stored(plan))
+    })
 }
 
 #[derive(Debug)]
@@ -231,21 +231,37 @@ struct Body {
 }
 
 impl Body {
-    fn new(plan: &SegmentPlan, walked: &Walked, file_models: &[Option<FileModel>]) -> Result<Self> {
-        let raw = plan.raw;
-        let numerics = segment::numerics(raw, walked);
+    /// `None` when the models cannot code the segment or it would be too large.
+    fn coded(
+        plan: &SegmentPlan,
+        walked: &Walked,
+        file_models: &[Option<FileModel>],
+    ) -> Option<Self> {
+        let numerics = segment::numerics(plan.raw, walked);
         let mut model_ids = Vec::new();
-        let mut bytes = segment_header_bytes(
-            raw.len() as u32,
-            segment::duration_ms(raw),
-            crc32fast::hash(raw),
-        );
         let coded = segment::encode(walked, &numerics, &mut model_ids, file_models)
-            .filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)
-            .ok_or(Error::Internal("a segment that cannot be coded"))?;
+            .filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)?;
+        let mut bytes = segment_fields(plan.raw);
         bytes.extend_from_slice(&coded);
-        Ok(Self { bytes, model_ids })
+        Some(Self { bytes, model_ids })
     }
+
+    fn stored(plan: &SegmentPlan) -> Self {
+        let mut bytes = segment_fields(plan.raw);
+        bytes.extend_from_slice(&segment::stored(plan.raw, plan.start_protocol));
+        Self {
+            bytes,
+            model_ids: Vec::new(),
+        }
+    }
+}
+
+fn segment_fields(raw: &[u8]) -> Vec<u8> {
+    segment_header_bytes(
+        raw.len() as u32,
+        segment::duration_ms(raw),
+        crc32fast::hash(raw),
+    )
 }
 
 fn assemble(header: &Header, file_models: &[Option<FileModel>], bodies: &[Body]) -> Vec<u8> {
@@ -278,4 +294,34 @@ fn decodes_to(file: &[u8], segments: &[&[u8]], threads: usize) -> bool {
         .all(|&raw| matches!(decoder.next_segment(), Ok(Some(segment)) if segment == raw));
     // the whole-demo checks, and nothing after the last segment
     is_each_segment_decoded && matches!(decoder.next_segment(), Ok(None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Without models for the blob tokens only the stored segment is left.
+    #[test]
+    fn segment_no_model_codes_is_stored() {
+        let demo = b"not a demo: neither walked nor coded as tail";
+        let first_pass = FirstPass {
+            file_models: Vec::new(),
+            segments: vec![SegmentPlan {
+                raw: demo,
+                start_protocol: Protocol::default(),
+                is_walkable: false,
+            }],
+        };
+        let bodies = code_segments(&first_pass, 1);
+        let header = Header {
+            size_bytes: demo.len() as u64,
+            duration_ms: 0,
+            crc32: crc32fast::hash(demo),
+            sha256: [0; 32],
+        };
+        let file = assemble(&header, &first_pass.file_models, &bodies);
+        assert!(decodes_to(&file, &[demo], 1));
+        let stored_len = demo.len() + 20;
+        assert!(file.ends_with(demo) && bodies[0].bytes.len() == 12 + stored_len);
+    }
 }

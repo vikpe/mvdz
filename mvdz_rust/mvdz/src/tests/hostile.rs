@@ -148,61 +148,6 @@ fn declared_sizes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// (value, length in bytes)
-fn leb128(bytes: &[u8]) -> Option<(usize, usize)> {
-    let mut value = 0usize;
-    for (index, &byte) in bytes.iter().enumerate().take(5) {
-        value |= usize::from(byte & 0x7f) << (7 * index);
-        if byte < 0x80 {
-            return Some((value, index + 1));
-        }
-    }
-    None
-}
-
-/// Robustness 5: a 2.3 KB model header took 1.3 GB and 3.6 s before rule M2.
-#[test]
-fn model_amplification() -> anyhow::Result<()> {
-    let Some(dir) = test_data("poc") else {
-        return Ok(());
-    };
-    let demo = synthetic(&[], false);
-    let file = compress(&demo)?;
-    let file_parts = parts(&file)?;
-    for name in ["v2model_1000.bin", "v2model_16000.bin", "v2model_65535.bin"] {
-        // the reviewer's layout: LEB128 header length, header, rANS data
-        let Ok(proof_of_concept) = std::fs::read(dir.join(name)) else {
-            continue;
-        };
-        let (header_len, at) = leb128(&proof_of_concept).context("the model's header length")?;
-        let header = proof_of_concept
-            .get(at..at + header_len)
-            .context("the model's header")?;
-        let rest = &proof_of_concept[at + header_len..];
-        let mut models = Vec::new();
-        for field in [1, 0, header.len()] {
-            put_usize(&mut models, field);
-        }
-        models.extend_from_slice(header);
-        // fte, fte2, mvd1, tail; one entry (id 0, count, length); no blob body
-        let mut body = Vec::new();
-        for field in [0, 0, 0, 0, 1, 0, demo.len(), rest.len(), 0] {
-            put_usize(&mut body, field);
-        }
-        body.extend_from_slice(rest);
-        let mut segment =
-            segment_header_bytes(u32::try_from(demo.len())?, 0, crc32fast::hash(&demo));
-        segment.extend_from_slice(&body);
-        let mut edited = file_parts.clone();
-        edited.models = models;
-        edited.segments = vec![segment];
-        refused(&edited.build(), name, |error| {
-            *error == Error::Corrupt("model")
-        });
-    }
-    Ok(())
-}
-
 /// Spec review items 2-4, robustness 13.
 #[test]
 fn mutations_agree() -> anyhow::Result<()> {
@@ -230,23 +175,21 @@ fn mutations_agree() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Once built, every table takes a 16 KiB LUT.
+/// A raw structural model; once built, every table takes a 16 KiB LUT.
 fn wide_model(table_count: u16) -> Vec<u8> {
     let mut state = 1u32;
     let mut next_quantized = || {
         state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
         (1 + (state >> 16) % 12) as u8
     };
-    let mut contexts_and_tables = Vec::new();
-    for context in 0..table_count {
-        contexts_and_tables.extend_from_slice(&context.to_le_bytes());
-    }
-    for _ in 0..(usize::from(table_count) + 1) * 256 {
-        contexts_and_tables.push(next_quantized());
-    }
     let mut model = Vec::new();
     put_usize(&mut model, usize::from(table_count));
-    model.extend_from_slice(&crate::deflate::compress(&contexts_and_tables));
+    for context in 0..table_count {
+        model.extend_from_slice(&context.to_le_bytes());
+    }
+    for _ in 0..(usize::from(table_count) + 1) * 256 {
+        model.push(next_quantized());
+    }
     model
 }
 
@@ -257,21 +200,14 @@ fn large_models_block() -> anyhow::Result<()> {
     let mut file_parts = parts(&file)?;
     assert!(!file_parts.models.is_empty());
     let model = wide_model(512);
-    let mut models = Vec::new();
-    let lazy: Vec<usize> = (0..crate::streams::LAZY_STREAM_COUNT)
-        .filter(|&stream| crate::streams::is_lazy(stream))
+    let raw_models: Vec<(usize, &[u8])> = (0..crate::streams::LAZY_STREAM_COUNT)
+        .map(|stream| (stream, &model[..]))
         .collect();
-    put_usize(&mut models, lazy.len());
-    for stream in lazy {
-        put_usize(&mut models, stream);
-        put_usize(&mut models, model.len());
-        models.extend_from_slice(&model);
-    }
-    file_parts.models = models;
+    file_parts.models = crate::rans::write_models_block(&raw_models).body;
     let read_models = |max_memory: u64| {
-        crate::coder::rans::read_models_block(&file_parts.models, 1, max_memory).map(|_| ())
+        crate::rans::read_models_block(&file_parts.models, 1, max_memory).map(|_| ())
     };
-    // the models: 16 x 513 LUTs of 16 KiB, just over 128 MiB
+    // the models: 17 x 513 LUTs of 16 KiB, over 128 MiB
     let max_memory: u64 = 128 << 20;
     assert_eq!(
         read_models(max_memory).err(),

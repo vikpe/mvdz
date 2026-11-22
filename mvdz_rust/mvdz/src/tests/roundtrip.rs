@@ -14,24 +14,24 @@ fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Three `PE_ENT` symbols per two-byte entity word: a stream with more symbols than the
-/// stream table allows for its segment.
+/// Three `PE_ENT` symbols per two-byte entity word: a stream with more symbols than its
+/// segment has bytes.
 #[test]
-fn a_stream_over_the_count_limit_falls_back_to_tail() -> anyhow::Result<()> {
+fn a_stream_with_more_symbols_than_bytes_round_trips() -> anyhow::Result<()> {
     let mut demo = Demo(synthetic(&[], false));
-    let mut packet = vec![crate::proto::SVC_PACKET_ENTITIES];
+    let mut packet = vec![crate::protocol::SVC_PACKET_ENTITIES];
     for index in 0..120_000u32 {
         packet.extend_from_slice(&((511 - index % 511) as u16).to_le_bytes());
     }
     packet.extend_from_slice(&[0, 0]);
-    demo.frame(5, crate::proto::DEM_ALL, &packet);
+    demo.frame(5, crate::protocol::DEM_ALL, &packet);
     demo.0.extend_from_slice(&synthetic(&[], false));
     let file = compress(&demo.0)?;
     assert_eq!(
         readers_agree(&file, "count limit").context("every reader refuses")?,
         demo.0
     );
-    assert!(unstructured_len(&file)? >= packet.len());
+    assert!(unstructured_len(&file)? < packet.len());
     Ok(())
 }
 
@@ -123,20 +123,21 @@ fn unused_model_is_ignored() -> anyhow::Result<()> {
     let demo = several_segments(&synthetic(&[], false));
     let file = compress(&demo)?;
     let mut file_parts = parts(&file)?;
-    let mut entries = models_entries(&file_parts.models)?;
+    let mut models = models_parts(&file_parts.models)?;
     anyhow::ensure!(
-        entries.iter().all(|entry| entry.0 != crate::streams::UC),
+        (models.entries.iter()).all(|entry| entry.stream != crate::streams::UC),
         "the demo has no usercmd blocks"
     );
-    let structural = entries
-        .iter()
-        .find(|entry| crate::streams::is_lazy(entry.0))
+    let structural = (models.entries.iter())
+        .find(|entry| crate::streams::is_lazy(entry.stream))
         .context("a structural stream's model")?
-        .1
         .clone();
-    entries.push((crate::streams::UC, structural));
-    entries.sort_by_key(|entry| entry.0);
-    file_parts.models = models_body(&entries);
+    models.entries.push(ModelEntry {
+        stream: crate::streams::UC,
+        ..structural
+    });
+    models.entries.sort_by_key(|entry| entry.stream);
+    file_parts.models = models.build();
     let with_unused = file_parts.build();
     assert!(with_unused.len() > file.len());
     let decoded = readers_agree(&with_unused, "unused model").context("a reader refuses it")?;
@@ -218,6 +219,9 @@ fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
             let back =
                 readers_agree(&file, what).with_context(|| format!("{what} {how}: refused"))?;
             assert!(back == src, "{what} {how}");
+            let stored = readers_agree(&all_stored(&src), what)
+                .with_context(|| format!("{what} {how}: stored, refused"))?;
+            assert!(stored == src, "{what} {how}: stored");
         }
     }
     Ok(())
@@ -363,19 +367,19 @@ fn deterministic_output() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A server data message in the second segment changes the proto, so the segments after
-/// it, walked in parallel from the proto before, are walked again (`encode::run_first_pass`).
+/// A server data message in the second segment changes the protocol, so the segments after
+/// it, walked in parallel from the protocol before, are walked again (`encode::run_first_pass`).
 #[test]
-fn proto_change_mid_demo() -> anyhow::Result<()> {
+fn protocol_change_mid_demo() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{}")], false);
     let copies = 3 * crate::segment::SEGMENT_TARGET_RAW / (2 * small.len());
     let mut demo = Demo(small.repeat(copies));
     let server_data = message(
-        crate::proto::SVC_SERVER_DATA,
+        crate::protocol::SVC_SERVER_DATA,
         &[
             b"FTE2",
             &(1u32 << 30).to_le_bytes(),
-            &crate::proto::PROTOCOL_VERSION.to_le_bytes(),
+            &crate::protocol::PROTOCOL_VERSION.to_le_bytes(),
             &1u32.to_le_bytes(),
             &c_string("qw"),
             &0u32.to_le_bytes(),

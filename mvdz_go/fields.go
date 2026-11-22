@@ -2,9 +2,7 @@ package mvdz
 
 import (
 	"bytes"
-	"compress/flate"
 	"encoding/binary"
-	"io"
 )
 
 // byteCursor reads little-endian fields from a block. A read past the end sets
@@ -122,24 +120,4 @@ func (writer *bitWriter) write(value uint32, count int) {
 		writer.data[len(writer.data)-1] |= bit << (writer.bitCount % 8)
 		writer.bitCount++
 	}
-}
-
-// deflate codes data as one raw DEFLATE stream.
-func deflate(data []byte) []byte {
-	var deflated bytes.Buffer
-	writer, _ := flate.NewWriter(&deflated, flate.BestCompression) // fails for an invalid level only
-	writer.Write(data)                                             // a bytes.Buffer does not fail
-	writer.Close()
-	return deflated.Bytes()
-}
-
-// inflateExactly decodes a raw DEFLATE stream that must take all of deflated
-// and decode to size bytes, FORMAT.md sections 6.2 and 6.6.
-func inflateExactly(deflated []byte, size int) ([]byte, error) {
-	source := bytes.NewReader(deflated)
-	inflated, err := io.ReadAll(io.LimitReader(flate.NewReader(source), int64(size)+1))
-	if err != nil || len(inflated) != size || source.Len() != 0 {
-		return nil, corrupt("deflate data")
-	}
-	return inflated, nil
 }

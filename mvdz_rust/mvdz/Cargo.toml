@@ -18,7 +18,6 @@ fuzz = []
 [dependencies]
 sha2 = { workspace = true }
 crc32fast = { workspace = true }
-miniz_oxide = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

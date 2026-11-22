@@ -82,7 +82,7 @@ pub(crate) const DF_WEAPON_FRAME: u16 = 1 << 10;
 
 /// Derived only from bytes already seen, so both directions agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Proto {
+pub(crate) struct Protocol {
     pub(crate) fte: u32,
     pub(crate) fte2: u32,
     pub(crate) mvd1: u32,
@@ -90,16 +90,16 @@ pub(crate) struct Proto {
     pub(crate) has_fte_float_coords: bool,
 }
 
-impl Proto {
+impl Protocol {
     pub(crate) fn new(fte: u32, fte2: u32, mvd1: u32) -> Self {
-        let mut proto = Self {
+        let mut protocol = Self {
             fte,
             fte2,
             mvd1,
             ..Default::default()
         };
-        proto.derive();
-        proto
+        protocol.derive();
+        protocol
     }
     pub(crate) fn derive(&mut self) {
         const FTE_PEXT_FLOAT_COORDS: u32 = 1 << 15;

@@ -169,9 +169,9 @@ func (walker *segmentWalker) frame() {
 }
 
 func (walker *segmentWalker) lengthPrefixed(frameType uint8, isHidden bool) {
-	sourceLength := walker.peek32(0)
+	sourceLen := walker.peek32(0)
 	lengthOffset := walker.reserve(4)
-	walker.payloadEnd = walker.position + sourceLength
+	walker.payloadEnd = walker.position + sourceLen
 	if isHidden {
 		walker.hiddenPayload()
 	} else {
@@ -253,15 +253,15 @@ func commandClass(command uint8) uint16 {
 
 // escape copies the rest of a payload, which the walk does not model.
 func (walker *segmentWalker) escape() {
-	sourceLength := uint32(len(walker.payloadRest()))
+	sourceLen := uint32(len(walker.payloadRest()))
 	var length uint32
 	for group := 0; ; group++ {
-		sourceByte := uint8(sourceLength>>(7*group)) & 0x7f
-		hasMoreGroups := sourceLength>>(7*(group+1)) != 0
+		sourceByte := uint8(sourceLen>>(7*group)) & 0x7f
+		hasMoreGroups := sourceLen>>(7*(group+1)) != 0
 		if hasMoreGroups {
 			sourceByte |= 0x80
 		}
-		lengthByte := walker.blobByte(streamEscapeLength, sourceByte)
+		lengthByte := walker.blobByte(streamEscapeLen, sourceByte)
 		length |= uint32(lengthByte&0x7f) << (7 * group)
 		if lengthByte < 0x80 {
 			break
@@ -597,7 +597,7 @@ func (walker *segmentWalker) hiddenPayload() {
 			walker.fail("hidden block tag")
 			return
 		}
-		length := walker.codeBlobBytes(streamHiddenLength, 4)
+		length := walker.codeBlobBytes(streamHiddenLen, 4)
 		blockType := walker.codeBlobBytes(streamHiddenType, 2)
 		switch {
 		case blockType == hiddenDamageDone && length == 8:
@@ -621,7 +621,7 @@ func (walker *segmentWalker) usercmd() {
 	state.msec = walker.codeSymbol(streamUsercmd, 2<<12|uint16(state.msec))
 	sourceGrid := uint8(0)
 	for axis := range uint32(3) {
-		if _, isOnGrid := gridValue(walker.peek32(4 * axis)); isOnGrid {
+		if _, isOnGrid := onGrid(walker.peek32(4 * axis)); isOnGrid {
 			sourceGrid |= 1 << axis
 		}
 	}

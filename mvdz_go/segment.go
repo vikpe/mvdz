@@ -1,7 +1,21 @@
 package mvdz
 
-// A stream table entry counts at most the segment's length plus this.
-const maxCountSlack = 16
+// maxStreamCount is the most a stream table entry may count, FORMAT.md
+// section 3.1. Most streams hold at most a symbol per byte of the segment,
+// but not all: an entity word of two bytes can take three gap symbols.
+func maxStreamCount(rawLen uint32) uint32 {
+	return 2*rawLen + 16
+}
+
+// maxBlobTotal is the most the blob streams of a segment may hold together,
+// FORMAT.md section 7.
+func maxBlobTotal(rawLen uint32) uint64 {
+	return 2 * uint64(rawLen)
+}
+
+// The fields of a transform header: fte, fte2, mvd1, the tail length and the
+// stream count.
+const transformFieldsLen = 5 * 4
 
 // fileModels holds the model of every structural and numeric stream id; nil
 // where the models block has none.
@@ -13,6 +27,7 @@ type fileModels [firstBlobStream]*streamModel
 type segmentStreams struct {
 	protocol   protocolState // at the segment start
 	tail       uint32
+	stored     []byte // decoding: the bytes of a stored segment, else nil
 	isEncoding bool
 	decoders   [firstBlobStream]*streamDecoder // decoding: nil for a stream not in the table
 	collected  [firstBlobStream][]codedValue   // encoding
@@ -26,14 +41,17 @@ type codedValue struct {
 	value   int32
 }
 
-// decodeSegment decodes the transform of one segment to its rawLength bytes,
+// decodeSegment decodes the transform of one segment to its rawLen bytes,
 // FORMAT.md section 3.3.
-func decodeSegment(coded []byte, rawLength uint32, models *fileModels) ([]byte, error) {
-	streams, err := readStreams(coded, rawLength, models)
+func decodeSegment(coded []byte, rawLen uint32, models *fileModels) ([]byte, error) {
+	streams, err := readStreams(coded, rawLen, models)
 	if err != nil {
 		return nil, err
 	}
-	output := make([]byte, rawLength)
+	if streams.stored != nil {
+		return streams.stored, nil
+	}
+	output := make([]byte, rawLen)
 	walker := newWalker(output, streams)
 	walker.run(streams.tail)
 	if walker.err != nil {
@@ -57,7 +75,7 @@ func decodeSegment(coded []byte, rawLength uint32, models *fileModels) ([]byte, 
 
 // readStreams reads the transform header, the stream table and the stream
 // bodies, FORMAT.md section 3.1.
-func readStreams(coded []byte, rawLength uint32, models *fileModels) (*segmentStreams, error) {
+func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStreams, error) {
 	fields := byteCursor{data: coded}
 	streams := new(segmentStreams)
 	streams.protocol.fte = fields.u32()
@@ -65,7 +83,7 @@ func readStreams(coded []byte, rawLength uint32, models *fileModels) (*segmentSt
 	streams.protocol.mvd1 = fields.u32()
 	streams.tail = fields.u32()
 	entryCount := fields.u32()
-	if fields.isShort || streams.tail > rawLength || entryCount > streamCount {
+	if fields.isShort || streams.tail > rawLen || entryCount > streamCount {
 		return nil, corrupt("transform header")
 	}
 
@@ -86,12 +104,22 @@ func readStreams(coded []byte, rawLength uint32, models *fileModels) (*segmentSt
 			entry.length = fields.u32()
 		}
 		isIdValid := entry.id < streamCount && !isListed[entry.id]
-		if fields.isShort || !isIdValid || entry.count > rawLength+maxCountSlack {
+		if fields.isShort || !isIdValid || entry.count > maxStreamCount(rawLen) {
 			return nil, corrupt("stream table")
 		}
 		isListed[entry.id] = true
 	}
-	blobLength := fields.u32()
+	if blobSize > maxBlobTotal(rawLen) {
+		return nil, corrupt("blob streams")
+	}
+	isStored := entryCount == 0
+	if isStored {
+		streams.stored = fields.bytes(rawLen)
+		if streams.tail != rawLen || !fields.isAtEnd() {
+			return nil, corrupt("stored segment")
+		}
+		return streams, nil
+	}
 
 	for _, entry := range entries {
 		if entry.id >= firstBlobStream {
@@ -110,21 +138,11 @@ func readStreams(coded []byte, rawLength uint32, models *fileModels) (*segmentSt
 		}
 		streams.decoders[entry.id] = decoder
 	}
-	blobBody := fields.bytes(blobLength)
 	if !fields.isAtEnd() {
 		return nil, corrupt("stream table")
 	}
 
-	// A blob byte is a byte of the output or one of the few tag and length
-	// bytes, FORMAT.md section 7: more than twice the output cannot be valid.
-	isEmptyMismatch := (blobLength == 0) != (blobSize == 0)
-	if isEmptyMismatch || blobSize > 2*uint64(rawLength) {
-		return nil, corrupt("blob streams")
-	}
-	if blobSize == 0 {
-		return streams, nil
-	}
-	blobBytes, err := inflateExactly(blobBody, int(blobSize))
+	blobBytes, err := lzExpand(streams, int(blobSize))
 	if err != nil {
 		return nil, err
 	}

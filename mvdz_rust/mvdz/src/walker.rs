@@ -2,10 +2,11 @@
 //! listed in [`Records`]; `numeric.rs` fills them in after the walk.
 
 use crate::fields::{read_u16, read_u32, read_usize};
-use crate::proto::{
+use crate::math::{byte_residual_bucket, on_grid};
+use crate::protocol::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
     DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS,
-    ORIGIN_ANGLE_FLAGS, Proto, SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT, SVC_DAMAGE,
+    ORIGIN_ANGLE_FLAGS, Protocol, SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT, SVC_DAMAGE,
     SVC_DELTA_PACKET_ENTITIES, SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES, SVC_PLAYER_INFO,
     SVC_PRINT, SVC_SERVER_DATA, SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT, SVC_TEMP_ENTITY,
     SVC_UPDATE_ENTER_TIME, SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_PL, SVC_UPDATE_STAT,
@@ -151,7 +152,7 @@ pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     offset: usize,
     pub(crate) has_error: bool,
     pub(crate) io: IO,
-    pub(crate) proto: Proto,
+    pub(crate) protocol: Protocol,
     records: &'a mut Records,
     players: Box<[PlayerState; 256]>,
     entities: Box<[EntityState; 2048]>,
@@ -178,8 +179,13 @@ pub(crate) struct Walker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
 }
 
 impl<'a, IO: SymbolIo> Walker<'a, true, IO> {
-    pub(crate) fn encoder(src: &'a [u8], records: &'a mut Records, io: IO, proto: Proto) -> Self {
-        Self::new(src, &mut [], records, io, proto)
+    pub(crate) fn encoder(
+        src: &'a [u8],
+        records: &'a mut Records,
+        io: IO,
+        protocol: Protocol,
+    ) -> Self {
+        Self::new(src, &mut [], records, io, protocol)
     }
 }
 
@@ -188,9 +194,9 @@ impl<'a, IO: SymbolIo> Walker<'a, false, IO> {
         dst: &'a mut [u8],
         records: &'a mut Records,
         io: IO,
-        proto: Proto,
+        protocol: Protocol,
     ) -> Self {
-        Self::new(&[], dst, records, io, proto)
+        Self::new(&[], dst, records, io, protocol)
     }
 }
 
@@ -204,7 +210,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         dst: &'a mut [u8],
         records: &'a mut Records,
         io: IO,
-        proto: Proto,
+        protocol: Protocol,
     ) -> Self {
         Walker {
             src,
@@ -212,7 +218,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             offset: 0,
             has_error: false,
             io,
-            proto,
+            protocol,
             records,
             players: Box::new([PlayerState::default(); 256]),
             entities: Box::new([EntityState::default(); 2048]),
@@ -553,7 +559,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 }
                 let command = self.src[self.offset];
                 let size = self
-                    .proto
+                    .protocol
                     .command_body_size(command, &self.src[self.offset + 1..end]);
                 let size = match size {
                     Some(size) if command != 0 => size,
@@ -592,10 +598,10 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
     fn generic(&mut self, stream: usize, size_command: u8) -> usize {
         let start = self.offset;
         let size = if IS_ENCODE {
-            self.proto
+            self.protocol
                 .command_body_size(size_command, &self.src[self.offset.min(self.src.len())..])
         } else {
-            self.proto
+            self.protocol
                 .command_body_size(size_command, self.io.blob_rest(stream))
         };
         match size {
@@ -658,9 +664,9 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                     } else {
                         self.dst.get(start..end).unwrap_or_default()
                     };
-                    let mut proto = self.proto;
-                    proto.observe_server_data(body);
-                    self.proto = proto;
+                    let mut protocol = self.protocol;
+                    protocol.observe_server_data(body);
+                    self.protocol = protocol;
                 }
             }
             _ => {
@@ -724,7 +730,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             u32::from(previous.frame) | u32::from(flags & (DF_DEAD | DF_GIB)),
             previous.frame,
         );
-        let coord_width = self.proto.coord();
+        let coord_width = self.protocol.coord();
         let origin_count = (flags & ORIGIN_FLAGS).count_ones() as usize;
         let angle_count = (flags & ANGLE_FLAGS).count_ones() as usize;
         let offset = self.reserve(origin_count * coord_width + angle_count * 2);
@@ -733,7 +739,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             time: self.time,
             flags,
             number,
-            has_float_coords: self.proto.has_float_coords,
+            has_float_coords: self.protocol.has_float_coords,
         });
         let mut origin_offset = offset;
         for (axis, axis_offset) in self.player_origin_offsets[number as usize]
@@ -875,7 +881,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         if bits & U_MORE_BITS != 0 {
             bits |= u32::from(self.coded_byte(PE_MORE, (bits >> 9) | previous_model << 8));
         }
-        if bits & U_FTE_EVEN_MORE != 0 && self.proto.fte != 0 {
+        if bits & U_FTE_EVEN_MORE != 0 && self.protocol.fte != 0 {
             more = u32::from(self.coded_byte(PE_MORE, 0x8000));
             if more & U_FTE_YET_MORE != 0 {
                 more |= u32::from(self.coded_byte(PE_MORE, 0x8001)) << 8;
@@ -921,10 +927,10 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         if was_in_previous_packet {
             record_bits |= PE_IN_PREVIOUS;
         }
-        if self.proto.has_float_coords {
+        if self.protocol.has_float_coords {
             record_bits |= PE_FLOAT;
         }
-        if self.proto.has_fte_float_coords {
+        if self.protocol.has_fte_float_coords {
             record_bits |= PE_WIDE;
         }
         let record = PacketEntityRecord {
@@ -932,14 +938,14 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             number: number as u16,
             bits: record_bits,
         };
-        let coord_width = self.proto.coord();
+        let coord_width = self.protocol.coord();
         for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {
             if bits & origin_flag != 0 {
                 let offset = self.reserve(coord_width);
                 self.entity_origin_offsets[number][axis] = offset;
             }
             if bits & angle_flag != 0 {
-                if self.proto.has_fte_float_coords {
+                if self.protocol.has_fte_float_coords {
                     self.coded_le(PE_A, 3 | model << 6, 2);
                 } else {
                     let residual_bucket =
@@ -955,7 +961,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
             }
         }
         self.records.packet_entities.push(record);
-        if more & U_FTE_TRANS != 0 && self.proto.fte & FTE_PEXT_TRANS != 0 {
+        if more & U_FTE_TRANS != 0 && self.protocol.fte & FTE_PEXT_TRANS != 0 {
             self.blob_byte(PE_MISC);
         }
         if more & U_FTE_SCALE != 0 {
@@ -964,7 +970,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         if more & U_FTE_FATNESS != 0 {
             self.blob_byte(PE_MISC);
         }
-        if more & U_FTE_COLOR_MOD != 0 && self.proto.fte & FTE_PEXT_COLOR_MOD != 0 {
+        if more & U_FTE_COLOR_MOD != 0 && self.protocol.fte & FTE_PEXT_COLOR_MOD != 0 {
             self.blob_le(PE_MISC, 3);
         }
         self.entities[number] = state;
@@ -981,7 +987,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
         }
         let entity = ((channel >> 3) & 1023) as usize;
         let sound_number = self.coded_byte(SND_NUM, (channel & 7) | (entity.min(33) as u32) << 3);
-        if self.proto.coord() != 2 {
+        if self.protocol.coord() != 2 {
             self.copy_blob(SNDF, 12);
             return;
         }
@@ -1008,7 +1014,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> Walker<'a, IS_ENCODE, IO> {
                 | u32::from(self.previous_command == SVC_TEMP_ENTITY) << 8,
         );
         self.previous_temp_entity = kind;
-        let coord_width = self.proto.coord();
+        let coord_width = self.protocol.coord();
         if coord_width != 2 {
             match kind {
                 TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
@@ -1170,28 +1176,4 @@ fn command_class(command: u8) -> u8 {
         SVC_DAMAGE => 14,
         _ => 15,
     }
-}
-
-#[inline(always)]
-fn byte_residual_bucket(residual: u8) -> u8 {
-    crate::numeric::residual_bucket(i32::from(residual.cast_signed()))
-}
-
-/// The `grid` in -32768..=32767 whose f32 `grid * 45/8192` has exactly these bits; `None` for
-/// -0.0, NaN, +180 and anything else off the grid.
-#[inline]
-pub(crate) fn on_grid(bits: u32) -> Option<u16> {
-    // `f * 8192` is exact and the division correctly rounded, so an integer quotient is exact
-    let scaled = f64::from(f32::from_bits(bits)) * 8192.0 / 45.0;
-    if scaled.fract() != 0.0 || !(-32768.0..=32767.0).contains(&scaled) {
-        return None;
-    }
-    let grid = scaled as i32 as i16;
-    (grid_f32(grid.cast_unsigned()) == bits).then_some(grid.cast_unsigned())
-}
-
-/// Exact: `grid * 45/8192` as f32 bits.
-#[inline]
-pub(crate) fn grid_f32(grid: u16) -> u32 {
-    (f32::from(grid.cast_signed()) * (45.0 / 8192.0)).to_bits()
 }

@@ -1,11 +1,11 @@
 //! The MVDZ container (FORMAT.md section 2) and the layout rules every reader applies.
 
-use crate::coder::rans::Models;
 use crate::error::{Error, Result, bad};
 use crate::fields::{put_u32, put_usize, read_array, read_u32, read_u64};
+use crate::rans::Models;
 
 pub(crate) const MAGIC: &[u8; 4] = b"MVDZ";
-pub(crate) const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 3;
 pub(crate) const HEADER_LEN: usize = 60;
 pub(crate) const LEN_FIELD_LEN: usize = 4;
 pub(crate) const SEGMENT_FIELDS_LEN: usize = 4 + 4 + 4;
@@ -14,6 +14,8 @@ pub(crate) const MAX_SEGMENT_RAW: u64 = 1 << 20;
 /// Twice [`MAX_SEGMENT_RAW`]: far above any segment the encoder writes.
 pub(crate) const MAX_SEGMENT_CODED: u64 = 2 << 20;
 pub(crate) const MAX_MODELS_LEN: u64 = 1 << 24;
+/// Of the models before they are coded, the meta model included.
+pub(crate) const MAX_MODELS_RAW_LEN: u64 = 1 << 24;
 /// An encoder rule, not a reader rule.
 pub(crate) const MAX_SEGMENTS: usize = 1 << 16;
 

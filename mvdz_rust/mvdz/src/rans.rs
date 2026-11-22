@@ -2,9 +2,11 @@
 //! Giesen, "Interleaved entropy coders" (2014); written fresh.
 
 use crate::error::{Error, Result};
-use crate::fields::{put_usize, read_length_prefixed, read_usize};
+use crate::fields::{put_usize, read_bytes, read_length_prefixed, read_usize};
+use crate::format::MAX_MODELS_RAW_LEN;
+use crate::math::{bucket, log2_fixed, normalize, quantize, quantized_weight};
 use crate::memory::try_with_capacity;
-use crate::numeric::{NumericContext, bucket, numeric_context};
+use crate::numeric::{NumericContext, numeric_context};
 use crate::parallel::par_map;
 use crate::streams::{STREAM_COUNT, is_lazy, is_numeric};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,92 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) const SCALE: u32 = 12;
 const FREQ_TOTAL: u32 = 1 << SCALE;
 const STATE_MIN: u32 = 1 << 16;
-
-const STEPS_PER_OCTAVE: u32 = 2;
-/// 16.16 fixed point.
-#[inline]
-fn quantized_weight(quantized: u32) -> u64 {
-    /// 2^(k/2) in 16.16 fixed point, k = 0, 1.
-    const STEP_POWERS: [u64; STEPS_PER_OCTAVE as usize] = [65536, 92682];
-    if quantized == 0 {
-        return 0;
-    }
-    let step = quantized - 1;
-    let (octave, octave_step) = (step / STEPS_PER_OCTAVE, step % STEPS_PER_OCTAVE);
-    let fraction = STEP_POWERS[octave_step as usize];
-    if octave >= 40 {
-        u64::MAX >> 8
-    } else {
-        fraction << octave
-    }
-}
-
-/// The quantized count whose weight is nearest to `count` in ratio.
-fn quantize(count: u32) -> u32 {
-    if count == 0 {
-        return 0;
-    }
-    let weight = u64::from(count) << 16;
-    let octave = count.ilog2();
-    let mut step = octave * STEPS_PER_OCTAVE;
-    for octave_step in 0..STEPS_PER_OCTAVE {
-        if quantized_weight(1 + octave * STEPS_PER_OCTAVE + octave_step) <= weight {
-            step = octave * STEPS_PER_OCTAVE + octave_step;
-        }
-    }
-    let lo = quantized_weight(1 + step);
-    let hi = quantized_weight(2 + step);
-    // compare weight/lo with hi/weight  <=>  weight*weight vs lo*hi
-    #[expect(
-        clippy::suspicious_operation_groupings,
-        reason = "weight*weight against lo*hi is meant"
-    )]
-    if u128::from(weight) * u128::from(weight) > u128::from(lo) * u128::from(hi) {
-        2 + step
-    } else {
-        1 + step
-    }
-}
-
-/// To a total of exactly `FREQ_TOTAL`, every present symbol >= 1.
-fn normalize(weights: &[u64]) -> Vec<u32> {
-    let total: u128 = weights.iter().map(|&weight| u128::from(weight)).sum();
-    let mut freqs = vec![0u32; weights.len()];
-    if total == 0 {
-        return freqs;
-    }
-    let mut sum: i64 = 0;
-    for (symbol, &weight) in weights.iter().enumerate() {
-        if weight > 0 {
-            freqs[symbol] = ((u128::from(weight) * u128::from(FREQ_TOTAL) / total) as u32).max(1);
-            sum += i64::from(freqs[symbol]);
-        }
-    }
-    let mut diff = i64::from(FREQ_TOTAL) - sum;
-    while diff != 0 {
-        // adjust the largest entry (first one on ties)
-        let mut largest = 0;
-        for symbol in 0..freqs.len() {
-            if freqs[symbol] > freqs[largest] {
-                largest = symbol;
-            }
-        }
-        if diff > 0 {
-            freqs[largest] += diff.cast_unsigned() as u32;
-            diff = 0;
-        } else {
-            let take = (-diff)
-                .min(i64::from(freqs[largest]) - 1)
-                .min((i64::from(freqs[largest]) + 1) / 2);
-            if take <= 0 {
-                break;
-            }
-            freqs[largest] -= take.cast_unsigned() as u32;
-            diff += take;
-        }
-    }
-    freqs
-}
 
 #[derive(Debug, Clone)]
 struct Table {
@@ -113,7 +29,7 @@ impl Table {
             .iter()
             .map(|&count| quantized_weight(count))
             .collect();
-        let freq = normalize(&weights);
+        let freq = normalize(&weights, FREQ_TOTAL);
         let mut cumulative = vec![0u32; freq.len() + 1];
         for symbol in 0..freq.len() {
             cumulative[symbol + 1] = cumulative[symbol] + freq[symbol];
@@ -133,36 +49,35 @@ impl Table {
     }
 }
 
-fn entropy_bits(counts: &[u32]) -> f64 {
-    let total: f64 = counts.iter().map(|&count| f64::from(count)).sum();
-    if total == 0.0 {
-        return 0.0;
+/// In bits with 16 fraction bits, as [`log2_fixed`].
+fn entropy_bits(counts: &[u32]) -> u64 {
+    let total: u64 = counts.iter().map(|&count| u64::from(count)).sum();
+    if total == 0 {
+        return 0;
     }
-    let log_total = total.log2();
+    let log_total = log2_fixed(total);
     counts
         .iter()
         .filter(|&&count| count > 0)
-        .map(|&count| f64::from(count) * (log_total - f64::from(count).log2()))
+        .map(|&count| u64::from(count) * (log_total - log2_fixed(u64::from(count))))
         .sum()
 }
 
-fn cross_bits(counts: &[u32], reference: &[u32]) -> f64 {
-    let total: f64 = reference.iter().map(|&count| f64::from(count)).sum();
-    let log_total = total.max(1.0).log2();
-    let mut bits = 0.0;
+/// The cost of coding `counts` with a table built from `reference`; `None` when the
+/// table lacks one of the symbols.
+fn cross_bits(counts: &[u32], reference: &[u32]) -> Option<u64> {
+    let total: u64 = reference.iter().map(|&count| u64::from(count)).sum();
+    let log_total = log2_fixed(total.max(1));
+    let mut bits = 0;
     for (symbol, &count) in counts.iter().enumerate() {
         if count > 0 {
             if reference[symbol] == 0 {
-                return f64::INFINITY;
+                return None;
             }
-            bits = f64::mul_add(
-                f64::from(count),
-                log_total - f64::from(reference[symbol]).log2(),
-                bits,
-            );
+            bits += u64::from(count) * (log_total - log2_fixed(u64::from(reference[symbol])));
         }
     }
-    bits
+    Some(bits)
 }
 
 #[derive(Debug)]
@@ -232,12 +147,38 @@ impl Tally {
     }
 
     pub(crate) fn file_model(&self) -> FileModel {
-        let model = build_model(&select(self));
+        /// The best of a sweep over 387 demos; part of the canonical encoder.
+        const TABLE_COST: TableCost = TableCost {
+            base: 48,
+            per_symbol: 6,
+        };
+        self.model_at(TABLE_COST)
+    }
+
+    /// The model the models block codes the other models with (FORMAT.md section 2.2).
+    fn meta_model(&self) -> FileModel {
+        /// A table of the meta model is stored as it is, a byte per symbol.
+        const TABLE_COST: TableCost = TableCost {
+            base: 16 + 8 * 256,
+            per_symbol: 0,
+        };
+        self.model_at(TABLE_COST)
+    }
+
+    fn model_at(&self, table_cost: TableCost) -> FileModel {
+        let model = build_model(&select(self, table_cost));
         FileModel {
-            bytes: write_model(&model),
+            bytes: raw_model(&model),
             model,
         }
     }
+}
+
+/// What an own table costs in the models block, in bits (FORMAT.md section 8).
+#[derive(Debug, Clone, Copy)]
+struct TableCost {
+    base: u64,
+    per_symbol: u64,
 }
 
 fn add_counts(into: &mut [u32], counts: &[u32]) {
@@ -246,9 +187,7 @@ fn add_counts(into: &mut [u32], counts: &[u32]) {
     }
 }
 
-fn select(tally: &Tally) -> Counts {
-    const TABLE_BITS_BASE: f64 = 16.0;
-    const TABLE_BITS_PER_SYM: f64 = 5.0;
+fn select(tally: &Tally, table_cost: TableCost) -> Counts {
     let (alphabet_size, row_of, rows, keys) =
         (tally.alphabet_size, &tally.row_of, &tally.rows, &tally.keys);
     let row =
@@ -269,10 +208,12 @@ fn select(tally: &Tally) -> Counts {
         own.clear();
         for &context in &keys {
             let counts = row(context);
-            let present = f64::from(counts.iter().filter(|&&count| count > 0).count() as u32);
-            let own_cost =
-                TABLE_BITS_PER_SYM.mul_add(present, entropy_bits(counts) + TABLE_BITS_BASE);
-            if own_cost < cross_bits(counts, &fallback) {
+            let present = counts.iter().filter(|&&count| count > 0).count() as u64;
+            let table_bits = (table_cost.base + table_cost.per_symbol * present) << 16;
+            let own_cost = entropy_bits(counts) + table_bits;
+            let is_cheaper_as_own =
+                cross_bits(counts, &fallback).is_none_or(|fallback_cost| own_cost < fallback_cost);
+            if is_cheaper_as_own {
                 own.push(context);
             } else {
                 add_counts(&mut rest, counts);
@@ -321,20 +262,26 @@ fn build_model(counts: &Counts) -> Model {
     }
 }
 
-/// FORMAT.md section 6.2: the count of own contexts, then DEFLATE of the own contexts (u16
-/// each, ascending) and the quantized counts of every table, the fallback first.
-fn write_model(model: &Model) -> Vec<u8> {
-    let mut contexts_and_tables = Vec::new();
-    for &context in &model.own {
-        contexts_and_tables.extend_from_slice(&(context as u16).to_le_bytes());
-    }
-    for table in &model.tables {
-        contexts_and_tables.extend(table.quantized.iter().map(|&quantized| quantized as u8));
-    }
+/// FORMAT.md section 6.2: the count of own contexts, the own contexts (u16 each, ascending)
+/// and the quantized counts of every table, the fallback first.
+fn raw_model(model: &Model) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_usize(&mut bytes, model.own.len());
-    bytes.extend_from_slice(&crate::deflate::compress(&contexts_and_tables));
+    for &context in &model.own {
+        bytes.extend_from_slice(&(context as u16).to_le_bytes());
+    }
+    for table in &model.tables {
+        bytes.extend(table.quantized.iter().map(|&quantized| quantized as u8));
+    }
     bytes
+}
+
+/// `None` for more own contexts than 16 bits can number.
+fn raw_model_len(own_count: usize, alphabet_size: usize) -> Option<usize> {
+    const MAX_OWN_COUNT: usize = 1 << 16;
+    const OWN_COUNT_LEN: usize = 4;
+    (own_count <= MAX_OWN_COUNT)
+        .then_some(OWN_COUNT_LEN + 2 * own_count + (own_count + 1) * alphabet_size)
 }
 
 /// Wider tables decode with a slot LUT instead of a search.
@@ -376,18 +323,15 @@ fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
 type ModelHeader = (Vec<u32>, Vec<u8>);
 
 /// FORMAT.md section 6.2.
-fn read_model_header(model: &[u8], alphabet_size: usize) -> Result<ModelHeader> {
-    /// One per 16-bit context.
-    const MAX_OWN_COUNT: usize = 1 << 16;
+fn read_model_header(raw_model: &[u8], alphabet_size: usize) -> Result<ModelHeader> {
     let corrupt = Error::Corrupt("model");
-    let mut rest = model;
-    let own_count = read_usize(&mut rest)
-        .filter(|&own_count| own_count <= MAX_OWN_COUNT)
-        .ok_or(corrupt)?;
-    let contexts_len = 2 * own_count;
-    let tables_len = (own_count + 1) * alphabet_size;
-    let mut contexts = crate::deflate::decompress(rest, contexts_len + tables_len)?;
-    let quantized_tables = contexts.split_off(contexts_len);
+    let mut rest = raw_model;
+    let own_count = read_usize(&mut rest).ok_or(corrupt)?;
+    if raw_model_len(own_count, alphabet_size) != Some(raw_model.len()) {
+        return Err(corrupt);
+    }
+    let (contexts, quantized_tables) = rest.split_at(2 * own_count);
+    let quantized_tables = quantized_tables.to_vec();
     let keys: Vec<u32> = contexts
         .as_chunks::<2>()
         .0
@@ -660,28 +604,30 @@ impl<'a> RansDecoder<'a> {
     }
 }
 
-fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Vec<u8> {
+/// `None` when the model has no code for one of the symbols under its context.
+fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Option<Vec<u8>> {
     let mut encoder = RansEncoder::new();
     for (&symbol, &context) in symbols.iter().zip(contexts).rev() {
         let table_index = model.map.get(context as usize).copied().unwrap_or(0) as usize;
         let table = &model.tables[table_index];
+        let freq = table.freq[symbol as usize];
+        if freq == 0 {
+            return None;
+        }
         if table.single_symbol.is_none() {
-            encoder.put(
-                table.freq[symbol as usize],
-                table.cumulative[symbol as usize],
-            );
+            encoder.put(freq, table.cumulative[symbol as usize]);
         }
     }
-    encoder.finish()
+    Some(encoder.finish())
 }
 
-fn pack_body(model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) -> Vec<u8> {
-    let body = rans_encode(model, symbols, contexts);
+fn pack_body(model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) -> Option<Vec<u8>> {
+    let body = rans_encode(model, symbols, contexts)?;
     let mut out = Vec::with_capacity(body.len() + extra.len() + 4);
     put_usize(&mut out, body.len());
     out.extend_from_slice(&body);
     out.extend_from_slice(extra);
-    out
+    Some(out)
 }
 
 /// A stream body: `rans_len u32 | rans | extra`.
@@ -706,20 +652,80 @@ pub(crate) struct FileModel {
 /// By stream id.
 pub(crate) type Models = Vec<Option<DecoderModel>>;
 
-/// `n u32 | n x { id u32 | len u32 | model }`, ids strictly increasing. The models are
-/// independent, so they are built in parallel.
+/// The model of `stream` in the file's models block: the stream's kind decides its coder,
+/// no stream carries a model or coder id of its own.
+pub(crate) fn file_model(models: Option<&Models>, stream: usize) -> Result<&DecoderModel> {
+    models
+        .and_then(|models| models.get(stream)?.as_ref())
+        .ok_or(Error::Corrupt("stream without a model"))
+}
+
+/// The context of each byte of a raw model under the meta model: the byte before it, 0
+/// before the first.
+fn previous_bytes(raw_model: &[u8]) -> Vec<u16> {
+    let before_first = [0u16];
+    let previous = raw_model.iter().map(|&byte| u16::from(byte));
+    before_first
+        .into_iter()
+        .chain(previous)
+        .take(raw_model.len())
+        .collect()
+}
+
+#[derive(Debug)]
+pub(crate) struct ModelsBlock {
+    pub(crate) body: Vec<u8>,
+    /// Of the meta model and every model before coding: what the format limits.
+    pub(crate) raw_len: usize,
+}
+
+/// FORMAT.md section 2.2: the meta model as it is, then every raw model (by stream id,
+/// ascending) coded under it.
+pub(crate) fn write_models_block(raw_models: &[(usize, &[u8])]) -> ModelsBlock {
+    let mut tally = Tally::new(256);
+    for (_, raw_model) in raw_models {
+        tally.add(raw_model, &previous_bytes(raw_model));
+    }
+    let meta = tally.meta_model();
+    let mut body = meta.bytes.clone();
+    let mut raw_len = meta.bytes.len();
+    put_usize(&mut body, raw_models.len());
+    for &(stream, raw_model) in raw_models {
+        let coded = encode_bytes(raw_model, &previous_bytes(raw_model), &meta)
+            .expect("the meta model is built from these bytes");
+        put_usize(&mut body, stream);
+        put_usize(&mut body, raw_model.len());
+        put_usize(&mut body, coded.len());
+        body.extend_from_slice(&coded);
+        raw_len += raw_model.len();
+    }
+    ModelsBlock { body, raw_len }
+}
+
+/// `meta | n u32 | n x { id u32 | raw_len u32 | len u32 | stream }`, ids strictly increasing.
+/// The models are independent, so they are built in parallel.
 ///
 /// # Errors
 ///
 /// [`Error::MemoryLimit`] when their decoder tables take more than `max_memory` bytes.
 pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) -> Result<Models> {
     let corrupt = Error::Corrupt("tables");
+    let table_memory = TableMemory::new(max_memory);
     let mut rest = body;
+    let meta_own_count = read_usize(&mut &*rest).ok_or(corrupt)?;
+    let meta_len = raw_model_len(meta_own_count, 256).ok_or(corrupt)?;
+    let meta = read_model(
+        read_bytes(&mut rest, meta_len).ok_or(corrupt)?,
+        256,
+        &table_memory,
+    )?;
     let count = read_usize(&mut rest).ok_or(corrupt)?;
     if count == 0 {
         return Err(corrupt);
     }
-    let mut entries: Vec<(usize, usize, &[u8])> = Vec::new();
+    // (stream, alphabet size, raw length, coded)
+    let mut entries: Vec<(usize, usize, usize, &[u8])> = Vec::new();
+    let mut raw_total = meta_len as u64;
     for _ in 0..count {
         let stream = read_usize(&mut rest).ok_or(corrupt)?;
         if entries.last().is_some_and(|previous| stream <= previous.0) {
@@ -732,18 +738,21 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
         } else {
             return Err(corrupt);
         };
-        entries.push((
-            stream,
-            alphabet_size,
-            read_length_prefixed(&mut rest).ok_or(corrupt)?,
-        ));
+        let raw_len = read_usize(&mut rest).ok_or(corrupt)?;
+        raw_total += raw_len as u64;
+        let coded = read_length_prefixed(&mut rest).ok_or(corrupt)?;
+        entries.push((stream, alphabet_size, raw_len, coded));
     }
     if !rest.is_empty() {
         return Err(corrupt);
     }
-    let table_memory = TableMemory::new(max_memory);
-    let built = par_map(threads, &entries, |&(_, alphabet_size, header)| {
-        read_model(header, alphabet_size, &table_memory)
+    // before any model is decoded: no model allocates more than the format allows
+    if raw_total > MAX_MODELS_RAW_LEN {
+        return Err(Error::Corrupt("models size"));
+    }
+    let built = par_map(threads, &entries, |&(_, alphabet_size, raw_len, coded)| {
+        let raw_model = decode_raw_model(coded, raw_len, &meta)?;
+        read_model(&raw_model, alphabet_size, &table_memory)
     });
     let mut models: Models = Vec::from_fn(STREAM_COUNT, |_| None);
     for (entry, model) in entries.iter().zip(built) {
@@ -752,12 +761,32 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
     Ok(models)
 }
 
+fn decode_raw_model(coded: &[u8], raw_len: usize, meta: &DecoderModel) -> Result<Vec<u8>> {
+    let corrupt = Error::Corrupt("model");
+    let mut decoder = ByteDecoder::new(coded, raw_len, meta)?;
+    let mut raw_model = try_with_capacity(raw_len)?;
+    let mut previous_byte = 0;
+    for _ in 0..raw_len {
+        previous_byte = decoder.get(u32::from(previous_byte)).ok_or(corrupt)?;
+        raw_model.push(previous_byte);
+    }
+    if !decoder.is_done() {
+        return Err(corrupt);
+    }
+    Ok(raw_model)
+}
+
 #[inline(always)]
 fn byte_context(context: u32) -> u32 {
     context & 0xffff
 }
 
-pub(crate) fn encode_bytes(symbols: &[u8], contexts: &[u16], file_model: &FileModel) -> Vec<u8> {
+/// `None` when the model has no code for one of the symbols under its context.
+pub(crate) fn encode_bytes(
+    symbols: &[u8],
+    contexts: &[u16],
+    file_model: &FileModel,
+) -> Option<Vec<u8>> {
     pack_body(&file_model.model, symbols, contexts, &[])
 }
 
@@ -958,7 +987,8 @@ impl NumericSymbolWriter {
     }
 }
 
-pub(crate) fn encode_num(num: &NumericSymbols, file_model: &FileModel) -> Vec<u8> {
+/// `None` when the model has no code for one of the symbols under its context.
+pub(crate) fn encode_num(num: &NumericSymbols, file_model: &FileModel) -> Option<Vec<u8>> {
     pack_body(&file_model.model, &num.symbols, &num.contexts, &num.extra)
 }
 
@@ -1016,6 +1046,7 @@ impl<'a> NumericDecoder<'a> {
 mod tests {
     use super::*;
     use crate::streams::PI_OX;
+    use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
     fn models(
@@ -1062,7 +1093,8 @@ mod tests {
             })
             .collect();
         let (file_model, model) = models(&symbols, &contexts, 256)?;
-        let body = encode_bytes(&symbols, &contexts, &file_model);
+        let body =
+            encode_bytes(&symbols, &contexts, &file_model).context("every symbol has a code")?;
         let mut decoder = ByteDecoder::new(&body, symbols.len(), &model)?;
         for (index, &symbol) in symbols.iter().enumerate() {
             assert_eq!(decoder.get(u32::from(contexts[index])), Some(symbol));
@@ -1105,7 +1137,7 @@ mod tests {
         }
         let num = writer.finish();
         let (file_model, model) = models(&num.symbols, &num.contexts, NUMERIC_ALPHABET)?;
-        let body = encode_num(&num, &file_model);
+        let body = encode_num(&num, &file_model).context("every symbol has a code")?;
         let mut decoder = NumericDecoder::new(PI_OX, &body, values.len(), &model)?;
         for &(context, value) in &values {
             assert_eq!(decoder.get(context), Some(value));

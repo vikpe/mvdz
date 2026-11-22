@@ -79,7 +79,7 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     edited.segments.swap(1, 2);
     assert!(readers_agree(&edited.build(), "swapped segments").is_none());
     let mut other_version = file.clone();
-    other_version[4] = 3;
+    other_version[4] = 4;
     assert_matches!(
         decompress(&other_version, 1),
         Err(crate::Error::UnsupportedVersion)

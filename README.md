@@ -8,11 +8,11 @@ header gives the demo's size, duration and identity (the SHA-256 of the
 raw demo) without decoding.
 
 It comes as a command-line tool and a Rust library, and builds for
-WebAssembly. The format is specified in [FORMAT.md](FORMAT.md), precisely
+WebAssembly. `mvdz_go/` is a second implementation, in Go: its encoder writes
+the same bytes as the Rust one. The format is specified in [FORMAT.md](FORMAT.md), precisely
 enough to write an independent decoder, and `vectors/` holds valid
-and hostile test files. The work now is the specification and this Rust
-implementation; implementations in C, Go and other languages follow once
-the format is settled.
+and hostile test files. The work now is the specification and these two
+implementations; C and other languages follow once the format is settled.
 
 **Status: 1.0.0-rc.4, a release candidate for comments.** The file format
 may still change before 1.0: files written by a release candidate are not
@@ -25,8 +25,8 @@ walked command by command (`svc_*` layouts from mvdsv and ezQuake). Every
 field goes to its own stream; numeric fields (player and entity origins,
 view angles, sound and temp-entity coordinates) are coded as residuals
 against predictors. Structural and numeric streams are coded with static
-rANS under per-context models stored once per file; every other byte goes
-to one raw DEFLATE stream per segment. Anything that does not parse is
+rANS under per-context models stored once per file; every other byte is
+coded as LZ77 tokens under the same models. Anything that does not parse is
 stored as it is, so damaged and truncated demos round-trip too.
 
 ## What reads .mvdz today?
@@ -209,8 +209,8 @@ hostile files through every reader), round trips, corrupt-input and
 hostile-file tests, and the regressions of the pre-release reviews. `cargo test --doc` runs the documentation examples, which
 nextest leaves out. Everything runs on synthetic demos; tests that can also use
 real demos read them from the directory in `MVDZ_TEST_DATA` (subdirectory
-`sample/` with demos named `<sha256>.mvd`, `gen/` with constructed demos,
-`poc/` with hostile model headers) and say so when it is unset.
+`sample/` with demos named `<sha256>.mvd`, `gen/` with constructed demos)
+and say so when it is unset.
 `scripts/fetch_samples.sh sample40 testdata/sample` downloads the
 development sample there (`MVDZ_TEST_DATA=$PWD/testdata`).
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors from two demos in
@@ -262,5 +262,5 @@ and answers for them are closed.
 ## Licence and dependencies
 
 MIT, see [LICENSE](LICENSE). Dependencies (all permissive, all pure
-Rust): `sha2` and its RustCrypto dependencies, `crc32fast` and
-`miniz_oxide` (MIT/Apache-2.0); the tests also use `serde_json`.
+Rust): `sha2` and its RustCrypto dependencies and `crc32fast`
+(MIT/Apache-2.0); the tests also use `serde_json`.

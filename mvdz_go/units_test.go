@@ -1,9 +1,12 @@
 package mvdz
 
 import (
-	"errors"
+	"encoding/hex"
+	"fmt"
 	"hash/crc32"
+	"os"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -32,7 +35,7 @@ func TestQuantizedWeight(test *testing.T) {
 		80: 92682 << 39, 81: 1<<56 - 1, 255: 1<<56 - 1,
 	}
 	for quantized, expected := range weights {
-		if weight := quantizedWeight(quantized); weight != expected {
+		if weight := quantizedWeight(uint32(quantized)); weight != expected {
 			test.Errorf("quantizedWeight(%d) = %d, want %d", quantized, weight, expected)
 		}
 	}
@@ -52,7 +55,7 @@ func TestNormalize(test *testing.T) {
 		{"largest weights", []uint64{1<<56 - 1, 1<<56 - 1}, []int{2048, 2048}},
 	}
 	for _, normalizeCase := range cases {
-		frequencies := normalize(normalizeCase.weights)
+		frequencies := normalize(normalizeCase.weights, frequencyTotal)
 		if !slices.Equal(frequencies, normalizeCase.expected) {
 			test.Errorf("%s: got %v, want %v", normalizeCase.name, frequencies, normalizeCase.expected)
 		}
@@ -64,7 +67,7 @@ func TestNormalize(test *testing.T) {
 		weights[symbol] = 1
 	}
 	weights[9] = 1 << 50
-	frequencies := normalize(weights)
+	frequencies := normalize(weights, frequencyTotal)
 	if frequencies[9] != 4096-255 || frequencies[0] != 1 {
 		test.Errorf("dominant: got %d and %d", frequencies[9], frequencies[0])
 	}
@@ -112,10 +115,49 @@ func TestNumericValue(test *testing.T) {
 	}
 }
 
-func TestModelsSizeLimit(test *testing.T) {
-	modelsSize := maxModelsSize
-	emptyModel := make([]byte, 4)
-	if _, err := readModel(emptyModel, structuralAlphabet, &modelsSize); !errors.Is(err, ErrMemoryLimit) {
-		test.Errorf("got %v, want %v", err, ErrMemoryLimit)
+// The check values of FORMAT.md section 8 rule 4.
+func TestLog2Fixed(test *testing.T) {
+	values := map[uint64]uint64{
+		1: 0, 2: 65536, 3: 103872, 10: 217705, 1000: 653117, 4097: 786455,
+		1<<32 - 1: 2097151, 1 << 40: 40 << 16, 1<<62 + 12345: 4063232,
+	}
+	for value, expected := range values {
+		if fixed := log2Fixed(value); fixed != expected {
+			test.Errorf("log2Fixed(%d) = %d, want %d", value, fixed, expected)
+		}
+	}
+}
+
+// vectors/lz-tokens.tsv: inputs with the tokens of the canonical parse.
+func TestLzTokens(test *testing.T) {
+	file, err := os.ReadFile("../vectors/lz-tokens.tsv")
+	if err != nil {
+		test.Fatal(err)
+	}
+	inputCount := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(file)), "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		inputHex, expected, _ := strings.Cut(line, "\t")
+		input, err := hex.DecodeString(inputHex)
+		if err != nil {
+			test.Fatal(err)
+		}
+		var tokens []string
+		for _, token := range lzParse(input) {
+			if token.length == 0 {
+				tokens = append(tokens, fmt.Sprintf("L%02x", token.literal))
+			} else {
+				tokens = append(tokens, fmt.Sprintf("M%d,%d", token.length, token.distance))
+			}
+		}
+		if parsed := strings.Join(tokens, " "); parsed != expected {
+			test.Errorf("%s: got %s, want %s", inputHex, parsed, expected)
+		}
+		inputCount++
+	}
+	if inputCount == 0 {
+		test.Error("no input in the file")
 	}
 }

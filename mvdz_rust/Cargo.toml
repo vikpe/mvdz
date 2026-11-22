@@ -13,8 +13,6 @@ repository = "https://github.com/galfthan/mvdz"
 mvdz = { path = "mvdz" }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 crc32fast = { version = "1", default-features = false, features = ["std"] }
-# pure Rust: no C code, the same on wasm
-miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 anyhow = { version = "1", default-features = false, features = ["std"] }
 # no plots and no rayon: only the statistics and baseline comparison are used
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }

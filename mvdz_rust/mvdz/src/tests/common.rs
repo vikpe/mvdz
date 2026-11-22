@@ -17,14 +17,29 @@ pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<Vec<u8>> {
     crate::encode::compress(src, 1)
 }
 
-/// Every segment stored as it is: the encoder's fallback layout.
+/// Every segment all tail: the encoder's fallback layout.
 pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use crate::segment::{cut_points, numerics, walk_tail};
+    use crate::segment::{ModelBuilder, cut_points, models_body, numerics, walk_tail};
+    let protocol = crate::protocol::Protocol::default();
+    let walked_segments: Vec<_> = cut_points(src)
+        .windows(2)
+        .map(|cut| {
+            let raw = &src[cut[0]..cut[1]];
+            let walked = walk_tail(raw, protocol);
+            let numerics = numerics(raw, &walked);
+            (raw, walked, numerics)
+        })
+        .collect();
+    let mut model_builder = ModelBuilder::default();
+    let counted: Vec<_> = (walked_segments.iter())
+        .map(|(_, walked, numerics)| (walked, numerics))
+        .collect();
+    model_builder.add(&counted, 1);
+    let models = model_builder.models(1);
+    let mut model_ids = Vec::new();
     let mut segments = Vec::new();
-    for cut in cut_points(src).windows(2) {
-        let raw = &src[cut[0]..cut[1]];
-        let walked = walk_tail(raw, crate::proto::Proto::default());
-        let coded = crate::segment::encode(&walked, &numerics(raw, &walked), &mut Vec::new(), &[])
+    for (raw, walked, numerics) in &walked_segments {
+        let coded = crate::segment::encode(walked, numerics, &mut model_ids, &models)
             .context("a tail segment")?;
         let mut segment = segment_header_bytes(
             raw.len() as u32,
@@ -34,6 +49,8 @@ pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
         segment.extend_from_slice(&coded);
         segments.push(segment);
     }
+    model_ids.sort_unstable();
+    model_ids.dedup();
     let header = Header {
         size_bytes: src.len() as u64,
         duration_ms: u64::from(crate::segment::duration_ms(src)),
@@ -42,10 +59,44 @@ pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
     };
     Ok(Parts {
         header,
-        models: Vec::new(),
+        models: if model_ids.is_empty() {
+            Vec::new()
+        } else {
+            models_body(&models, &model_ids)
+        },
         segments,
     }
     .build())
+}
+
+/// Every segment stored: the encoder's last fallback, a file without models.
+pub(crate) fn all_stored(src: &[u8]) -> Vec<u8> {
+    let protocol = crate::protocol::Protocol::default();
+    let segments = crate::segment::cut_points(src)
+        .windows(2)
+        .map(|cut| {
+            let raw = &src[cut[0]..cut[1]];
+            let mut segment = segment_header_bytes(
+                raw.len() as u32,
+                crate::segment::duration_ms(raw),
+                crc32fast::hash(raw),
+            );
+            segment.extend_from_slice(&crate::segment::stored(raw, protocol));
+            segment
+        })
+        .collect();
+    let header = Header {
+        size_bytes: src.len() as u64,
+        duration_ms: u64::from(crate::segment::duration_ms(src)),
+        crc32: crc32fast::hash(src),
+        sha256: Sha256::digest(src).into(),
+    };
+    Parts {
+        header,
+        models: Vec::new(),
+        segments,
+    }
+    .build()
 }
 
 /// The bytes the walk left unstructured: the RAW and TAIL streams of every segment.
@@ -392,30 +443,57 @@ pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
     first.as_ref().ok().cloned()
 }
 
-pub(crate) fn models_entries(body: &[u8]) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
-    use crate::fields::{read_length_prefixed, read_usize};
-    let mut rest = body;
-    let count = read_usize(&mut rest).context("the entry count")?;
-    (0..count)
-        .map(|_| {
-            Some((
-                read_usize(&mut rest)?,
-                read_length_prefixed(&mut rest)?.to_vec(),
-            ))
-        })
-        .collect::<Option<_>>()
-        .context("a models entry")
+/// One entry of a models block (FORMAT.md section 2.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelEntry {
+    pub stream: usize,
+    pub raw_len: usize,
+    /// The raw model, coded under the meta model.
+    pub coded: Vec<u8>,
 }
 
-pub(crate) fn models_body(entries: &[(usize, Vec<u8>)]) -> Vec<u8> {
-    let mut body = Vec::new();
-    crate::fields::put_usize(&mut body, entries.len());
-    for (stream, model) in entries {
-        crate::fields::put_usize(&mut body, *stream);
-        crate::fields::put_usize(&mut body, model.len());
-        body.extend_from_slice(model);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelsParts {
+    /// The meta model, raw.
+    pub meta: Vec<u8>,
+    pub entries: Vec<ModelEntry>,
+}
+
+pub(crate) fn models_parts(body: &[u8]) -> anyhow::Result<ModelsParts> {
+    use crate::fields::{read_bytes, read_length_prefixed, read_usize};
+    let mut rest = body;
+    let own_count = read_usize(&mut &*rest).context("the meta model's own count")?;
+    let meta_len = 4 + 2 * own_count + (own_count + 1) * 256;
+    let meta = read_bytes(&mut rest, meta_len)
+        .context("the meta model")?
+        .to_vec();
+    let count = read_usize(&mut rest).context("the entry count")?;
+    let entries = (0..count)
+        .map(|_| {
+            Some(ModelEntry {
+                stream: read_usize(&mut rest)?,
+                raw_len: read_usize(&mut rest)?,
+                coded: read_length_prefixed(&mut rest)?.to_vec(),
+            })
+        })
+        .collect::<Option<_>>()
+        .context("a models entry")?;
+    Ok(ModelsParts { meta, entries })
+}
+
+impl ModelsParts {
+    pub(crate) fn build(&self) -> Vec<u8> {
+        use crate::fields::put_usize;
+        let mut body = self.meta.clone();
+        put_usize(&mut body, self.entries.len());
+        for entry in &self.entries {
+            for field in [entry.stream, entry.raw_len, entry.coded.len()] {
+                put_usize(&mut body, field);
+            }
+            body.extend_from_slice(&entry.coded);
+        }
+        body
     }
-    body
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

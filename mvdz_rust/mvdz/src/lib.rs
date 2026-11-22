@@ -9,20 +9,21 @@
 //! # }
 //! ```
 
-mod coder;
 mod decode;
-mod deflate;
 mod encode;
 mod error;
 mod fields;
 mod format;
+mod lz;
+mod math;
 mod memory;
 mod numeric;
 mod parallel;
-mod proto;
+mod protocol;
+mod rans;
 mod segment;
 mod streams;
-mod walk;
+mod walker;
 
 #[cfg(test)]
 mod tests;

@@ -344,20 +344,20 @@ func (protocol protocolState) skipEntityDelta(fields *byteCursor) {
 
 // scanFrames is the length of the whole frames data starts with and the sum
 // of their time bytes, FORMAT.md section 4.2 (frame_len) and section 8.
-func scanFrames(data []byte) (framedLength int, durationMs uint32) {
+func scanFrames(data []byte) (framedLen int, durationMs uint32) {
 	for {
-		frameLength, isFrame := frameLength(data[framedLength:])
+		frameLen, isFrame := frameLen(data[framedLen:])
 		if !isFrame {
-			return framedLength, durationMs
+			return framedLen, durationMs
 		}
-		durationMs += uint32(data[framedLength])
-		framedLength += frameLength
+		durationMs += uint32(data[framedLen])
+		framedLen += frameLen
 	}
 }
 
-// frameLength is the length of the frame that starts data, header included;
+// frameLen is the length of the frame that starts data, header included;
 // false if data does not start with a whole frame.
-func frameLength(data []byte) (int, bool) {
+func frameLen(data []byte) (int, bool) {
 	fields := byteCursor{data: data}
 	fields.skip(1)
 	switch fields.u8() & 7 {

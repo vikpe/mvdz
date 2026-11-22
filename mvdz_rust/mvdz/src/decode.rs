@@ -1,6 +1,5 @@
 //! Decoding: the container reader, segment by segment, and the checks over the demo.
 
-use crate::coder::rans::read_models_block;
 use crate::error::{Error, Result, bad};
 use crate::format::{
     HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_LEN, SegmentHeader,
@@ -8,6 +7,7 @@ use crate::format::{
 };
 use crate::memory::{DEFAULT_MAX_MEMORY, try_zeroed};
 use crate::parallel::{par_map, thread_count};
+use crate::rans::read_models_block;
 use crate::segment;
 use std::collections::VecDeque;
 use std::io::{self, Read};

@@ -1,5 +1,6 @@
-// Package mvdz decodes MVDZ files: losslessly compressed QuakeWorld MVD demos.
-// It follows FORMAT.md, version 2 of the format.
+// Package mvdz encodes and decodes MVDZ files: losslessly compressed QuakeWorld
+// MVD demos.
+// It follows FORMAT.md, version 3 of the format.
 package mvdz
 
 import (
@@ -17,7 +18,6 @@ var (
 	ErrNotMvdz            = errors.New("mvdz: not an MVDZ file")
 	ErrUnsupportedVersion = errors.New("mvdz: unsupported version")
 	ErrCorrupt            = errors.New("mvdz: corrupt")
-	ErrMemoryLimit        = errors.New("mvdz: memory limit")
 )
 
 // Header describes the original demo.
@@ -80,15 +80,13 @@ func Decode(file []byte) ([]byte, error) {
 }
 
 const (
-	headerSize      = 60
-	formatVersion   = 2
-	maxModelsLength = 1 << 24
-	maxCodedLength  = 1 << 21
-	maxRawLength    = 1 << 20
-
-	// The format lets the models of a file inflate to about 350 MB in all.
-	// This reader refuses more than 64 MiB with ErrMemoryLimit.
-	maxModelsSize = 64 << 20
+	headerSize    = 60
+	formatVersion = 3
+	maxModelsLen  = 1 << 24
+	// Of the models before they are coded, the meta model included.
+	maxModelsRawLen = 1 << 24
+	maxCodedLen     = 1 << 21
+	maxRawLen       = 1 << 20
 )
 
 // FORMAT.md section 2.1
@@ -132,30 +130,30 @@ func (reader *Reader) nextSegment() ([]byte, error) {
 	}
 
 	// FORMAT.md section 2.3; the checks are in the order of section 7.
-	codedLength, err := readU32(reader.input)
+	codedLen, err := readU32(reader.input)
 	if err != nil {
 		return nil, err
 	}
-	if codedLength > maxCodedLength {
+	if codedLen > maxCodedLen {
 		return nil, corrupt("segment size")
 	}
-	fields := make([]byte, 12+codedLength)
+	fields := make([]byte, 12+codedLen)
 	if err := readFull(reader.input, fields); err != nil {
 		return nil, err
 	}
-	rawLength := binary.LittleEndian.Uint32(fields[0:])
+	rawLen := binary.LittleEndian.Uint32(fields[0:])
 	checksum := binary.LittleEndian.Uint32(fields[8:])
-	if rawLength == 0 {
+	if rawLen == 0 {
 		return nil, corrupt("empty segment")
 	}
-	if rawLength > maxRawLength {
+	if rawLen > maxRawLen {
 		return nil, corrupt("segment size")
 	}
-	if uint64(rawLength) > reader.header.Size-reader.decodedSize {
+	if uint64(rawLen) > reader.header.Size-reader.decodedSize {
 		return nil, corrupt("segment sizes")
 	}
 
-	decoded, err := decodeSegment(fields[12:], rawLength, reader.models)
+	decoded, err := decodeSegment(fields[12:], rawLen, reader.models)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +161,7 @@ func (reader *Reader) nextSegment() ([]byte, error) {
 		return nil, corrupt("segment checksum")
 	}
 	reader.demoCrc32 = crc32.Update(reader.demoCrc32, crc32.IEEETable, decoded)
-	reader.decodedSize += uint64(rawLength)
+	reader.decodedSize += uint64(rawLen)
 	return decoded, nil
 }
 
@@ -189,45 +187,17 @@ func readModels(input io.Reader) (*fileModels, error) {
 	if err != nil {
 		return nil, err
 	}
-	if length > maxModelsLength {
+	if length > maxModelsLen {
 		return nil, corrupt("models too large")
 	}
 	body := make([]byte, length)
 	if err := readFull(input, body); err != nil {
 		return nil, err
 	}
-	models := new(fileModels)
 	if length == 0 {
-		return models, nil
+		return new(fileModels), nil
 	}
-
-	fields := byteCursor{data: body}
-	entryCount := fields.u32()
-	if entryCount == 0 {
-		return nil, corrupt("tables")
-	}
-	nextId := uint32(0)
-	modelsSize := 0
-	for range entryCount {
-		id := fields.u32()
-		entry := fields.bytes(fields.u32())
-		if fields.isShort || id < nextId || id >= firstBlobStream {
-			return nil, corrupt("tables")
-		}
-		nextId = id + 1
-		alphabet := structuralAlphabet
-		if id >= firstNumericStream {
-			alphabet = numericAlphabet
-		}
-		models[id], err = readModel(entry, alphabet, &modelsSize)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !fields.isAtEnd() {
-		return nil, corrupt("tables")
-	}
-	return models, nil
+	return readModelsBlock(body)
 }
 
 func readU32(input io.Reader) (uint32, error) {

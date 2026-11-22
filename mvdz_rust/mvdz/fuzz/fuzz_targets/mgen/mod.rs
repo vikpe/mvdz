@@ -9,12 +9,12 @@ const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
 
 /// Tracked from the serverdata the generator writes, independently of the library.
 #[derive(Debug, Default)]
-pub struct Proto {
+pub struct Protocol {
     pub fte: u32,
     mvd1: u32,
 }
 
-impl Proto {
+impl Protocol {
     fn has_fte_float_coords(&self) -> bool {
         self.fte & FTE_PEXT_FLOAT_COORDS != 0
     }
@@ -75,7 +75,7 @@ fn push_string(out: &mut Vec<u8>, text: &[u8]) {
     out.push(0);
 }
 
-fn delta(chooser: &mut Chooser, proto: &Proto, out: &mut Vec<u8>, entity: u16) {
+fn delta(chooser: &mut Chooser, protocol: &Protocol, out: &mut Vec<u8>, entity: u16) {
     let high = chooser.u8() as u16 & 0x7f;
     let mut header = (high << 9) | (entity & 511);
     if header == 0 {
@@ -89,7 +89,7 @@ fn delta(chooser: &mut Chooser, proto: &Proto, out: &mut Vec<u8>, entity: u16) {
         bits |= more_bits as u32;
         out.push(more_bits);
     }
-    if bits & (1 << 7) != 0 && proto.fte != 0 {
+    if bits & (1 << 7) != 0 && protocol.fte != 0 {
         let fte_bits = chooser.u8();
         more = fte_bits as u32;
         out.push(fte_bits);
@@ -111,13 +111,13 @@ fn delta(chooser: &mut Chooser, proto: &Proto, out: &mut Vec<u8>, entity: u16) {
     }
     for (origin_bit, angle_bit) in [(1 << 9, 1), (1 << 10, 1 << 12), (1 << 11, 1 << 1)] {
         if bits & origin_bit != 0 {
-            out.extend(chooser.bytes(proto.coord()));
+            out.extend(chooser.bytes(protocol.coord()));
         }
         if bits & angle_bit != 0 {
-            out.extend(chooser.bytes(proto.angle()));
+            out.extend(chooser.bytes(protocol.angle()));
         }
     }
-    if more & 2 != 0 && proto.fte & 8 != 0 {
+    if more & 2 != 0 && protocol.fte & 8 != 0 {
         out.push(chooser.u8());
     }
     if more & 1 != 0 {
@@ -126,14 +126,14 @@ fn delta(chooser: &mut Chooser, proto: &Proto, out: &mut Vec<u8>, entity: u16) {
     if more & 4 != 0 {
         out.push(chooser.u8());
     }
-    if more & (1 << 10) != 0 && proto.fte & 0x80000 != 0 {
+    if more & (1 << 10) != 0 && protocol.fte & 0x80000 != 0 {
         out.extend(chooser.bytes(3));
     }
 }
 
-fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
+fn command(chooser: &mut Chooser, protocol: &mut Protocol, out: &mut Vec<u8>) {
     let kind = chooser.below(40);
-    let coord_len = proto.coord();
+    let coord_len = protocol.coord();
     match kind {
         0..=6 => {
             // playerinfo
@@ -168,7 +168,7 @@ fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
             let count = chooser.below(12);
             let mut entity = chooser.below(40) as u16;
             for _ in 0..count {
-                delta(chooser, proto, out, entity);
+                delta(chooser, protocol, out, entity);
                 let gap_bound = if chooser.below(16) == 0 { 400 } else { 4 };
                 entity = entity.wrapping_add(1 + chooser.below(gap_bound) as u16);
             }
@@ -283,8 +283,8 @@ fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
                 server_data.extend_from_slice(&tag.to_le_bytes());
                 server_data.extend_from_slice(&value.to_le_bytes());
                 match tag {
-                    PROTOCOL_VERSION_FTE => proto.fte = value,
-                    PROTOCOL_VERSION_MVD_1 => proto.mvd1 = value,
+                    PROTOCOL_VERSION_FTE => protocol.fte = value,
+                    PROTOCOL_VERSION_MVD_1 => protocol.mvd1 = value,
                     _ => {}
                 }
             }
@@ -342,11 +342,11 @@ fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
             // FTE spawnbaseline2 / spawnbaseline
             if chooser.below(2) == 0 {
                 out.push(22);
-                out.extend(chooser.bytes(6 + 3 * (coord_len + proto.angle())));
+                out.extend(chooser.bytes(6 + 3 * (coord_len + protocol.angle())));
             } else {
                 out.push(66);
                 let entity = chooser.below(512) as u16;
-                delta(chooser, proto, out, entity);
+                delta(chooser, protocol, out, entity);
             }
         }
         31 => {
@@ -358,11 +358,11 @@ fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
         }
         32 => {
             out.push(10);
-            out.extend(chooser.bytes(1 + 3 * proto.angle()));
+            out.extend(chooser.bytes(1 + 3 * protocol.angle()));
         }
         33 => {
             out.push(30);
-            out.extend(chooser.bytes(3 * proto.wide_coord() + 3 * proto.angle()));
+            out.extend(chooser.bytes(3 * protocol.wide_coord() + 3 * protocol.angle()));
         }
         34 => {
             // a random command byte with random bytes
@@ -384,7 +384,7 @@ fn command(chooser: &mut Chooser, proto: &mut Proto, out: &mut Vec<u8>) {
                     push_string(out, b"m");
                 }
                 19 => out.extend(chooser.bytes(2 + 3 * coord_len)),
-                20 => out.extend(chooser.bytes(4 + 3 * (coord_len + proto.angle()))),
+                20 => out.extend(chooser.bytes(4 + 3 * (coord_len + protocol.angle()))),
                 29 => out.extend(chooser.bytes(3 * coord_len + 3)),
                 _ => out.extend(chooser.bytes(2)),
             }
@@ -457,7 +457,7 @@ fn hidden(chooser: &mut Chooser, out: &mut Vec<u8>) {
 
 pub fn demo(bytes: &[u8]) -> Vec<u8> {
     let mut chooser = Chooser::new(bytes);
-    let mut proto = Proto::default();
+    let mut protocol = Protocol::default();
     let mut out = Vec::new();
     while !chooser.is_done() {
         let time_delta = if chooser.below(4) == 0 {
@@ -502,7 +502,7 @@ pub fn demo(bytes: &[u8]) -> Vec<u8> {
                 let frame_type = [1u8, 3, 4, 5, 6, 6, 6, 4][chooser.below(8)];
                 let mut payload = Vec::new();
                 for _ in 0..1 + chooser.below(8) {
-                    command(&mut chooser, &mut proto, &mut payload);
+                    command(&mut chooser, &mut protocol, &mut payload);
                 }
                 out.push(time_delta);
                 if frame_type == 3 {

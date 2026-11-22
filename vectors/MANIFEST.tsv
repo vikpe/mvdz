@@ -8,6 +8,7 @@ escapes.normal.mvdz	d5b2a33c09feada00cfc69abdb0a3177f0fece11f22a4fcfbc993bb54945
 demoinfo-multi.normal.mvdz	4ef933ba44606f6528fa631849ed9bc26f6ea1957457ed25ac4bf1e3a5c1413d	1057792	synthetic demo carrying a 3-block KTX demoinfo twice, repeated to several segments
 random.normal.mvdz	2d2506480b05f18be895b70c6faeb3b52ad41b68438da3aa23da98961a145f89	3000	3000 random bytes (no frame: all tail)
 framed-as-tail.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	synthetic demo with demoinfo, written as all tail (the encoder's fallback layout)
+framed-as-stored.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	the same demo, written as a stored segment (the encoder's last fallback)
 empty.normal.mvdz	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0	an empty demo
 usercmd.normal.mvdz	85598f84014a7db074614dc585a421db11e52ea0e2ff21aba59f80ee9f447cd3	29377	synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)
 usercmd.normal.segments.mvdz	b63058bd186b2d3732942c390e17c32b1c68731c08f8ff13fc22beb7a83a495b	1057572	the same, repeated to several segments
@@ -15,7 +16,7 @@ hostile-base-cut.mvdz	error: corrupt: incomplete file	-	the base file (a synthet
 hostile-trailing-byte.mvdz	error: corrupt: trailing bytes	-	one byte after the last segment
 hostile-header-size.mvdz	error: corrupt: incomplete file	-	the header's size + 1
 hostile-header-crc.mvdz	error: corrupt: checksum mismatch	-	one bit of the header's CRC-32 flipped
-hostile-version.mvdz	error: unsupported MVDZ version	-	version 3
+hostile-version.mvdz	error: unsupported MVDZ version	-	version 4
 hostile-dropped-segment.mvdz	error: corrupt: incomplete file	-	the third segment removed
 hostile-swapped-segments.mvdz	error: corrupt: checksum mismatch	-	the second and third segments swapped
 hostile-repeated-segment.mvdz	error: corrupt: segment sizes	-	the second segment twice
@@ -26,6 +27,10 @@ hostile-models-size.mvdz	error: corrupt: models too large	-	a models block of 25
 hostile-models-missing.mvdz	error: corrupt: tables	-	the base file without its models block
 hostile-ucmd-grid.mvdz	error: corrupt: structure	-	a usercmd block whose grid flags symbol is 9
 hostile-ucmd-misc.mvdz	error: corrupt: structure	-	a usercmd block (type 1, 23 bytes) stored in hid.misc, no uc stream
+hostile-lz-distance.mvdz	error: corrupt: blob tokens	-	a match reaching 2 bytes back after 1 byte
+hostile-lz-overrun.mvdz	error: corrupt: blob tokens	-	a match of 9 bytes where 3 are left
+hostile-lz-short.mvdz	error: corrupt: blob tokens	-	tokens for 2 of the 4 blob bytes
+hostile-stored-len.mvdz	error: corrupt: stored segment	-	a stored segment of 4 bytes holding 3
 hostile-tables-no-entry.mvdz	error: corrupt: stream without a model	-	the models block without the entry of a stream the segments code with rANS
 hostile-tables-missing.mvdz	error: corrupt: stream without a model	-	an empty models block: rANS streams without a model
 hostile-tables-order.mvdz	error: corrupt: tables	-	two entries of the models block swapped (stream ids not increasing)
@@ -34,6 +39,7 @@ hostile-tables-blob-id.mvdz	error: corrupt: tables	-	a model for a blob stream (
 hostile-tables-unassigned-id.mvdz	error: corrupt: tables	-	a model for a stream id past the last
 hostile-tables-empty.mvdz	error: corrupt: tables	-	a models block with n = 0
 hostile-tables-trailing.mvdz	error: corrupt: tables	-	a models block with one byte after its last entry
-hostile-tables-padding.mvdz	error: corrupt: deflate data	-	a model with one byte of padding (not consumed exactly)
-hostile-tables-alphabet.mvdz	error: corrupt: deflate data	-	a numeric stream's entry holding a structural model (alphabet 256)
+hostile-tables-padding.mvdz	error: corrupt: rans stream	-	a model whose coded stream has one byte of padding (not consumed exactly)
+hostile-tables-alphabet.mvdz	error: corrupt: model	-	a numeric stream's entry holding a structural model (the raw length of alphabet 256)
+hostile-tables-raw-size.mvdz	error: corrupt: models size	-	a model declaring 16 MiB of raw bytes: the models together over the limit
 hostile-tables-own-count.mvdz	error: corrupt: model	-	a model declaring 65537 own tables: more than there are contexts

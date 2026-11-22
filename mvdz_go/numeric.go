@@ -2,7 +2,6 @@ package mvdz
 
 import (
 	"encoding/binary"
-	"math"
 	"math/bits"
 )
 
@@ -161,11 +160,11 @@ func (groups *numericGroups) usercmdAngles(records []usercmdRecord) {
 				uint16(axis)<<14
 			offset := record.pitchOffset + 4*uint32(axis)
 			prediction := track.last + uint16(velocity)
-			sourceValue, _ := gridValue(groups.read32(offset))
+			sourceValue, _ := onGrid(groups.read32(offset))
 			sourceResidual := int16(sourceValue - prediction)
 			residual := int16(groups.residual(streamUsercmdAngle, context, int32(sourceResidual)))
 			value := prediction + uint16(residual)
-			groups.write32(offset, gridAngle(value))
+			groups.write32(offset, gridF32(value))
 			track.residual = int32(residual)
 			track.beforePrevious = track.previous
 			track.previous = track.last
@@ -263,24 +262,6 @@ func (groups *numericGroups) residual(stream int, context uint16, sourceResidual
 	return residual
 }
 
-// gridAngle is the float bits of a usercmd angle on the 360/65536 grid,
-// FORMAT.md section 5.6.
-func gridAngle(value uint16) uint32 {
-	return math.Float32bits(float32(int16(value)) * 45 / 8192)
-}
-
-// gridValue is the grid value of a usercmd angle, FORMAT.md section 4.11;
-// false if the angle is not on the grid.
-func gridValue(angleBits uint32) (uint16, bool) {
-	scaled := float64(math.Float32frombits(angleBits)) * 8192 / 45
-	isInRange := scaled >= -32768 && scaled <= 32767
-	if !isInRange {
-		return 0, false
-	}
-	value := uint16(int16(math.Round(scaled)))
-	return value, gridAngle(value) == angleBits
-}
-
 // deltas returns the time since the player's last record and the delta
 // before that, and takes time as the last, FORMAT.md section 5.2.
 func (times *frameTimes) deltas(time uint32) (now, before int32) {
@@ -300,31 +281,4 @@ func predictTimeScaled(last, previous uint16, now, before int32) uint16 {
 		return last + uint16(velocity)
 	}
 	return last + uint16(divRound(velocity*min(now, 32767), min(before, 32767)))
-}
-
-// divRound divides by a positive divisor; halves round away from zero.
-func divRound(dividend, divisor int32) int32 {
-	magnitude := uint32(dividend)
-	if dividend < 0 {
-		magnitude = -magnitude
-	}
-	quotient := int32((magnitude + uint32(divisor)/2) / uint32(divisor))
-	if dividend < 0 {
-		return -quotient
-	}
-	return quotient
-}
-
-// residualBucket is q(v) of FORMAT.md section 1.
-func residualBucket(value int32) uint16 {
-	if value == 0 {
-		return 0
-	}
-	magnitude := uint32(value)
-	sign := 0
-	if value < 0 {
-		magnitude = -magnitude
-		sign = 1
-	}
-	return uint16(2*bits.Len32(magnitude) - 1 + sign)
 }

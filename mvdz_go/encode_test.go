@@ -2,19 +2,16 @@ package mvdz
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
 
 // The vectors the manifest says are a demo compressed plainly, and whether
-// the demo passes the input check.
+// the demo passes the input check. An encoder reproduces them byte for byte.
 var compressedVectors = map[string]bool{
 	"duel.normal.mvdz":             true,
 	"duel-truncated.normal.mvdz":   true,
@@ -58,98 +55,11 @@ func TestEncodeVectors(test *testing.T) {
 			if !isDemo && !errors.Is(err, ErrNotMvd) {
 				test.Errorf("Encode: got %v, want %v", err, ErrNotMvd)
 			}
-			for _, difference := range compareNormalized(file, vector.file) {
-				test.Error(difference)
+			if !bytes.Equal(file, vector.file) {
+				test.Errorf("%d bytes, not the %d of the vector", len(file), len(vector.file))
 			}
 		})
 	}
-}
-
-// filePart is a part of an MVDZ file with its DEFLATE streams inflated.
-type filePart struct {
-	name string
-	data []byte
-}
-
-// compareNormalized lists the parts in which two MVDZ files differ once their
-// DEFLATE streams are inflated: the encoders of the two may deflate
-// differently.
-func compareNormalized(file []byte, reference []byte) []string {
-	parts, err := normalizedParts(file)
-	if err != nil {
-		return []string{err.Error()}
-	}
-	referenceParts, err := normalizedParts(reference)
-	if err != nil {
-		return []string{"reference: " + err.Error()}
-	}
-	var differences []string
-	for index := 0; index < max(len(parts), len(referenceParts)); index++ {
-		switch {
-		case index >= len(parts):
-			differences = append(differences, "missing: "+referenceParts[index].name)
-		case index >= len(referenceParts):
-			differences = append(differences, "not in the reference: "+parts[index].name)
-		case parts[index].name != referenceParts[index].name:
-			differences = append(differences, fmt.Sprintf("%s where the reference has %s", parts[index].name, referenceParts[index].name))
-		case !bytes.Equal(parts[index].data, referenceParts[index].data):
-			differences = append(differences, fmt.Sprintf("%s differs (%d bytes, reference %d)",
-				parts[index].name, len(parts[index].data), len(referenceParts[index].data)))
-		}
-	}
-	return differences
-}
-
-func normalizedParts(file []byte) ([]filePart, error) {
-	fields := byteCursor{data: file}
-	parts := []filePart{{"header", fields.bytes(headerSize)}}
-
-	models := byteCursor{data: fields.bytes(fields.u32())}
-	for range models.u32() {
-		id := models.u32()
-		model := byteCursor{data: models.bytes(models.u32())}
-		ownCount := int(model.u32())
-		inflated, err := inflateExactly(model.data[model.position:], 2*ownCount+(ownCount+1)*streamAlphabet(int(id)))
-		if models.isShort || model.isShort || err != nil {
-			return nil, fmt.Errorf("model %d: %v", id, err)
-		}
-		parts = append(parts, filePart{fmt.Sprintf("model %d with %d own contexts", id, ownCount), inflated})
-	}
-
-	for segment := 0; !fields.isAtEnd(); segment++ {
-		coded := byteCursor{data: fields.bytes(fields.u32() + 12)}
-		parts = append(parts, filePart{fmt.Sprintf("segment %d fields (raw length, duration, CRC-32)", segment), coded.bytes(12)})
-		parts = append(parts, filePart{fmt.Sprintf("segment %d transform header", segment), coded.bytes(20)})
-		entryCount := binary.LittleEndian.Uint32(coded.data[coded.position-4:])
-		var streamLengths [firstBlobStream]uint32
-		var table []string
-		blobSize := 0
-		for range entryCount {
-			id, count := coded.u32(), coded.u32()
-			table = append(table, fmt.Sprintf("%d:%d", id, count))
-			if id < firstBlobStream {
-				streamLengths[id] = coded.u32()
-			} else {
-				blobSize += int(count)
-			}
-		}
-		parts = append(parts, filePart{fmt.Sprintf("segment %d stream table (id:count)", segment), []byte(strings.Join(table, " "))})
-		blobLength := coded.u32()
-		for stream, length := range streamLengths {
-			if length > 0 {
-				parts = append(parts, filePart{fmt.Sprintf("segment %d stream %d body", segment, stream), coded.bytes(length)})
-			}
-		}
-		blobBytes, err := []byte(nil), error(nil)
-		if blobSize > 0 {
-			blobBytes, err = inflateExactly(coded.bytes(blobLength), blobSize)
-		}
-		if fields.isShort || coded.isShort || err != nil {
-			return nil, fmt.Errorf("segment %d: %v", segment, err)
-		}
-		parts = append(parts, filePart{fmt.Sprintf("segment %d blob streams", segment), blobBytes})
-	}
-	return parts, nil
 }
 
 // With MVDZ_TEST_DEMOS=<directory>, every *.mvd in it round-trips.
@@ -178,7 +88,7 @@ func TestEncodeDemos(test *testing.T) {
 }
 
 // With MVDZ_REFERENCE_CLI=<path>, the reference tool and this package read
-// each other's files, and the files are equal once normalized.
+// each other's files, and write the same file for the same demo.
 func TestEncodeAgainstReference(test *testing.T) {
 	cli := os.Getenv("MVDZ_REFERENCE_CLI")
 	if cli == "" {
@@ -238,8 +148,8 @@ func TestEncodeAgainstReference(test *testing.T) {
 			if err != nil || !bytes.Equal(decoded, demo) {
 				test.Errorf("the reference's file does not decode to the demo: %v", err)
 			}
-			for _, difference := range compareNormalized(file, referenceFile) {
-				test.Error(difference)
+			if !bytes.Equal(file, referenceFile) {
+				test.Errorf("this encoder's file differs from the reference's")
 			}
 			test.Logf("%d bytes: this encoder %d, the reference %d", len(demo), len(file), len(referenceFile))
 		})
@@ -259,4 +169,36 @@ func testDemos(test *testing.T) []string {
 		test.Fatalf("no demos in %s: %v", directory, err)
 	}
 	return paths
+}
+
+// Any bytes round-trip through the encoder without its input check, and
+// Encode either refuses them or writes the same file.
+func FuzzEncode(fuzzer *testing.F) {
+	for _, vector := range readVectors(fuzzer) {
+		if !vector.isValid {
+			continue
+		}
+		demo, err := Decode(vector.file)
+		if err != nil {
+			fuzzer.Fatal(err)
+		}
+		for _, prefixLen := range []int{0, 64, 1000, 20000} {
+			fuzzer.Add(demo[:min(prefixLen, len(demo))])
+		}
+	}
+	fuzzer.Fuzz(func(test *testing.T, demo []byte) {
+		file, err := encodeAny(demo)
+		if err != nil {
+			test.Fatal(err)
+		}
+		decoded, err := Decode(file)
+		if err != nil || !bytes.Equal(decoded, demo) {
+			test.Fatalf("round trip: %v", err)
+		}
+		checked, err := Encode(demo)
+		isSame := err == nil && bytes.Equal(checked, file)
+		if !isSame && !errors.Is(err, ErrNotMvd) {
+			test.Fatalf("Encode: %v", err)
+		}
+	})
 }
