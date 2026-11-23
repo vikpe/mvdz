@@ -1,5 +1,5 @@
 # holdout: 200 demos (462 MB raw), the SHA-256 of each raw demo (the hub's demo_sha256).
-# Drawn from the 50,951-demo archive: file names sorted, the 40 sample40 demos left out,
+# Drawn from the 50,951-demo archive: file names sorted, the 40 original sample40 demos left out,
 # shuffled with Python random.Random(20261102), and the first 200 kept whose first frame
 # holds svc_serverdata (gzip errors and other files skipped). Sorted here.
 001d6e0c064380415fe03a5a524ea3cf2e6476e701dcfe1d3dfec48f8dd094e0

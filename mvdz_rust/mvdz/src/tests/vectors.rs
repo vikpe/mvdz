@@ -638,7 +638,7 @@ fn hostile_vectors_are_refused() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// No real demo among set8, sample40 and stratified uses MVD1 float coordinates.
+/// No real demo among sample8, sample40 and stratified uses MVD1 float coordinates.
 fn mvd1_float_demo() -> Vec<u8> {
     const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
     const ORIGIN_FLAGS: u16 = 0b111;
@@ -1104,7 +1104,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     };
     // without the input check: some vectors hold non-demo input
     let encode = |demo: &[u8]| anyhow::Ok(compress_unchecked(demo)?);
-    let duel_source = "duel = set8 demo 3fe477dc...1416";
+    let duel_source = "duel = sample8 demo 3fe477dc...1416";
     add(
         "duel.normal.mvdz",
         encode(&duel)?,

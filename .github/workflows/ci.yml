@@ -33,9 +33,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
-      # tests that need real demos skip without MVDZ_TEST_DATA
-      # (scripts/fetch_samples.sh sample40 DIR/sample downloads them)
+      # the tests that need real demos read $MVDZ_TEST_DATA/sample
+      - uses: actions/cache@v4
+        id: sample8
+        with:
+          path: testdata/sample
+          key: sample8-${{ hashFiles('benchmarks/samples/sample8.txt') }}
+      - if: steps.sample8.outputs.cache-hit != 'true'
+        run: ../scripts/fetch_samples.sh sample8 ../testdata/sample
       - run: cargo nextest run --cargo-profile fast
+        env:
+          MVDZ_TEST_DATA: ${{ github.workspace }}/testdata
       # nextest does not run the documentation examples
       - run: cargo test --profile fast --doc
 

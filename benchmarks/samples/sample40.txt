@@ -1,8 +1,10 @@
-# sample40: 40 demos (140 MB raw), the development sample: 27 archive demos
-# and 13 recent hub games (4on4, 2on2 and duels) taken from a test corpus.
-# The SHA-256 of each raw demo (the hub's demo_sha256). Sorted here.
-# Download, unpacked: https://dev.quake.world/mvdz/sample40.tar.gz (32 of the 40; the
-# other 8 could not be found again), or scripts/fetch_samples.sh sample40 DIR.
+# sample40: 40 demos, the development sample: 25 archive demos and 13 recent hub games
+# (4on4, 2on2 and duels) taken from a test corpus, and two demos that record player
+# inputs (usercmd blocks; 0d9aa0c5 and c8ea35a0, swapped in on 2026-11-23 for 3fe7dc01
+# and 3fea8c08, two demos of common sizes). The SHA-256 of each raw demo (the hub's
+# demo_sha256). Sorted here.
+# Download, unpacked: https://dev.quake.world/mvdz/sample40.tar.gz (32 of the 40; 8 of
+# the original 40 could not be found again), or scripts/fetch_samples.sh sample40 DIR.
 0d536b3aa554a423a55e9d5cd7726c3bd099e0670cc6e51b38d557c3e0b01c03
 0d57c09703b5392954778825804d2174d2184a2a0ff1e2ac4bf449a7f92dae99
 0d5bfbc9c286ea6a2de520d3adfb75ef4c873e956d0772174c28f91d882d22db
@@ -12,12 +14,11 @@
 0d6b7053fd1d7def25426135cdd121cd5fcccc989656526f1690a8e8f614d9f9
 0d6f790cbdebad4f25c00bdb4fdcb4acf7f853ddb57d6a94292fdb3e10e82cb9
 0d727be3acce1e57fe62178c7bcee9938a90c0e50016bc71f6d6482178569ecd
+0d9aa0c5b135f792c4496c75fed674bec619bae4379f6836f09f57a948e1c7c6
 1c12dfe5fcdf300b25b342ff763a53ef8b935bf2dc00a66c34e5106bcadcd22e
 3fdd80182a39f773710e4468c509106926450a296c0c9e4a9d4d821f4a783ddb
 3fe0ac3a668037f0446a1242c1a2269e845109bee68e661c9b30f6afb723f426
 3fe477dc5e4c050fc411d82be87a24c5ec04d6f18b3c6bc0561789a4c4561416
-3fe7dc010be8da1e2c6741994afc64639d785cce7219405bb1e07afe447088d5
-3fea8c0861ee29a593547f04e9640cb07d82281e5839a16fa60786d7086b80c9
 3ff1f82b5f0274da0af3f1744e7660d602159c3edfb0089134b728d3f3408d92
 3ff4ba5d99c2d6aa21b95f354916f21e3fcf108597a078357d0211e33206d034
 3ff8304c709607103c2e42eb46f1eda193f9bcd0d583449b946a84243721093b
@@ -40,6 +41,7 @@
 a3093639c8cb13767d6f584c16f7bba069f43d5df40b289753827a771f82af76
 a3790da1c7c4a8aa041c4f0d891eb376751af0b30f254562d8c688adf8f36262
 c6566da85ed0c96a8d8b0aa24f62f6eb0754fac5e264a541c41431904a86f80e
+c8ea35a0d7fd954b1b93f72e9805085b041029523eb147b0fcc6d6f25ad784b0
 eab282781ec1b0a6dc016f6dafe50d17fa07aaaa5c2a1b666d09cd170bd237b7
 f906fc7f9211cfc1f3ab7be08b91b898eff1b660f38e858bef096c7a7f57b850
 fd8b09c7d3257b015bd9a7dcbd8912b9a4f09e0d149135da5c3dcb8f39c303d6

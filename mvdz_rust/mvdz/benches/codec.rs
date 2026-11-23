@@ -2,10 +2,10 @@
 //!
 //! ```text
 //! # from the repository root
-//! scripts/fetch_samples.sh set8 demos/set8
-//! MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml \
+//! scripts/fetch_samples.sh sample8 demos/sample8
+//! MVDZ_BENCH_DEMOS=$PWD/demos/sample8 cargo bench --manifest-path mvdz_rust/Cargo.toml \
 //!     --bench codec -- --save-baseline before
-//! MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml \
+//! MVDZ_BENCH_DEMOS=$PWD/demos/sample8 cargo bench --manifest-path mvdz_rust/Cargo.toml \
 //!     --bench codec -- --baseline before
 //! ```
 

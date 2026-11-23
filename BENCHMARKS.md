@@ -24,14 +24,14 @@ QuakeWorld servers between about 2000 and 2026, named by the SHA-256 of the raw 
 | sample | n | raw | used for |
 |---|---|---|---|
 | stratified | 379 of 585 | 969 MB | ratios: stratified by era x gzip-size tercile, weighted to the archive |
-| set8 | 8 | 18.4 MB | speeds: 8 demos of sample40 from 0.69 to 6.2 MB |
-| sample40 | 32 of 40 | 125 MB | development |
+| sample8 | 8 | 53.2 MB | speeds: 7 demos of sample40 from 0.79 to 6.2 MB and one usercmd demo of 35.5 MB |
+| sample40 | 32 of 40 | 200 MB | development; includes two usercmd demos |
 
 The lists (the SHA-256 of each raw demo; for stratified also the cells and weights)
 are in [`benchmarks/samples/`](benchmarks/samples). `scripts/fetch_samples.sh <set>
 <dir>` downloads a set from `https://dev.quake.world/mvdz/<set>.tar.gz`, unpacks it
 and checks every SHA-256. Not every demo of the original samples could be found again:
-stratified and sample40 have 379 and 32 of their demos; set8 is complete (two of its
+stratified and sample40 have 379 and 32 of their demos; sample8 is complete (two of its
 demos were replaced by the sample40 demos nearest in size).
 
 ## Ratios
@@ -73,15 +73,30 @@ with rANS instead of zstd, fixed-width integers).
 (`sv_demofps 77`; about 62 a second in practice) where older demos mostly hold 20-27;
 the smaller time step makes each snapshot easier to predict.
 
+**Demos with usercmd blocks.** mvdsv can record every player input as a hidden block
+(type 1, 23 bytes, `SV_DebugClientCommand`; about 77 a second per player). Such demos
+are rare: none in the archive, none on the public QTV servers checked in November 2026,
+but one server records them. On 10 such 4on4 demos of October 2026 (36 MB raw each, the
+blocks 60 % of it; two of them are in sample40, one of those in sample8) the blocks are
+coded field by field (FORMAT.md 4.11, 5.6):
+
+| | size / raw | / gzip |
+|---|---|---|
+| gzip (the hub's `.mvd.gz`) | 0.402 | 1 |
+| mvdz | 0.107 (0.104 to 0.111 per demo) | 0.266 |
+
+The usercmd layout codes the blocks at 0.058 of their raw bytes; with the blocks stored
+as generic hidden blocks instead, the files are 90 % larger (0.203 of raw).
+
 ## Speeds
 
-`mvdz compress` and `mvdz decompress`, one process per file over the 8 demos of set8,
-the output written to tmpfs; 5 rounds. `-j 4` encodes and decodes up to 4 segments at
+`mvdz compress` and `mvdz decompress`, one process per file over the 8 demos of set8
+(sample8 before the usercmd demo replaced its smallest), the output written to tmpfs; 5 rounds. `-j 4` encodes and decodes up to 4 segments at
 once.
 
 | | rc.4 `-s 256K` | **this version** |
 |---|---|---|
-| size / raw (set8) | 0.2207 | 0.2225 |
+| size / raw (sample8) | 0.2207 | 0.2225 |
 | compress, `-j 1` | 22.1 [21.3-22.5] | **28.1** [27.8-28.5] |
 | compress, `-j 4` | 41.1 [38.6-41.5] | **71.1** [70.2-71.4] |
 | decompress, `-j 1` | 72.1 [71.3-72.4] | **82.9** [82.2-83.8] |
@@ -110,8 +125,8 @@ this version:
 | demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
 |---|---|---|---|---|
 | 14.2 MB (sample40) | 93 -> **33** MiB | 102 -> **42** MiB | 23 -> **5.5** MiB | 24 -> **7.9** MiB |
-| 6.2 MB (set8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.1** MiB | 15 -> **7.3** MiB |
-| 2.0 MB (set8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.4** MiB | 8.8 -> **5.8** MiB |
+| 6.2 MB (sample8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.1** MiB | 15 -> **7.3** MiB |
+| 2.0 MB (sample8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.4** MiB | 8.8 -> **5.8** MiB |
 
 Decompression streams: its memory is a few segments (at most 1 MiB raw each) however
 large the demo; rc.4's grows with the demo. Compression holds the demo and its walked
@@ -119,11 +134,11 @@ segments: about 2.3 times the demo for a large one, 1.9 to 2.8 times less than r
 
 ## Correctness
 
-* Round trips (`examples/sweep.rs`): every demo of stratified (379) and set8 (8), 987
+* Round trips (`examples/sweep.rs`): every demo of stratified (379) and sample8 (8), 987
   MB raw, compressed and decoded by both the whole-file decoder and the streaming
   `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
 * The Go encoder (`mvdz_go/`) writes the same bytes as the Rust one for all 387.
-* The test suite (`cargo nextest run`, 54 tests) with the set8 demos and the FTE float
+* The test suite (`cargo nextest run`, 54 tests) with the sample8 demos and the FTE float
   demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
   `vectors/` are refused or decoded as `MANIFEST.tsv` records.
 * Fuzzing, one hour per target, no failure: Rust (`mvdz_rust/mvdz/fuzz/`) `decode`
@@ -133,16 +148,16 @@ segments: about 2.3 times the demo for a large one, 1.9 to 2.8 times less than r
 ## Reproducing
 
 ```
-# the demos: set8 for speeds, stratified for ratios
-scripts/fetch_samples.sh set8 demos/set8
+# the demos: sample8 for speeds, stratified for ratios
+scripts/fetch_samples.sh sample8 demos/sample8
 scripts/fetch_samples.sh stratified demos/stratified
 
 # library speeds over every *.mvd in a directory, 4 threads and 1, with criterion
-MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
+MVDZ_BENCH_DEMOS=$PWD/demos/sample8 cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
 
 # command-line decode speed against gzip, xz and zstd (one process per file)
-ls demos/set8/*.mvd > demos/set8.list
-scripts/bench_cli.sh demos/cli-bench demos/set8.list
+ls demos/sample8/*.mvd > demos/sample8.list
+scripts/bench_cli.sh demos/cli-bench demos/sample8.list
 
 # round trips: every demo through the whole-file and the streaming decoder
 cargo run --manifest-path mvdz_rust/Cargo.toml --release --example sweep -- demos/stratified/*.mvd

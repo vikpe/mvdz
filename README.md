@@ -78,8 +78,8 @@ segments decode in parallel.
 
 Sizes: weighted to a 72 GB archive of gzip-compressed demos (about 112 GB
 raw), measured on a stratified sample of 379 of its demos, with 95 %
-intervals. Speeds: `mvdz decompress`, one process per file, on 8 demos
-(18.4 MB raw); a glibc build for baseline x86-64, pinned to four cores of
+intervals. Speeds: `mvdz decompress`, one process per file, on the 8 demos of set8
+(18.4 MB raw; sample8 before the usercmd demo); a glibc build for baseline x86-64, pinned to four cores of
 an Intel Core i5-12400F. Method, samples, per-era ratios and more speeds
 are in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -214,15 +214,15 @@ and say so when it is unset.
 `scripts/fetch_samples.sh sample40 testdata/sample` downloads the
 development sample there (`MVDZ_TEST_DATA=$PWD/testdata`).
 `MVDZ_WRITE_VECTORS=1` regenerates the vectors from two demos in
-`$MVDZ_TEST_DATA/sample/`: set8's `3fe477dc…` and stratified's `03fc8ec2…`. Fuzz targets are in `mvdz_rust/mvdz/fuzz/` (`cargo +nightly
+`$MVDZ_TEST_DATA/sample/`: sample8's `3fe477dc…` and stratified's `03fc8ec2…`. Fuzz targets are in `mvdz_rust/mvdz/fuzz/` (`cargo +nightly
 fuzz run decode`; also `stream_reader`, `compress_rt` and the
 structure-aware `gen_rt`); they build the library with its `fuzz` feature.
 
-Speed: `MVDZ_BENCH_DEMOS=$PWD/demos/set8 cargo bench --manifest-path
+Speed: `MVDZ_BENCH_DEMOS=$PWD/demos/sample8 cargo bench --manifest-path
 mvdz_rust/Cargo.toml --bench codec` times compress and decompress of every `*.mvd` in that
 directory, one file at a time at 4 threads and at 1, with criterion
 (`-- --save-baseline name` and `-- --baseline name` compare two builds).
-`scripts/fetch_samples.sh set8 demos/set8` downloads the speed set
+`scripts/fetch_samples.sh sample8 demos/sample8` downloads the speed set
 ([BENCHMARKS.md](BENCHMARKS.md), Samples).
 
 ## FAQ

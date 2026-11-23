@@ -404,7 +404,7 @@ pub(crate) fn sample(sha: &str) -> Option<Vec<u8>> {
     std::fs::read(test_data("sample")?.join(format!("{sha}.mvd"))).ok()
 }
 
-/// A set8 demo (1on1, ztndm3); the golden vectors are made from it.
+/// A sample8 demo (1on1, ztndm3); the golden vectors are made from it.
 pub(crate) fn duel() -> Option<Vec<u8>> {
     sample("3fe477dc5e4c050fc411d82be87a24c5ec04d6f18b3c6bc0561789a4c4561416")
 }
