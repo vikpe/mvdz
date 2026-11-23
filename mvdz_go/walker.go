@@ -547,7 +547,7 @@ func (walker *segmentWalker) usercmd() {
 	state.msec = walker.codeSymbol(streamUsercmd, 2<<12|uint16(state.msec))
 	sourceGrid := uint8(0)
 	for axis := range uint32(3) {
-		if _, isOnGrid := onGrid(walker.peek32(4 * axis)); isOnGrid {
+		if _, isOnGrid := gridFromF32Bits(walker.peek32(4 * axis)); isOnGrid {
 			sourceGrid |= 1 << axis
 		}
 	}

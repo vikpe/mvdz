@@ -84,6 +84,31 @@ func TestDivRound(test *testing.T) {
 
 // FORMAT.md section 6.4: the widest buckets wrap, and section 6.5: the
 // mantissa bits end within the last byte.
+func TestGridAngles(test *testing.T) {
+	// 0.0, 45/8192, 91 * 45/8192, 45.0, 90.0, 32767 * 45/8192, -180.0, -45/8192
+	angles := map[uint16]uint32{
+		0: 0, 1: 0x3bb40000, 91: 0x3efff000, 8192: 0x42340000, 16384: 0x42b40000,
+		32767: 0x4333fe98, 0x8000: 0xc3340000, 0xffff: 0xbbb40000,
+	}
+	for grid, expected := range angles {
+		if angleBits := gridToF32Bits(grid); angleBits != expected {
+			test.Errorf("gridToF32Bits(%d) = %#x, want %#x", grid, angleBits, expected)
+		}
+	}
+	for grid := range 1 << 16 {
+		if found, isOnGrid := gridFromF32Bits(gridToF32Bits(uint16(grid))); !isOnGrid || int(found) != grid {
+			test.Errorf("gridFromF32Bits(gridToF32Bits(%d)) = %d, %t", grid, found, isOnGrid)
+		}
+	}
+	// -0.0, +180.0, 1.2345, one bit off 45/8192, the smallest subnormal, infinity, NaN
+	offGrid := []uint32{0x80000000, 0x43340000, 0x3f9e0419, 0x3bb40001, 1, 0x7f800000, 0x7fc00000}
+	for _, angleBits := range offGrid {
+		if _, isOnGrid := gridFromF32Bits(angleBits); isOnGrid {
+			test.Errorf("gridFromF32Bits(%#x) is on the grid", angleBits)
+		}
+	}
+}
+
 func TestNumericValue(test *testing.T) {
 	cases := []struct {
 		bucket   uint8

@@ -1,13 +1,9 @@
 package mvdz
 
-import (
-	"math"
-	"math/bits"
-)
+import "math/bits"
 
 // The exact arithmetic of the format, FORMAT.md: every encoder and decoder
-// computes these values bit for bit, in any language. Integers throughout;
-// the two float functions are single IEEE operations.
+// computes these values bit for bit, in any language. Integers throughout.
 
 // residualBucket is q(v) of FORMAT.md section 1: 0 for zero, else twice the
 // bit length of the magnitude, less one, plus one for a negative value.
@@ -37,22 +33,43 @@ func divRound(dividend, divisor int32) int32 {
 	return quotient
 }
 
-// onGrid is the grid value of a usercmd angle, FORMAT.md section 4.11; false
+// gridFromF32Bits is the grid value of a usercmd angle, FORMAT.md section 4.11; false
 // for -0.0, NaN, +180 and anything else off the 360/65536 grid.
-func onGrid(angleBits uint32) (uint16, bool) {
-	// f * 8192 is exact and the division correctly rounded, so an integer quotient is exact
-	scaled := float64(math.Float32frombits(angleBits)) * 8192 / 45
-	isOnGrid := scaled == math.Trunc(scaled) && scaled >= -32768 && scaled <= 32767
-	if !isOnGrid {
+func gridFromF32Bits(angleBits uint32) (uint16, bool) {
+	// The float is significand * 2^(exponent - 150): 8192 times it is
+	// significand >> shift.
+	const shiftBias = 150 - 13
+	exponent := (angleBits >> 23) & 0xff
+	if exponent > shiftBias {
 		return 0, false
 	}
-	grid := uint16(int16(scaled))
-	return grid, gridF32(grid) == angleBits
+	significand := (angleBits & 0x7fffff) | 1<<23
+	magnitude := uint16((significand >> (shiftBias - exponent)) / 45)
+	grid := magnitude
+	if angleBits>>31 != 0 {
+		grid = -magnitude
+	}
+	return grid, gridToF32Bits(grid) == angleBits
 }
 
-// gridF32 is the float bits of grid * 45/8192, exact, FORMAT.md section 5.6.
-func gridF32(grid uint16) uint32 {
-	return math.Float32bits(float32(int16(grid)) * (45.0 / 8192.0))
+// gridToF32Bits is the float bits of grid * 45/8192, FORMAT.md section 5.6. It is
+// exact: |grid| * 45 has at most 21 bits.
+func gridToF32Bits(grid uint16) uint32 {
+	value := int32(int16(grid))
+	if value == 0 {
+		return 0
+	}
+	sign := uint32(0)
+	if value < 0 {
+		sign = 1
+		value = -value
+	}
+	magnitude := uint32(value) * 45
+	width := uint32(bits.Len32(magnitude))
+	// magnitude * 2^-13 with its highest bit as the implicit one: 127 + width - 1 - 13
+	exponent := width + 113
+	fraction := (magnitude << (24 - width)) & 0x7fffff
+	return sign<<31 | exponent<<23 | fraction
 }
 
 const stepsPerOctave = 2

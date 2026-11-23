@@ -819,10 +819,9 @@ usercmd():
 ```
 
 `grid` bit `a` says angle `a` is on the grid: there is an integer `n` in
--32768..32767 with `f32(n * 45 / 8192)` bit for bit equal to the angle
-(`n * 45 / 8192` is exact in f32: `n * 45` has at most 21 bits and 8192 is a
-power of two). The client sends its angles as 16-bit values and the server
-stores exactly that value times 360/65536, so in practice every angle is on
+-32768..32767 with `grid_to_f32_bits(n as u16)` (5.6) equal to the four bytes
+of the angle as a u32le. The client sends its angles as 16-bit values and the
+server stores exactly that value times 360/65536, so in practice every angle is on
 the grid; -0.0, NaN, +180.0 and anything else are not, and are kept as their
 four bytes. A type-1 block of another length goes to `HIDDEN_MISC` like every
 other block. A segment without usercmd blocks has neither `USERCMD` nor
@@ -991,12 +990,25 @@ usercmd_grid_angle(a, s):
     pred = s.predict_linear()
     r    = the next value of stream 34 under numeric_context(34, f)
     g    = pred + (r as u16)                                         // the grid value, mod 2^16
-    write grid_f32(g) as u32le at the cursor; p += 4
+    write grid_to_f32_bits(g) as u32le at the cursor; p += 4
     s.push(g, (g - pred) as i16 as i32)
 ```
 
-`grid_f32(g)` (`math.rs:grid_f32`) is the f32 `(g as i16) * 45/8192`,
-which is exact.
+`grid_to_f32_bits(g)` (`math.rs:grid_to_f32_bits`) is the IEEE 754 single
+`(g as i16) * 45/8192` as its 32 bits. The value is exact (`|n| * 45` has at
+most 21 bits and 8192 is a power of two), so integers build it:
+
+```
+grid_to_f32_bits(g):
+    n = g as i16
+    if n == 0: return 0
+    m = |n| * 45
+    w = bitlen(m)                                                    // 6..21
+    return ((n < 0 ? 1 : 0) << 31) | ((w + 113) << 23) | ((m << (24 - w)) & 0x7fffff)
+```
+
+`w + 113` is the biased exponent of `m * 2^-13`, the last term its fraction
+without the leading bit.
 
 **Sounds, stream 26**: three `code_u16`, each predicted from the latest
 16-bit origin of the sound's player or entity (4.9).
@@ -1431,10 +1443,10 @@ its blob parser (rule 10) on its own.
       and 13.
     * **Hidden payload** (section 4.11): tag 2 at the end of the payload; tag 0 (an escape
       of the rest) when fewer than 6 bytes remain or the block length is 0 or runs past
-      the payload. The grid bits of a usercmd block are `math.rs:on_grid`.
+      the payload. The grid bits of a usercmd block are `math.rs:grid_from_f32_bits`.
 13. **Residuals** (section 5): `(v - pred) as i16 as i32` for a 16-bit field of value `v`,
     `(v - pred) as i32` for a 32-bit field, and `(g - pred) as i16 as i32` for a usercmd
-    angle of grid value `g` (`math.rs:on_grid`). Appendix A has their buckets and
+    angle of grid value `g` (`math.rs:grid_from_f32_bits`). Appendix A has their buckets and
     mantissa bits.
 
 ---------------------------------------------------------------------------

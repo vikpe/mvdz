@@ -2,7 +2,7 @@
 //! ones as residuals against the predictions of `numeric.rs`.
 
 use crate::fields::{read_u16, read_u32, read_usize};
-use crate::math::{byte_residual_bucket, clamped_bucket, grid_f32, on_grid};
+use crate::math::{byte_residual_bucket, clamped_bucket, grid_from_f32_bits, grid_to_f32_bits};
 use crate::numeric::{AxisTrack, FloatTrack, time_deltas};
 use crate::protocol::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
@@ -1067,7 +1067,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         if IS_ENCODE {
             for axis in 0..3 {
                 let angle_bits = read_u32(&mut &self.src[self.offset + 4 * axis..]);
-                if angle_bits.and_then(on_grid).is_some() {
+                if angle_bits.and_then(grid_from_f32_bits).is_some() {
                     grid |= 1 << axis;
                 }
             }
@@ -1110,14 +1110,15 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             | (axis as u32) << 14;
         let prediction = track.predict_linear();
         let grid_value = if IS_ENCODE {
-            let grid_value = on_grid(self.read_u32()).expect("`usercmd` saw it on the grid");
+            let grid_value =
+                grid_from_f32_bits(self.read_u32()).expect("`usercmd` saw it on the grid");
             let residual = i32::from(grid_value.wrapping_sub(prediction).cast_signed());
             self.residual(USERCMD_ANGLE, context, residual);
             grid_value
         } else {
             let residual = self.residual(USERCMD_ANGLE, context, 0);
             let grid_value = prediction.wrapping_add(residual.cast_unsigned() as u16);
-            self.write_u32(grid_f32(grid_value));
+            self.write_u32(grid_to_f32_bits(grid_value));
             grid_value
         };
         let residual = i32::from(grid_value.wrapping_sub(prediction).cast_signed());

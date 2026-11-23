@@ -1,6 +1,5 @@
 //! The exact arithmetic of the format (FORMAT.md): every encoder and decoder computes these
-//! values bit for bit, in any language. Integers throughout; the two float functions are
-//! single IEEE operations.
+//! values bit for bit, in any language. Integers throughout.
 
 /// (symbol, mantissa bit count, mantissa): the symbol is 0 for zero, else
 /// 2 * bitlen(|value|) - 1 + sign (0..=64).
@@ -61,23 +60,37 @@ pub(crate) fn byte_residual_bucket(residual: u8) -> u8 {
     residual_bucket(i32::from(residual.cast_signed()))
 }
 
-/// The `grid` in -32768..=32767 whose f32 `grid * 45/8192` has exactly these bits; `None` for
-/// -0.0, NaN, +180 and anything else off the grid.
+/// The `grid` in -32768..=32767 with `grid_to_f32_bits(grid)` exactly these bits; `None` for -0.0,
+/// NaN, +180 and anything else off the grid.
 #[inline]
-pub(crate) fn on_grid(bits: u32) -> Option<u16> {
-    // `f * 8192` is exact and the division correctly rounded, so an integer quotient is exact
-    let scaled = f64::from(f32::from_bits(bits)) * 8192.0 / 45.0;
-    if scaled.fract() != 0.0 || !(-32768.0..=32767.0).contains(&scaled) {
-        return None;
-    }
-    let grid = scaled as i32 as i16;
-    (grid_f32(grid.cast_unsigned()) == bits).then_some(grid.cast_unsigned())
+pub(crate) fn grid_from_f32_bits(bits: u32) -> Option<u16> {
+    /// The f32 is `significand * 2^(exponent - 150)`: 8192 times it is `significand >> shift`.
+    const SHIFT_BIAS: u32 = 150 - 13;
+    let exponent = (bits >> 23) & 0xff;
+    let significand = (bits & 0x7f_ffff) | 1 << 23;
+    let shift = SHIFT_BIAS.checked_sub(exponent)?;
+    let magnitude = (significand.checked_shr(shift).unwrap_or(0) / 45) as u16;
+    let grid = if bits >> 31 == 0 {
+        magnitude
+    } else {
+        magnitude.wrapping_neg()
+    };
+    (grid_to_f32_bits(grid) == bits).then_some(grid)
 }
 
-/// Exact: `grid * 45/8192` as f32 bits.
+/// The f32 bits of `grid * 45/8192`, which is exact: `|grid| * 45` has at most 21 bits.
 #[inline]
-pub(crate) fn grid_f32(grid: u16) -> u32 {
-    (f32::from(grid.cast_signed()) * (45.0 / 8192.0)).to_bits()
+pub(crate) fn grid_to_f32_bits(grid: u16) -> u32 {
+    let grid = grid.cast_signed();
+    if grid == 0 {
+        return 0;
+    }
+    let magnitude = u32::from(grid.unsigned_abs()) * 45;
+    let width = magnitude.bit_width();
+    // `magnitude * 2^-13` with its highest bit as the implicit one: 127 + width - 1 - 13
+    let exponent = width + 113;
+    let fraction = (magnitude << (24 - width)) & 0x7f_ffff;
+    u32::from(grid < 0) << 31 | exponent << 23 | fraction
 }
 
 const STEPS_PER_OCTAVE: u32 = 2;
@@ -193,6 +206,47 @@ pub(crate) fn log2_fixed(value: u64) -> u64 {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn grid_angles_are_exact_f32_bits() {
+        // 0.0, 45/8192, 91 * 45/8192, 45.0, 90.0, 32767 * 45/8192, -180.0, -45/8192
+        for (grid, bits) in [
+            (0u16, 0u32),
+            (1, 0x3bb4_0000),
+            (91, 0x3eff_f000),
+            (8192, 0x4234_0000),
+            (16384, 0x42b4_0000),
+            (32767, 0x4333_fe98),
+            (0x8000, 0xc334_0000),
+            (0xffff, 0xbbb4_0000),
+        ] {
+            assert_eq!(grid_to_f32_bits(grid), bits, "grid_to_f32_bits({grid})");
+            assert_eq!(
+                grid_from_f32_bits(bits),
+                Some(grid),
+                "grid_from_f32_bits({bits:#x})"
+            );
+        }
+        assert!(
+            (0..=u16::MAX).all(|grid| grid_from_f32_bits(grid_to_f32_bits(grid)) == Some(grid))
+        );
+        // -0.0, +180.0, 1.2345, one bit off 45/8192, the smallest subnormal, infinity, NaN
+        for bits in [
+            0x8000_0000u32,
+            0x4334_0000,
+            0x3f9e_0419,
+            0x3bb4_0001,
+            1,
+            0x7f80_0000,
+            0x7fc0_0000,
+        ] {
+            assert_eq!(
+                grid_from_f32_bits(bits),
+                None,
+                "grid_from_f32_bits({bits:#x})"
+            );
+        }
+    }
 
     #[test]
     fn log2_fixed_check_values() {

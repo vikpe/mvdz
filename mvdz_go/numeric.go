@@ -153,11 +153,11 @@ func (walker *segmentWalker) usercmdGridAngle(axis int, track *axisTrack) {
 		min(residualBucket(track.previousVelocity()), 15)<<10 |
 		uint16(axis)<<14
 	prediction := track.predictLinear()
-	sourceValue, _ := onGrid(walker.peek32(0))
+	sourceValue, _ := gridFromF32Bits(walker.peek32(0))
 	sourceResidual := int16(sourceValue - prediction)
 	residual := int16(walker.residual(streamUsercmdAngle, context, int32(sourceResidual)))
 	value := prediction + uint16(residual)
-	walker.write32(gridF32(value))
+	walker.write32(gridToF32Bits(value))
 	track.push(value, int32(residual))
 }
 
