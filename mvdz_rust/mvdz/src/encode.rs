@@ -196,9 +196,9 @@ impl Encoder {
 
     fn segments_in_flight(&self) -> usize {
         // ponytail: measured on sample demos, not a bound; count the buffers if it must hold
-        const BASE: u64 = 28 << 20;
-        const PER_SEGMENT: u64 = 4 << 20;
-        segments_in_flight(self.max_memory, self.threads, BASE, PER_SEGMENT)
+        const BASE_MEMORY: u64 = 28 << 20;
+        const SEGMENT_MEMORY: u64 = 4 << 20;
+        segments_in_flight(self.max_memory, self.threads, BASE_MEMORY, SEGMENT_MEMORY)
     }
 }
 
@@ -317,8 +317,7 @@ fn segment_body(
         return Err(Error::Io(ErrorKind::InvalidData));
     }
     let coded_with_models = |walked: &Walked| {
-        segment::encode(walked, &mut Vec::new(), file_models)
-            .filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)
+        segment::encode(walked, file_models).filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)
     };
     let transform_coded = (plan.is_walkable)
         .then(|| segment::walk(raw, plan.start_protocol))

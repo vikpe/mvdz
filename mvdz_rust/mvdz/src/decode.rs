@@ -20,7 +20,7 @@ use std::io::{self, Read};
 /// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] for a demo of more than 1 GiB:
 /// read that one with [`Decoder`].
 pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
-    decompress(bytes, thread_count(max_threads), DEFAULT_MAX_MEMORY)
+    decompress(bytes, max_threads, DEFAULT_MAX_MEMORY)
 }
 
 /// Each segment's CRC-32 is checked before its bytes are read; the first error is sticky.
@@ -48,8 +48,23 @@ impl<R: Read> Decoder<R> {
     ///
     /// [`Error::Io`] when reading fails, [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for
     /// another file type or version, [`Error::Corrupt`] for a truncated header.
-    pub fn new(input: R) -> Result<Self> {
-        Self::with_max_memory(input, thread_count(0), DEFAULT_MAX_MEMORY)
+    pub fn new(mut input: R) -> Result<Self> {
+        let mut header = [0u8; HEADER_LEN];
+        let filled = read_up_to(&mut input, &mut header)?;
+        let layout = Layout::new(&header[..filled])?;
+        Ok(Self {
+            input,
+            layout,
+            current: None,
+            at: 0,
+            ready: VecDeque::new(),
+            deferred_error: None,
+            is_done: false,
+            failure: None,
+            threads: thread_count(0),
+            max_memory: DEFAULT_MAX_MEMORY,
+            demo_crc32: crc32fast::Hasher::new(),
+        })
     }
 
     /// Segments decoded at once; capped at the logical cores, 0, the default, is all of them.
@@ -64,31 +79,12 @@ impl<R: Read> Decoder<R> {
     /// ([`Error::MemoryLimit`]).
     #[must_use]
     pub fn max_memory(mut self, max_memory: u64) -> Self {
-        self.max_memory = max_memory.max(BASE_MEMORY + SEGMENT_MEMORY);
+        self.max_memory = max_memory;
         self
     }
 
     pub fn header(&self) -> &Header {
         &self.layout.header
-    }
-
-    pub(crate) fn with_max_memory(mut input: R, threads: usize, max_memory: u64) -> Result<Self> {
-        let mut header = [0u8; HEADER_LEN];
-        let filled = read_up_to(&mut input, &mut header)?;
-        let layout = Layout::new(&header[..filled])?;
-        Ok(Self {
-            input,
-            layout,
-            current: None,
-            at: 0,
-            ready: VecDeque::new(),
-            deferred_error: None,
-            is_done: false,
-            failure: None,
-            threads,
-            max_memory,
-            demo_crc32: crc32fast::Hasher::new(),
-        })
     }
 
     pub(crate) fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -150,7 +146,8 @@ impl<R: Read> Decoder<R> {
         }
         let models = if len > 0 {
             let body = self.read_body(len)?;
-            Some(read_models_block(&body, self.threads, self.max_memory)?)
+            let max_models_memory = self.max_memory.max(BASE_MEMORY + SEGMENT_MEMORY);
+            Some(read_models_block(&body, self.threads, max_models_memory)?)
         } else {
             None
         };
@@ -298,8 +295,10 @@ pub(crate) fn decode_segment(
     Ok(())
 }
 
-pub(crate) fn decompress(file: &[u8], threads: usize, max_memory: u64) -> Result<Vec<u8>> {
-    let mut decoder = Decoder::with_max_memory(file, threads, max_memory)?;
+pub(crate) fn decompress(file: &[u8], max_threads: u8, max_memory: u64) -> Result<Vec<u8>> {
+    let mut decoder = Decoder::new(file)?
+        .max_threads(max_threads)
+        .max_memory(max_memory);
     let mut demo = Vec::new();
     while let Some(segment) = decoder.next_segment()? {
         // the bytes decoded, not the header's size: a lying header allocates nothing

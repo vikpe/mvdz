@@ -142,7 +142,9 @@ fn declared_sizes() -> anyhow::Result<()> {
         Some(Error::MemoryLimit("demo size"))
     );
     let mut streamed = Vec::new();
-    crate::decode::Decoder::with_max_memory(Cursor::new(&file), 1, max_memory)?
+    crate::Decoder::new(Cursor::new(&file))?
+        .max_threads(1)
+        .max_memory(max_memory)
         .read_to_end(&mut streamed)?;
     assert!(streamed == demo);
     Ok(())

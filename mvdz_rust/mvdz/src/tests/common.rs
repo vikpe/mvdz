@@ -32,11 +32,12 @@ pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
     let counted: Vec<_> = walked_segments.iter().map(|(_, walked)| walked).collect();
     model_builder.add(&counted, 1);
     let models = model_builder.models(1);
-    let mut model_ids = Vec::new();
+    let model_ids: Vec<usize> = (0..models.len())
+        .filter(|&stream| models[stream].is_some())
+        .collect();
     let mut segments = Vec::new();
     for (raw, walked) in &walked_segments {
-        let coded =
-            crate::segment::encode(walked, &mut model_ids, &models).context("a tail segment")?;
+        let coded = crate::segment::encode(walked, &models).context("a tail segment")?;
         let mut segment = segment_header_bytes(
             raw.len() as u32,
             crate::segment::duration_ms(raw),
@@ -45,8 +46,6 @@ pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
         segment.extend_from_slice(&coded);
         segments.push(segment);
     }
-    model_ids.sort_unstable();
-    model_ids.dedup();
     let header = Header {
         size_bytes: src.len() as u64,
         duration_ms: u64::from(crate::segment::duration_ms(src)),

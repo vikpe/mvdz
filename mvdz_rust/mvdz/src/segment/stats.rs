@@ -317,9 +317,9 @@ impl Stats {
                 *total += weight;
             }
         }
-        let raw_models_len: usize = coded.used_raw_model_lens.iter().sum();
+        let raw_models_len: usize = coded.raw_model_lens.iter().sum();
         let blob_weight_total: f64 = blob_weights.iter().sum();
-        for (stream, &model_len) in coded.used_raw_model_lens.iter().enumerate() {
+        for (stream, &model_len) in coded.raw_model_lens.iter().enumerate() {
             if model_len == 0 {
                 continue;
             }
@@ -564,7 +564,7 @@ struct Coded {
     file_len: u64,
     bodies: Vec<Body>,
     models_block_len: usize,
-    used_raw_model_lens: Vec<usize>,
+    raw_model_lens: Vec<usize>,
 }
 
 fn code(segments: &[Segment]) -> Coded {
@@ -572,38 +572,33 @@ fn code(segments: &[Segment]) -> Coded {
     let walked: Vec<&Walked> = segments.iter().map(|segment| &segment.walked).collect();
     builder.add(&walked, 1);
     let models = builder.models(1);
-    let mut used_ids = Vec::new();
-    let code_with = |walked: &Walked, used_ids: &mut Vec<usize>| -> Option<Vec<u8>> {
-        let mut ids = Vec::new();
-        let coded = encode(walked, &mut ids, &models)
-            .filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)?;
-        used_ids.extend(ids);
-        Some(coded)
+    let code_with = |walked: &Walked| -> Option<Vec<u8>> {
+        encode(walked, &models).filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)
     };
     let bodies: Vec<Body> = segments
         .iter()
         .map(|segment| {
-            if let Some(coded) = code_with(&segment.walked, &mut used_ids) {
+            if let Some(coded) = code_with(&segment.walked) {
                 return Body::Transform(coded);
             }
             let protocol = segment.walked.start_protocol;
             let all_tail = walk_tail(segment.raw, protocol);
             Body::AllTailOrStored(
-                code_with(&all_tail, &mut used_ids)
-                    .unwrap_or_else(|| stored(segment.raw, protocol)),
+                code_with(&all_tail).unwrap_or_else(|| stored(segment.raw, protocol)),
             )
         })
         .collect();
-    used_ids.sort_unstable();
-    used_ids.dedup();
-    let mut used_raw_model_lens = vec![0; STREAM_COUNT];
-    for &stream in &used_ids {
-        used_raw_model_lens[stream] = models[stream].as_ref().map_or(0, model_len);
+    let ids: Vec<usize> = (0..models.len())
+        .filter(|&stream| models[stream].is_some())
+        .collect();
+    let mut raw_model_lens = vec![0; STREAM_COUNT];
+    for &stream in &ids {
+        raw_model_lens[stream] = models[stream].as_ref().map_or(0, model_len);
     }
-    let models_block_len = if used_ids.is_empty() {
+    let models_block_len = if ids.is_empty() {
         0
     } else {
-        models_body(&models, &used_ids).len()
+        models_body(&models, &ids).len()
     };
     let bodies_len: usize = bodies
         .iter()
@@ -613,7 +608,7 @@ fn code(segments: &[Segment]) -> Coded {
         file_len: (HEADER_LEN + LEN_FIELD_LEN + models_block_len + bodies_len) as u64,
         bodies,
         models_block_len,
-        used_raw_model_lens,
+        raw_model_lens,
     }
 }
 

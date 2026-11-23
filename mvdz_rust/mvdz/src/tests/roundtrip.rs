@@ -49,14 +49,12 @@ fn sample_demos() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_until_error(file: &[u8], threads: usize) -> (Vec<u8>, Option<crate::Error>) {
+fn read_until_error(file: &[u8], max_threads: u8) -> (Vec<u8>, Option<crate::Error>) {
     let mut out = Vec::new();
-    let max_memory = crate::memory::DEFAULT_MAX_MEMORY;
-    let mut reader =
-        match crate::decode::Decoder::with_max_memory(Cursor::new(file), threads, max_memory) {
-            Ok(reader) => reader,
-            Err(error) => return (out, Some(error)),
-        };
+    let mut reader = match crate::Decoder::new(Cursor::new(file)) {
+        Ok(reader) => reader.max_threads(max_threads),
+        Err(error) => return (out, Some(error)),
+    };
     let mut buf = [0u8; 4096];
     loop {
         match reader.read_demo(&mut buf) {

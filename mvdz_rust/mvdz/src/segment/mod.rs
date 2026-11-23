@@ -313,12 +313,7 @@ struct CodedStream {
 
 /// `None` if a structural or numeric stream has no model in `file_models` (by stream id) or
 /// a symbol the model has no code for, or the blob streams hold more than the format allows.
-/// `model_ids` gets the streams coded with a model.
-pub(crate) fn encode(
-    walked: &Walked,
-    model_ids: &mut Vec<usize>,
-    file_models: &[Option<rans::FileModel>],
-) -> Option<Vec<u8>> {
+pub(crate) fn encode(walked: &Walked, file_models: &[Option<rans::FileModel>]) -> Option<Vec<u8>> {
     let file_model = |stream: usize| file_models.get(stream)?.as_ref();
     let blob_total: usize = walked.blobs.iter().map(Vec::len).sum();
     if blob_total > max_blob_total(walked.raw_len) {
@@ -344,7 +339,6 @@ pub(crate) fn encode(
     for coded in &coded_streams {
         put_usize(&mut out, coded.stream);
         put_usize(&mut out, coded.body.len());
-        model_ids.push(coded.stream);
     }
     for &stream in &blobs {
         put_usize(&mut out, stream);
@@ -634,7 +628,7 @@ mod tests {
             .filter(|&stream| models[stream].is_some())
             .collect();
         let file_models = rans::read_models_block(&models_body(&models, &ids), 1, u64::MAX)?;
-        let body = encode(walked, &mut Vec::new(), &models).context("a transform body")?;
+        let body = encode(walked, &models).context("a transform body")?;
         Ok((body, file_models))
     }
 
@@ -882,7 +876,7 @@ mod tests {
             fit_models_block(&mut fitted, max_len, max_raw_len);
             assert_eq!(ids(&fitted), without_largest);
             assert!(
-                encode(&walked, &mut Vec::new(), &fitted).is_none(),
+                encode(&walked, &fitted).is_none(),
                 "a stream without a model: no transform body"
             );
         }
