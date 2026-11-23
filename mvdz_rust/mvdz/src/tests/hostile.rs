@@ -14,14 +14,14 @@ fn small_demo_and_file(has_several_segments: bool) -> anyhow::Result<(Vec<u8>, V
     if has_several_segments {
         demo = several_segments(&demo);
     }
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     Ok((demo, file))
 }
 
 fn refused(file: &[u8], what: &str, want: impl Fn(&Error) -> bool) {
     let start = Instant::now();
     assert!(readers_agree(file, what).is_none(), "{what}: accepted");
-    let refusal = decompress(file, 2).err();
+    let refusal = crate::decode(file, 2).err();
     assert!(
         refusal.as_ref().is_some_and(&want),
         "{what}: unexpected result {refusal:?}"
@@ -49,7 +49,7 @@ fn structure_rules() -> anyhow::Result<()> {
     assert_eq!(file_parts.build(), file);
     // decoding does not recompute the SHA-256, so the file decodes
     let mut edited = file_parts.clone();
-    edited.header.sha256 = [0xff; 32];
+    edited.header = with_sha256(&edited.header, [0xff; 32]);
     let other_sha256 = edited.build();
     assert_eq!(
         readers_agree(&other_sha256, "another SHA-256").context("every reader refuses")?,
@@ -109,7 +109,7 @@ fn declared_sizes() -> anyhow::Result<()> {
     let mut edited = file_parts.clone();
     let mut segment = segment_header_bytes(u32::try_from(MAX_RAW_LEN)?, 0, 0);
     segment.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
-    edited.header.size = MAX_RAW_LEN;
+    edited.header = with_size(&edited.header, MAX_RAW_LEN);
     edited.segments = vec![segment];
     refused(&edited.build(), "1 MiB segment in 9 bytes", is_corrupt);
     let mut edited = file_parts.clone();
@@ -118,7 +118,7 @@ fn declared_sizes() -> anyhow::Result<()> {
         *error == Error::Corrupt("segment size")
     });
     let mut edited = file_parts.clone();
-    edited.header.size = 60 << 30;
+    edited.header = with_size(&edited.header, 60 << 30);
     refused(&edited.build(), "60 GB header", is_corrupt);
     let mut huge_models = file[..HEADER_SIZE].to_vec();
     huge_models.extend_from_slice(&(256u32 << 20).to_le_bytes());
@@ -195,14 +195,14 @@ fn wide_model(table_count: u16) -> Vec<u8> {
 #[test]
 fn large_models_block() -> anyhow::Result<()> {
     let demo = usercmd_demo();
-    let file = compress(&several_segments(&demo))?;
+    let file = crate::encode(&several_segments(&demo), 1)?;
     let mut file_parts = parts(&file)?;
     assert!(!file_parts.models.is_empty());
     let model = wide_model(512);
     let raw_models: Vec<(usize, &[u8])> = (0..crate::streams::FIRST_NUMERIC_STREAM)
         .map(|stream| (stream, &model[..]))
         .collect();
-    file_parts.models = crate::rans::write_models_block(&raw_models).body;
+    file_parts.models = crate::rans::write_models_block(&raw_models)?.body;
     let read_models = |max_memory: u64| {
         crate::rans::read_models_block(&file_parts.models, 1, max_memory).map(|_| ())
     };

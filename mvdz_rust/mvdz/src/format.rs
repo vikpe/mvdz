@@ -19,13 +19,22 @@ pub(crate) const MAX_MODELS_RAW_LEN: u64 = 1 << 22;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Header {
-    pub(crate) size: u64,
-    pub(crate) duration_ms: u64,
-    pub(crate) crc32: u32,
-    pub(crate) sha256: [u8; 32],
+    size: u64,
+    duration_ms: u64,
+    crc32: u32,
+    sha256: [u8; 32],
 }
 
 impl Header {
+    pub(crate) fn new(size: u64, duration_ms: u64, crc32: u32, sha256: [u8; 32]) -> Self {
+        Self {
+            size,
+            duration_ms,
+            crc32,
+            sha256,
+        }
+    }
+
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -90,8 +99,18 @@ pub(crate) fn write_segment(out: &mut Vec<u8>, body: &[u8]) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SegmentHeader {
-    pub(crate) raw_len: u32,
-    pub(crate) crc32: u32,
+    raw_len: u32,
+    crc32: u32,
+}
+
+impl SegmentHeader {
+    pub(crate) fn raw_len(self) -> u32 {
+        self.raw_len
+    }
+
+    pub(crate) fn crc32(self) -> u32 {
+        self.crc32
+    }
 }
 
 pub(crate) fn segment_header_bytes(raw_len: u32, duration_ms: u32, crc32: u32) -> Vec<u8> {

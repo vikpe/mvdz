@@ -677,7 +677,7 @@ pub(crate) struct ModelsBlock {
 
 /// FORMAT.md 2.2: the meta model as it is, then every raw model (by stream id,
 /// ascending) coded under it.
-pub(crate) fn write_models_block(raw_models: &[(usize, &[u8])]) -> ModelsBlock {
+pub(crate) fn write_models_block(raw_models: &[(usize, &[u8])]) -> Result<ModelsBlock> {
     let mut tally = Tally::new(STRUCTURAL_ALPHABET_SIZE);
     for (_, raw_model) in raw_models {
         tally.add(raw_model, &previous_bytes(raw_model));
@@ -688,14 +688,14 @@ pub(crate) fn write_models_block(raw_models: &[(usize, &[u8])]) -> ModelsBlock {
     write_usize(&mut body, raw_models.len());
     for &(stream, raw_model) in raw_models {
         let coded = pack_body(&meta.model, raw_model, &previous_bytes(raw_model), &[])
-            .expect("the meta model is built from these bytes");
+            .ok_or(Error::Internal("the meta model does not code a model"))?;
         write_usize(&mut body, stream);
         write_usize(&mut body, raw_model.len());
         write_usize(&mut body, coded.len());
         body.extend_from_slice(&coded);
         raw_len += raw_model.len();
     }
-    ModelsBlock { body, raw_len }
+    Ok(ModelsBlock { body, raw_len })
 }
 
 /// `meta | n u32 | n x { id u32 | raw_len u32 | len u32 | stream }`, ids strictly increasing.

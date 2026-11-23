@@ -30,11 +30,14 @@ fn vectors_decode() -> anyhow::Result<()> {
         let got = readers_agree(&bytes, file);
         if let Some(expected_error) = expected.strip_prefix("error: ") {
             assert!(got.is_none(), "{file}: accepted");
-            let refusal = decompress(&bytes, 1).err().map(|error| error.to_string());
+            let refusal = crate::decode(&bytes, 1)
+                .err()
+                .map(|error| error.to_string());
             assert_eq!(refusal.as_deref(), Some(expected_error), "{file}: error");
         } else {
-            let decoded =
-                got.with_context(|| format!("{file}: refused: {:?}", decompress(&bytes, 1).err()))?;
+            let decoded = got.with_context(|| {
+                format!("{file}: refused: {:?}", crate::decode(&bytes, 1).err())
+            })?;
             assert_eq!(
                 &hex(&Sha256::digest(&decoded)),
                 expected,
@@ -107,7 +110,7 @@ fn token_body(
     tokens: &crate::lz::Tokens,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let (models, body) = token_models(structural, blob_counts, tokens)?;
-    Ok((crate::segment::models_body(&models), body))
+    Ok((crate::segment::models_body(&models)?, body))
 }
 
 /// The models by stream id before they are coded, and the transform body.
@@ -204,12 +207,12 @@ fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Resu
     let mut segment = segment_header_bytes(u32::try_from(demo.len())?, duration_ms, crc);
     segment.extend_from_slice(body);
     Ok(Parts {
-        header: Header {
-            size: demo.len() as u64,
-            duration_ms: u64::from(duration_ms),
-            crc32: crc,
-            sha256: Sha256::digest(demo).into(),
-        },
+        header: Header::new(
+            demo.len() as u64,
+            u64::from(duration_ms),
+            crc,
+            Sha256::digest(demo).into(),
+        ),
         models: models.clone(),
         segments: vec![segment],
     }
@@ -221,7 +224,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         vectors.push((format!("hostile-{name}.mvdz"), file, None, how.to_string()));
     };
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let base = compress(&several_segments(&demo))?;
+    let base = crate::encode(&several_segments(&demo), 1)?;
     let file_parts = parts(&base)?;
     assert!(file_parts.segments.len() > 3);
     add(
@@ -237,10 +240,10 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         "one byte after the last segment",
     );
     let mut edited = file_parts.clone();
-    edited.header.size += 1;
+    edited.header = with_size(&edited.header, edited.header.size() + 1);
     add("header-size", edited.build(), "the header's size + 1");
     let mut edited = file_parts.clone();
-    edited.header.crc32 ^= 1;
+    edited.header = with_crc32(&edited.header, edited.header.crc32() ^ 1);
     add(
         "header-crc",
         edited.build(),
@@ -343,7 +346,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     let mut edited = file_parts.clone();
     let mut segment = segment_header_bytes(u32::try_from(MAX_RAW_LEN)?, 0, 0);
     segment.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
-    edited.header.size = MAX_RAW_LEN;
+    edited.header = with_size(&edited.header, MAX_RAW_LEN);
     edited.segments = vec![segment];
     add(
         "segment-declared",
@@ -367,7 +370,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
 /// One-segment files whose stream table breaks a rule of FORMAT.md 3.1.
 fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
-    let file_parts = parts(&compress(&demo)?)?;
+    let file_parts = parts(&crate::encode(&demo, 1)?)?;
     anyhow::ensure!(file_parts.segments.len() == 1, "one segment");
     let segment = &file_parts.segments[0];
     let table = StreamTable::parse(&segment[SEGMENT_FIELDS_SIZE..])?;
@@ -523,7 +526,7 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     use crate::streams::{LZ_LENGTH, TAIL};
     const OVER_ONE_PER_CONTEXT: u32 = (1 << 16) + 1;
     let usercmd = usercmd_demo();
-    let file = compress(&several_segments(&usercmd))?;
+    let file = crate::encode(&several_segments(&usercmd), 1)?;
     let file_parts = parts(&file)?;
     assert!(
         !file_parts.models.is_empty(),
@@ -637,14 +640,14 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     let no_own_contexts = 0u32.to_le_bytes();
     assert!(lengths.raw.starts_with(&no_own_contexts) && lengths.raw[4] > 0);
     lengths.raw[4] = crate::math::MAX_QUANTIZED as u8 + 1;
-    let models_body = crate::segment::models_body(&literal_models);
+    let models_body = crate::segment::models_body(&literal_models)?;
     add(
         "tables-quantized",
         one_segment(literals, &(models_body, body))?,
         "a quantized count of 66, over the largest, for the only symbol of a table",
     );
     let own_count_only = OVER_ONE_PER_CONTEXT.to_le_bytes();
-    let block = crate::rans::write_models_block(&[(entries[0].stream, &own_count_only)]);
+    let block = crate::rans::write_models_block(&[(entries[0].stream, &own_count_only)])?;
     add(
         "tables-own-count",
         with_models(block.body),
@@ -733,9 +736,9 @@ fn mvd1_float_demo() -> Vec<u8> {
 #[test]
 fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
     let demo = mvd1_float_demo();
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     assert_eq!(unstructured_len(&file)?, 0);
-    assert_eq!(decompress(&file, 1)?, demo);
+    assert_eq!(crate::decode(&file, 1)?, demo);
     Ok(())
 }
 
@@ -995,9 +998,9 @@ fn entity_words_demo() -> Vec<u8> {
 #[test]
 fn commands_demo_is_walked() -> anyhow::Result<()> {
     let demo = commands_demo();
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     assert_eq!(unstructured_len(&file)?, 0);
-    assert_eq!(decompress(&file, 1)?, demo);
+    assert_eq!(crate::decode(&file, 1)?, demo);
     Ok(())
 }
 
@@ -1009,9 +1012,9 @@ fn two_matches_demo() -> Vec<u8> {
 #[test]
 fn second_match_starts_from_its_own_server_data() -> anyhow::Result<()> {
     let demo = two_matches_demo();
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     assert_eq!(unstructured_len(&file)?, 0);
-    assert_eq!(decompress(&file, 1)?, demo);
+    assert_eq!(crate::decode(&file, 1)?, demo);
     Ok(())
 }
 
@@ -1090,9 +1093,9 @@ fn width_switch_demo() -> Vec<u8> {
 #[test]
 fn width_switch_demo_is_walked() -> anyhow::Result<()> {
     let demo = width_switch_demo();
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     assert_eq!(unstructured_len(&file)?, 0);
-    assert_eq!(decompress(&file, 1)?, demo);
+    assert_eq!(crate::decode(&file, 1)?, demo);
     Ok(())
 }
 
@@ -1106,10 +1109,10 @@ fn truncated_match_demo() -> Vec<u8> {
 #[test]
 fn frames_are_walked_again_after_a_truncated_match() -> anyhow::Result<()> {
     let demo = truncated_match_demo();
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     let unframed_segment_or_two = 2 * crate::segment::SEGMENT_TARGET_LEN;
     assert!(unstructured_len(&file)? < unframed_segment_or_two);
-    assert_eq!(decompress(&file, 1)?, demo);
+    assert_eq!(crate::decode(&file, 1)?, demo);
     Ok(())
 }
 
@@ -1130,17 +1133,17 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         vectors.push((name.to_string(), file, Some(demo.to_vec()), how.to_string()));
     };
     // without the input check: some vectors hold non-demo input
-    let encode = |demo: &[u8]| anyhow::Ok(compress_unchecked(demo)?);
+    let encode_any = |demo: &[u8]| anyhow::Ok(crate::encode::encode_any(demo, 1)?);
     let duel_source = "duel = sample8 demo 3fe477dc...1416";
     add(
         "duel.normal.mvdz",
-        encode(&duel)?,
+        encode_any(&duel)?,
         &duel,
         &format!("{duel_source}; compress"),
     );
     add(
         "duel-truncated.normal.mvdz",
-        encode(&duel[..150_000])?,
+        encode_any(&duel[..150_000])?,
         &duel[..150_000],
         "the first 150000 bytes of duel (ends inside a frame)",
     );
@@ -1148,33 +1151,33 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
     let random: Vec<u8> = Vec::from_fn(3000, |_| rng.next() as u8);
     add(
         "float-mvd1.normal.mvdz",
-        encode(&mvd1)?,
+        encode_any(&mvd1)?,
         &mvd1,
         "synthetic demo with MVD1 float coordinates (two players, sounds)",
     );
     add(
         "float-fte.normal.mvdz",
-        encode(&fte)?,
+        encode_any(&fte)?,
         &fte,
         "the first 300000 bytes of stratified demo 03fc8ec2 (FTE float coordinates)",
     );
     let escapes = escapes();
     add(
         "escapes.normal.mvdz",
-        encode(&escapes)?,
+        encode_any(&escapes)?,
         &escapes,
         "synthetic demo with unknown commands and lying hidden blocks",
     );
     let multi_demoinfo = several_segments(&multi_demoinfo());
     add(
         "demoinfo-multi.normal.mvdz",
-        encode(&multi_demoinfo)?,
+        encode_any(&multi_demoinfo)?,
         &multi_demoinfo,
         "synthetic demo carrying a 3-block KTX demoinfo twice, repeated to several segments",
     );
     add(
         "random.normal.mvdz",
-        encode(&random)?,
+        encode_any(&random)?,
         &random,
         "3000 random bytes (no frame: all tail), written by the unchecked entry point: rule 1 refuses them",
     );
@@ -1198,67 +1201,67 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         &two_nops,
         "one frame of two svc_nop, the first as an escape of 1 byte, the second walked with its length of 0 (FORMAT.md 4.5): no encoder here writes it",
     );
-    add("empty.normal.mvdz", encode(b"")?, b"", "an empty demo");
+    add("empty.normal.mvdz", encode_any(b"")?, b"", "an empty demo");
     let usercmd = usercmd_demo();
     add(
         "usercmd.normal.mvdz",
-        encode(&usercmd)?,
+        encode_any(&usercmd)?,
         &usercmd,
         "synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)",
     );
     let usercmd_segments = several_segments(&usercmd);
     add(
         "usercmd.normal.segments.mvdz",
-        encode(&usercmd_segments)?,
+        encode_any(&usercmd_segments)?,
         &usercmd_segments,
         "the same, repeated to several segments",
     );
     let commands = commands_demo();
     add(
         "commands.normal.mvdz",
-        encode(&commands)?,
+        encode_any(&commands)?,
         &commands,
         "synthetic demo with every frame type, every command of the sizer, the playerinfo, packet-entity, sound and temp-entity forms, then FTE entity extensions",
     );
     let protocol_change = protocol_change_demo();
     add(
         "protocol-change.normal.mvdz",
-        encode(&protocol_change)?,
+        encode_any(&protocol_change)?,
         &protocol_change,
         "synthetic demo whose second segment announces FTE2 extensions: later segments start from the changed protocol (rule 3)",
     );
     let two_matches = two_matches_demo();
     add(
         "two-matches.normal.mvdz",
-        encode(&two_matches)?,
+        encode_any(&two_matches)?,
         &two_matches,
         "synthetic demo of two matches: float coordinates (MVD1), then a server data without extensions, which resets the protocol state",
     );
     let width_switch = width_switch_demo();
     add(
         "width-switch.normal.mvdz",
-        encode(&width_switch)?,
+        encode_any(&width_switch)?,
         &width_switch,
         "synthetic demo of three matches in one segment: 16-bit coordinates, float (MVD1), 16-bit again, then a sound before the player's next origin",
     );
     let truncated_match = truncated_match_demo();
     add(
         "truncated-match.normal.mvdz",
-        encode(&truncated_match)?,
+        encode_any(&truncated_match)?,
         &truncated_match,
         "synthetic demo of a match cut off inside its last frame, then whole matches: the frames are walked again after the break (rule 2)",
     );
     let oversized = oversized_frame_demo();
     add(
         "oversized-frame.normal.mvdz",
-        encode(&oversized)?,
+        encode_any(&oversized)?,
         &oversized,
         "synthetic demo with a 1.5 MiB frame of nops: it is cut every 2^20 bytes and the frames go on after it (rule 2)",
     );
     let entity_words = entity_words_demo();
     add(
         "entity-words.normal.mvdz",
-        encode(&entity_words)?,
+        encode_any(&entity_words)?,
         &entity_words,
         "synthetic demo with a packet of 120000 entity words, three ENTITY_GAP blob bytes per word",
     );
@@ -1296,7 +1299,7 @@ fn vectors_reproduce() -> anyhow::Result<()> {
                     demo.len()
                 )?;
             } else {
-                let refusal = decompress(file, 1)
+                let refusal = crate::decode(file, 1)
                     .err()
                     .context("a hostile vector decodes")?;
                 writeln!(manifest_text, "{name}\terror: {refusal}\t-\t{how}")?;

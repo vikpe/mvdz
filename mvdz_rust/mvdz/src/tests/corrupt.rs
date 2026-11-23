@@ -10,7 +10,7 @@ fn short_duels() -> Option<[Vec<u8>; 2]> {
 fn no_panic(file: &[u8]) {
     for threads in [1, 4] {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            decompress(file, threads).map(|demo| demo.len())
+            crate::decode(file, threads).map(|demo| demo.len())
         }));
         assert!(
             result.is_ok(),
@@ -43,8 +43,8 @@ fn mutated_streams_never_panic() -> anyhow::Result<()> {
     };
     let mut rng = Rng(0xdead_beef_cafe_f00d);
     for source in demos {
-        let file = compress(&source)?;
-        assert_eq!(decompress(&file, 1)?, source);
+        let file = crate::encode(&source, 1)?;
+        assert_eq!(crate::decode(&file, 1)?, source);
         for _ in 0..50 {
             let mut mutated = file.clone();
             match rng.below(4) {

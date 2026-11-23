@@ -79,7 +79,7 @@ impl Encoder {
     pub fn encode(&self, mut input: impl Read + Seek, mut output: impl Write) -> Result<()> {
         let first_pass = self.first_pass(&mut input)?;
         let mut start = header_bytes(&first_pass.header).to_vec();
-        let models_body = segment::models_body(&first_pass.file_models);
+        let models_body = segment::models_body(&first_pass.file_models)?;
         write_models(&mut start, &models_body);
         let decoder_models = if models_body.is_empty() {
             None
@@ -108,7 +108,8 @@ impl Encoder {
         let mut model_builder = segment::ModelBuilder::default();
         let mut protocol = ProtocolState::default();
         let mut plans: Vec<SegmentPlan> = Vec::new();
-        let mut header = Header::default();
+        let mut size = 0u64;
+        let mut duration_ms = 0u64;
         let mut crc32 = crc32fast::Hasher::new();
         let mut sha256 = Sha256::new();
         loop {
@@ -145,8 +146,8 @@ impl Encoder {
                     raw.len() as u64,
                 ));
                 sha256.update(raw);
-                header.size += raw.len() as u64;
-                header.duration_ms += u64::from(segment::duration_ms(raw));
+                size += raw.len() as u64;
+                duration_ms += u64::from(segment::duration_ms(raw));
                 plans.push(SegmentPlan {
                     len: raw.len(),
                     crc32: segment_crc32,
@@ -160,11 +161,14 @@ impl Encoder {
             let walked: Vec<&Walked> = walks.iter().map(|walk| &walk.walked).collect();
             model_builder.add(&walked, self.threads);
         }
-        header.crc32 = crc32.finalize();
-        header.sha256 = sha256.finalize().into();
         Ok(FirstPass {
-            header,
-            file_models: model_builder.models(self.threads),
+            header: Header::new(
+                size,
+                duration_ms,
+                crc32.finalize(),
+                sha256.finalize().into(),
+            ),
+            file_models: model_builder.models(self.threads)?,
             plans,
         })
     }

@@ -10,7 +10,7 @@ fn check_all_ways(source: &[u8], what: &str) -> anyhow::Result<()> {
         ("as is", source.to_vec()),
         ("repeated", several_segments(source)),
     ] {
-        let one = compress_unchecked(&source)?;
+        let one = crate::encode::encode_any(&source, 1)?;
         let back = readers_agree(&one, what).with_context(|| format!("{what} {how}: refused"))?;
         assert!(back == source, "{what} {how}");
     }
@@ -27,7 +27,7 @@ fn a_packet_of_120000_entity_words_round_trips() -> anyhow::Result<()> {
     packet.extend_from_slice(&[0, 0]);
     demo.frame(5, crate::protocol::DEM_ALL, &packet);
     demo.0.extend_from_slice(&synthetic(&[], false));
-    let file = compress(&demo.0)?;
+    let file = crate::encode(&demo.0, 1)?;
     assert_eq!(
         readers_agree(&file, "count limit").context("every reader refuses")?,
         demo.0
@@ -72,7 +72,7 @@ fn read_until_error(file: &[u8], max_threads: u8) -> (Vec<u8>, Option<crate::Err
 fn sequential_reader_threads_agree() -> anyhow::Result<()> {
     const CUTS: usize = 7;
     let demo = several_segments(&synthetic(&[], false));
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     let file_parts = parts(&file)?;
     anyhow::ensure!(
         file_parts.segments.len() >= 4,
@@ -120,7 +120,7 @@ fn sequential_reader_threads_agree() -> anyhow::Result<()> {
 #[test]
 fn unused_model_is_ignored() -> anyhow::Result<()> {
     let demo = several_segments(&synthetic(&[], false));
-    let file = compress(&demo)?;
+    let file = crate::encode(&demo, 1)?;
     let mut file_parts = parts(&file)?;
     let mut models = models_parts(&file_parts.models)?;
     anyhow::ensure!(
@@ -159,7 +159,7 @@ fn empty_and_tiny_inputs() -> anyhow::Result<()> {
         &text,
     ];
     for source in inputs {
-        let refusal = compress(source).err();
+        let refusal = crate::encode(source, 1).err();
         assert_matches!(refusal, Some(crate::Error::NotMvd(_)), "{refusal:?}");
         check_all_ways(source, &format!("{source:?}"))?;
     }
@@ -182,12 +182,12 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
     }
     for (index, source) in inputs.iter().enumerate() {
         if crate::encode::check_demo(source).is_err() {
-            let refusal = compress(source);
+            let refusal = crate::encode(source, 1);
             assert_matches!(refusal, Err(crate::Error::NotMvd(_)), "input {index}");
             continue;
         }
         for source in [source.clone(), several_segments(source)] {
-            let file = compress(&source)?;
+            let file = crate::encode(&source, 1)?;
             assert!(
                 readers_agree(&file, "non-mvd").context("every reader refuses")? == source,
                 "input {index}, {} bytes",
@@ -234,7 +234,7 @@ fn nop_flood_round_trips() -> anyhow::Result<()> {
         demo.frame(0, 1, &[1u8; 10_000]);
     }
     let source = demo.0;
-    let file = compress(&source)?;
+    let file = crate::encode(&source, 1)?;
     assert!(parts(&file)?.segments.len() > 1);
     assert!(readers_agree(&file, "nop").context("every reader refuses")? == source);
     Ok(())
@@ -252,14 +252,14 @@ fn segments_are_capped() -> anyhow::Result<()> {
         ("unframed", unframed, 3),
         ("oversized frame", oversized.0, 2),
     ] {
-        let file = compress_unchecked(&source)?;
+        let file = crate::encode::encode_any(&source, 1)?;
         let file_segments = parts(&file)?.segments;
         let count = file_segments.len();
         assert!(count >= segments, "{what}: {count} segments");
         for segment in &file_segments {
             let header = parse_segment_header(&segment[..SEGMENT_FIELDS_SIZE])?;
             assert!(
-                header.raw_len as usize <= max_segment,
+                header.raw_len() as usize <= max_segment,
                 "{what}: a segment over the largest length"
             );
         }
@@ -304,9 +304,9 @@ fn edited_demos_round_trip() -> anyhow::Result<()> {
             refused += 1;
             continue;
         }
-        let file = compress(&demo)?;
-        assert!(decompress(&file, 1)? == demo, "case {case}");
-        assert!(decompress(&file, 2)? == demo, "case {case}, 2 threads");
+        let file = crate::encode(&demo, 1)?;
+        assert!(crate::decode(&file, 1)? == demo, "case {case}");
+        assert!(crate::decode(&file, 2)? == demo, "case {case}, 2 threads");
     }
     // only cuts into the first frame make a non-demo
     assert!(refused <= 6, "{refused} of 30 refused");
@@ -338,14 +338,14 @@ fn constructed_demos() -> anyhow::Result<()> {
             .to_string_lossy()
             .to_string();
         if crate::encode::check_demo(&source).is_err() {
-            assert_matches!(compress(&source), Err(crate::Error::NotMvd(_)));
-            let file = compress_unchecked(&source)?;
-            assert!(decompress(&file, 2)? == source, "{name}");
+            assert_matches!(crate::encode(&source, 1), Err(crate::Error::NotMvd(_)));
+            let file = crate::encode::encode_any(&source, 1)?;
+            assert!(crate::decode(&file, 2)? == source, "{name}");
             continue;
         }
-        let file = compress(&source)?;
-        assert!(decompress(&file, 2)? == source, "{name}");
-        assert!(decompress(&file, 1)? == source, "{name}, 1 thread");
+        let file = crate::encode(&source, 1)?;
+        assert!(crate::decode(&file, 2)? == source, "{name}");
+        assert!(crate::decode(&file, 1)? == source, "{name}, 1 thread");
     }
     Ok(())
 }
@@ -458,7 +458,7 @@ fn protocol_change_mid_demo() -> anyhow::Result<()> {
         file == crate::encode(&demo.0, 4)?,
         "threads change the output"
     );
-    assert!(decompress(&file, 4)? == demo.0);
+    assert!(crate::decode(&file, 4)? == demo.0);
     Ok(())
 }
 
@@ -466,14 +466,14 @@ fn protocol_change_mid_demo() -> anyhow::Result<()> {
 fn models_block() -> anyhow::Result<()> {
     let source = usercmd_demo();
     let has_models = |file: &[u8]| anyhow::Ok(!parts(file)?.models.is_empty());
-    let segmented = compress(&several_segments(&source))?;
+    let segmented = crate::encode(&several_segments(&source), 1)?;
     assert!(parts(&segmented)?.segments.len() > 2);
     assert!(has_models(&segmented)?, "models");
     assert!(
         readers_agree(&segmented, "tables").context("every reader refuses")?
             == several_segments(&source)
     );
-    let one = compress(&source)?;
+    let one = crate::encode(&source, 1)?;
     assert_eq!(parts(&one)?.segments.len(), 1);
     assert!(
         has_models(&one)?,

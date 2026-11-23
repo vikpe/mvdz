@@ -5,16 +5,16 @@ use anyhow::Context as _;
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 
-pub(crate) fn compress(source: &[u8]) -> crate::Result<Vec<u8>> {
-    crate::encode(source, 1)
+pub(crate) fn with_size(header: &Header, size: u64) -> Header {
+    Header::new(size, header.duration_ms(), header.crc32(), *header.sha256())
 }
 
-pub(crate) fn decompress(file: &[u8], max_threads: u8) -> crate::Result<Vec<u8>> {
-    crate::decode(file, max_threads)
+pub(crate) fn with_crc32(header: &Header, crc32: u32) -> Header {
+    Header::new(header.size(), header.duration_ms(), crc32, *header.sha256())
 }
 
-pub(crate) fn compress_unchecked(source: &[u8]) -> crate::Result<Vec<u8>> {
-    crate::encode::encode_any(source, 1)
+pub(crate) fn with_sha256(header: &Header, sha256: [u8; 32]) -> Header {
+    Header::new(header.size(), header.duration_ms(), header.crc32(), sha256)
 }
 
 /// Every segment all tail: the encoder's fallback layout.
@@ -31,7 +31,7 @@ pub(crate) fn all_tail(source: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut model_builder = ModelBuilder::default();
     let counted: Vec<_> = walked_segments.iter().map(|(_, walked)| walked).collect();
     model_builder.add(&counted, 1);
-    let models = model_builder.models(1);
+    let models = model_builder.models(1)?;
     let mut segments = Vec::new();
     for (raw, walked) in &walked_segments {
         let coded = crate::segment::encode_transform(walked, &models).context("a tail segment")?;
@@ -43,15 +43,15 @@ pub(crate) fn all_tail(source: &[u8]) -> anyhow::Result<Vec<u8>> {
         segment.extend_from_slice(&coded);
         segments.push(segment);
     }
-    let header = Header {
-        size: source.len() as u64,
-        duration_ms: u64::from(crate::segment::duration_ms(source)),
-        crc32: crc32fast::hash(source),
-        sha256: Sha256::digest(source).into(),
-    };
+    let header = Header::new(
+        source.len() as u64,
+        u64::from(crate::segment::duration_ms(source)),
+        crc32fast::hash(source),
+        Sha256::digest(source).into(),
+    );
     Ok(Parts {
         header,
-        models: models_body(&models),
+        models: models_body(&models)?,
         segments,
     }
     .build())
@@ -73,12 +73,12 @@ pub(crate) fn all_stored(source: &[u8]) -> Vec<u8> {
             segment
         })
         .collect();
-    let header = Header {
-        size: source.len() as u64,
-        duration_ms: u64::from(crate::segment::duration_ms(source)),
-        crc32: crc32fast::hash(source),
-        sha256: Sha256::digest(source).into(),
-    };
+    let header = Header::new(
+        source.len() as u64,
+        u64::from(crate::segment::duration_ms(source)),
+        crc32fast::hash(source),
+        Sha256::digest(source).into(),
+    );
     Parts {
         header,
         models: Vec::new(),
@@ -423,8 +423,8 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 pub(crate) fn all_readers(file: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, String>)> {
     let message = |error: crate::Error| error.to_string();
     let mut results = Vec::new();
-    results.push(("whole 1t", decompress(file, 1).map_err(message)));
-    results.push(("whole 3t", decompress(file, 3).map_err(message)));
+    results.push(("whole 1t", crate::decode(file, 1).map_err(message)));
+    results.push(("whole 3t", crate::decode(file, 3).map_err(message)));
     let read_all = |reader: &mut dyn Read, max_threads| -> Result<Vec<u8>, String> {
         let mut decoder = crate::Decoder::new(reader)
             .map_err(message)?
@@ -536,9 +536,9 @@ pub(crate) fn parts(file: &[u8]) -> anyhow::Result<Parts> {
     let models = next_block(file, 0)?;
     let mut segments = Vec::new();
     let mut raw = 0;
-    while raw < header.size {
+    while raw < header.size() {
         let segment = next_block(file, SEGMENT_FIELDS_SIZE)?;
-        raw += u64::from(parse_segment_header(&segment[..SEGMENT_FIELDS_SIZE])?.raw_len);
+        raw += u64::from(parse_segment_header(&segment[..SEGMENT_FIELDS_SIZE])?.raw_len());
         segments.push(segment);
     }
     Ok(Parts {

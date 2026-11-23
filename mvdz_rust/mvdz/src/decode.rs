@@ -161,7 +161,7 @@ impl<R: Read> Decoder<R> {
             return corrupt("trailing bytes");
         }
         self.layout.finish()?;
-        if self.demo_crc32.clone().finalize() != self.layout.header().crc32 {
+        if self.demo_crc32.clone().finalize() != self.layout.header().crc32() {
             return corrupt("checksum mismatch");
         }
         self.is_done = true;
@@ -224,7 +224,7 @@ impl<R: Read> Decoder<R> {
         }
         let models = self.layout.models();
         let decoded = parallel_map(self.threads, &segments, |(header, body)| {
-            let mut bytes = try_zeroed(header.raw_len as usize)?;
+            let mut bytes = try_zeroed(header.raw_len() as usize)?;
             decode_segment(models, body, *header, &mut bytes)?;
             Ok(bytes)
         });
@@ -235,8 +235,8 @@ impl<R: Read> Decoder<R> {
                     // from the segments' without hashing the bytes again
                     self.demo_crc32
                         .combine(&crc32fast::Hasher::new_with_initial_len(
-                            header.crc32,
-                            u64::from(header.raw_len),
+                            header.crc32(),
+                            u64::from(header.raw_len()),
                         ));
                     self.ready.push_back(segment);
                 }
@@ -281,7 +281,7 @@ pub(crate) fn decode_segment(
     header: SegmentHeader,
     destination: &mut [u8],
 ) -> Result<()> {
-    if destination.len() as u64 != u64::from(header.raw_len) {
+    if destination.len() as u64 != u64::from(header.raw_len()) {
         return corrupt("segment length");
     }
     let coded = body
@@ -289,7 +289,7 @@ pub(crate) fn decode_segment(
         .ok_or(Error::Corrupt("segment header"))?;
     let transform_header = segment::parse_transform_header(coded, destination.len())?;
     segment::decode_transform(coded, &transform_header, destination, models)?;
-    if crc32fast::hash(destination) != header.crc32 {
+    if crc32fast::hash(destination) != header.crc32() {
         return corrupt("segment checksum");
     }
     Ok(())

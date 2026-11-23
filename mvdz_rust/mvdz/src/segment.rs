@@ -210,37 +210,44 @@ impl ModelBuilder {
         );
     }
 
-    pub(crate) fn models(self, threads: usize) -> Vec<Option<rans::FileModel>> {
+    pub(crate) fn models(self, threads: usize) -> Result<Vec<Option<rans::FileModel>>> {
         let mut models: Vec<Option<rans::FileModel>> =
             parallel_map(threads, &self.tallies, |tally| {
                 tally.as_ref().map(rans::Tally::file_model)
             });
-        fit_models_block(&mut models, MAX_MODELS_LEN, MAX_MODELS_RAW_LEN);
-        models
+        fit_models_block(&mut models, MAX_MODELS_LEN, MAX_MODELS_RAW_LEN)?;
+        Ok(models)
     }
 }
 
 /// Empty without models.
-pub(crate) fn models_body(models: &[Option<rans::FileModel>]) -> Vec<u8> {
-    models_block(models).map_or_else(Vec::new, |block| block.body)
+pub(crate) fn models_body(models: &[Option<rans::FileModel>]) -> Result<Vec<u8>> {
+    Ok(models_block(models)?.map_or_else(Vec::new, |block| block.body))
 }
 
-fn models_block(models: &[Option<rans::FileModel>]) -> Option<rans::ModelsBlock> {
+fn models_block(models: &[Option<rans::FileModel>]) -> Result<Option<rans::ModelsBlock>> {
     let listed: Vec<(usize, &[u8])> = (models.iter().enumerate())
         .filter_map(|(stream, model)| Some((stream, &model.as_ref()?.raw[..])))
         .collect();
-    (!listed.is_empty()).then(|| rans::write_models_block(&listed))
+    if listed.is_empty() {
+        return Ok(None);
+    }
+    rans::write_models_block(&listed).map(Some)
 }
 
 /// FORMAT.md 8 rule 4: drops the largest models until the block is within the limits. The
 /// models of the blob tokens stay: every fallback but the stored segment needs them.
-fn fit_models_block(models: &mut [Option<rans::FileModel>], max_len: u64, max_raw_len: u64) {
+fn fit_models_block(
+    models: &mut [Option<rans::FileModel>],
+    max_len: u64,
+    max_raw_len: u64,
+) -> Result<()> {
     loop {
-        let Some(block) = models_block(models) else {
-            return;
+        let Some(block) = models_block(models)? else {
+            return Ok(());
         };
         if block.body.len() as u64 <= max_len && block.raw_len as u64 <= max_raw_len {
-            return;
+            return Ok(());
         }
         let is_blob_token_model =
             |stream: usize| [LZ_LITERAL, LZ_LENGTH, LZ_DISTANCE].contains(&stream);
@@ -249,7 +256,7 @@ fn fit_models_block(models: &mut [Option<rans::FileModel>], max_len: u64, max_ra
             .filter_map(|(stream, model)| Some((model.as_ref()?.raw.len(), stream)))
             .max();
         let Some((_, largest)) = largest else {
-            return;
+            return Ok(());
         };
         models[largest] = None;
     }
@@ -574,7 +581,7 @@ mod tests {
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
-    fn build_models(segments: &[&Walked]) -> Vec<Option<rans::FileModel>> {
+    fn build_models(segments: &[&Walked]) -> Result<Vec<Option<rans::FileModel>>> {
         let mut model_builder = ModelBuilder::default();
         model_builder.add(segments, 1);
         model_builder.models(1)
@@ -597,8 +604,8 @@ mod tests {
     }
 
     fn coded_walked(walked: &Walked) -> anyhow::Result<(Vec<u8>, rans::Models)> {
-        let models = build_models(&[walked]);
-        let file_models = rans::read_models_block(&models_body(&models), 1, u64::MAX)?;
+        let models = build_models(&[walked])?;
+        let file_models = rans::read_models_block(&models_body(&models)?, 1, u64::MAX)?;
         let body = encode_transform(walked, &models).context("a transform body")?;
         Ok((body, file_models))
     }
@@ -819,7 +826,7 @@ mod tests {
     fn models_block_limit() -> anyhow::Result<()> {
         let raw = demo();
         let (walked, _) = walk(&raw, ProtocolState::default()).context("the demo walks")?;
-        let mut models = build_models(&[&walked, &walked]);
+        let mut models = build_models(&[&walked, &walked])?;
         let ids = |candidates: &[Option<rans::FileModel>]| -> Vec<usize> {
             (0..candidates.len())
                 .filter(|&stream| candidates[stream].is_some())
@@ -830,7 +837,7 @@ mod tests {
             all.iter().any(|&stream| is_numeric(stream))
                 && all.iter().any(|&stream| is_structural(stream))
         );
-        let block = models_block(&models).context("a models block")?;
+        let block = models_block(&models)?.context("a models block")?;
         let (len, raw_len) = (block.body.len() as u64, block.raw_len as u64);
         let is_blob_token_model =
             |stream: usize| [LZ_LITERAL, LZ_LENGTH, LZ_DISTANCE].contains(&stream);
@@ -844,11 +851,11 @@ mod tests {
         let without_largest: Vec<usize> = (all.iter().copied())
             .filter(|&stream| stream != largest)
             .collect();
-        fit_models_block(&mut models, len, raw_len);
+        fit_models_block(&mut models, len, raw_len)?;
         assert_eq!(ids(&models), all);
         for (max_len, max_raw_len) in [(len - 1, raw_len), (len, raw_len - 1)] {
-            let mut fitted = build_models(&[&walked, &walked]);
-            fit_models_block(&mut fitted, max_len, max_raw_len);
+            let mut fitted = build_models(&[&walked, &walked])?;
+            fit_models_block(&mut fitted, max_len, max_raw_len)?;
             assert_eq!(ids(&fitted), without_largest);
             assert!(
                 encode_transform(&walked, &fitted).is_none(),
@@ -856,7 +863,7 @@ mod tests {
             );
         }
         // nothing fits: only the models of the blob tokens are kept
-        fit_models_block(&mut models, 0, 0);
+        fit_models_block(&mut models, 0, 0)?;
         assert!(ids(&models).into_iter().all(is_blob_token_model));
         Ok(())
     }
