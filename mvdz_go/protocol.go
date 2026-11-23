@@ -182,7 +182,7 @@ func (protocol *protocolState) observeServerData(body []byte) {
 
 // commandBodySize is the length of the body of command that starts body, or
 // false if the command is unknown or its body does not fit, FORMAT.md
-// 4.2 and 8 rule 12.
+// 8 rule 12.
 func (protocol protocolState) commandBodySize(command uint8, body []byte) (uint32, bool) {
 	fields := byteCursor{data: body}
 	coord := protocol.coordSize()
@@ -301,7 +301,7 @@ func (protocol protocolState) commandBodySize(command uint8, body []byte) (uint3
 	return uint32(fields.position), !fields.isShort
 }
 
-// skipEntityDelta skips an entity word and its delta, FORMAT.md 4.2.
+// skipEntityDelta skips an entity word and its delta, FORMAT.md 8 rule 12.
 func (protocol protocolState) skipEntityDelta(fields *byteCursor) {
 	bits := fields.u16() &^ 511
 	var more uint16

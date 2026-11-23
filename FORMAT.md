@@ -229,7 +229,7 @@ An id of 315 or above is an error.
 |---|---|---|---|
 | 0 | `TIME` | structural | frame time byte |
 | 1 | `TYPE` | structural | frame type byte |
-| 2 | `COMMAND` | structural | svc command byte; 255 = end of payload, 0 = escape |
+| 2 | `COMMAND` | structural | svc command byte; 255 = end of payload, 0 = escape; the length bytes of a body without a layout (4.2) |
 | 3 | `PLAYER_FLAGS` | structural | playerinfo flags (1 to 3 symbols) |
 | 4 | `PLAYER_FRAME` | structural | playerinfo frame (residual) |
 | 5 | `PLAYER_WEAPON_FRAME` | structural | playerinfo weapon frame (residual) |
@@ -342,8 +342,8 @@ Walker primitives (decode direction; `p` = output cursor):
 * `copy_blob(s, n)`: copy the next `n` bytes of blob stream `s` to `dst[p..]`;
   `p += n`. Error if the stream has fewer than `n` bytes left or the output
   would overflow (`SegmentWalker::copy_blob`).
-* `copy_command_body(s, c)`: `n = command_body_size(c, the unread bytes of blob s)`
-  (section 4.2); `None` is an error; else `copy_blob(s, n)`.
+* `copy_command_body(s, c)`: the body of a command without a layout of its own
+  (section 4.2).
 
 Writing beyond `raw_len` is an error. An error stops the walk and fails
 the segment.
@@ -381,45 +381,17 @@ re-derive has_float_coords, has_fte_float_coords
 
 `fte2` is carried but no rule reads it.
 
-### 4.2 Command sizer (`protocol.rs:ProtocolState::command_body_size`)
+### 4.2 Command bodies without a layout (`SegmentWalker::copy_command_body`)
 
-`command_body_size(c, b)` is the number of body bytes (the command byte
-excluded) of command `c` whose body starts at `b[0]`, or `None` if `c` is
-unknown or the body does not fit in `b`. Primitives: `skip(n)` (fails if
-fewer than `n` bytes are left), `u8`, `u16`, `u32` (little-endian; fail if
-short), `str` (to and including the next NUL; fails if there is none).
+A command the walk has no layout for is its length and its bytes. A decoder
+knows the size of no command: the encoder sizes them (section 8, rule 12).
 
-| c | name | body |
-|---|---|---|
-| 1, 27, 28, 34, 35 | `SVC_NOP`, `SVC_KILLED_MONSTER`, `SVC_FOUND_SECRET`, `SVC_SMALL_KICK`, `SVC_BIG_KICK` | empty |
-| 2, 9, 31 | `SVC_DISCONNECT`, `SVC_STUFF_TEXT`, `SVC_FINALE` | str |
-| 10 | `SVC_SET_ANGLE` | skip `1 + 3*angle` |
-| 11 | `SVC_SERVER_DATA` | loop { `v = u32`; if `v == 28` break; skip 4 }; skip 4; str; skip 4; str; skip 40 |
-| 12 | `SVC_LIGHT_STYLE` | skip 1; str |
-| 19 | `SVC_DAMAGE` | skip `2 + 3*coord` |
-| 20 | `SVC_SPAWN_STATIC` | skip `4 + 3*(coord + angle)` |
-| 21, 66 | `SVC_FTE_SPAWN_STATIC_2`, `SVC_FTE_SPAWN_BASELINE_2` | `w = u16`; `delta(w)` |
-| 22 | `SVC_SPAWN_BASELINE` | skip `2 + 4 + 3*(coord + angle)` |
-| 24, 32, 44 | `SVC_SET_PAUSE`, `SVC_CD_TRACK`, `SVC_CHOKE_COUNT` | skip 1 |
-| 29 | `SVC_SPAWN_STATIC_SOUND` | skip `3*coord + 3` |
-| 30 | `SVC_INTERMISSION` | skip `3*wide_coord + 3*angle` |
-| 36 | `SVC_UPDATE_PING` | skip 3 |
-| 37 | `SVC_UPDATE_ENTER_TIME` | skip 5 |
-| 39, 53 | `SVC_MUZZLE_FLASH`, `SVC_UPDATE_PL` | skip 2 |
-| 40 | `SVC_UPDATE_USER_INFO` | skip 5; str |
-| 41 | `SVC_DOWNLOAD` | `n = u16` as i16; skip 1; if `n > 0` skip `n` |
-| 43 | `SVC_NAILS` | `n = u8`; skip `6*n` |
-| 45, 46 | `SVC_MODEL_LIST`, `SVC_SOUND_LIST` | skip 1; loop { str; break if it was just the NUL }; skip 1 |
-| 49, 50 | `SVC_MAX_SPEED`, `SVC_ENT_GRAVITY` | skip 4 |
-| 51 | `SVC_SET_INFO` | skip 1; str; str |
-| 52 | `SVC_SERVER_INFO` | str; str |
-| 54 | `SVC_NAILS_2` | `n = u8`; skip `7*n` |
-| any other but those of section 8, rule 12 | | `None` |
-
-These are the rows a decoder needs: it sizes commands only through
-`copy_command_body` (section 4.6). The commands the walker decodes field by
-field (3, 6, 8, 14, 23, 26, 38, 42, 47 and 48) are sized only by the
-encoder; their rows are in section 8, rule 12.
+```
+copy_command_body(s, c):
+    n = 0
+    for k in 0..3: n |= symbol(COMMAND, 0xC000 | (k << 8) | c) << (8*k)   // not written
+    copy_blob(s, n)
+```
 
 Bits (`protocol.rs`): `DF_ORIGIN` 1<<0, `DF_ANGLES` 1<<3, `DF_EFFECTS` 1<<6,
 `DF_SKIN_NUM` 1<<7, `DF_WEAPON_FRAME` 1<<10, `DF_MODEL` 1<<11.
@@ -432,25 +404,6 @@ Bits (`protocol.rs`): `DF_ORIGIN` 1<<0, `DF_ANGLES` 1<<3, `DF_EFFECTS` 1<<6,
 `U_FTE_COLOR_MOD` 1<<10. In the sound channel word: `SND_ATTENUATION` 1<<14,
 `SND_VOLUME` 1<<15. Temp entity types: `TE_GUNSHOT` 2, `TE_LIGHTNING_1` 5,
 `TE_LIGHTNING_2` 6, `TE_LIGHTNING_3` 9, `TE_BLOOD` 12.
-
-`delta(w)` (`ProtocolState::skip_entity_delta`):
-
-```
-bits = w & ~511; more = 0
-if bits & U_MORE_BITS: bits |= u8
-if bits & U_FTE_EVEN_MORE and fte != 0:
-    more = u8
-    if more & U_FTE_YET_MORE: more |= u8 << 8
-if bits & U_MODEL: skip 1   elif more & U_FTE_MODEL_DBL: skip 2
-for m in [U_FRAME, U_COLOR_MAP, U_SKIN, U_EFFECTS]: if bits & m: skip 1
-for (o, a) in [(U_ORIGIN_1, U_ANGLE_1), (U_ORIGIN_2, U_ANGLE_2), (U_ORIGIN_3, U_ANGLE_3)]:
-    if bits & o: skip coord
-    if bits & a: skip angle
-if more & U_FTE_TRANS and fte & FTE_PEXT_TRANS: skip 1
-if more & U_FTE_SCALE: skip 1
-if more & U_FTE_FATNESS: skip 1
-if more & U_FTE_COLOR_MOD and fte & FTE_PEXT_COLOR_MOD: skip 3
-```
 
 ### 4.3 Walker state (`walker.rs:SegmentWalker::new`)
 
@@ -543,6 +496,8 @@ The COMMAND context is split by bit 15:
   `first_class`, bits 12-14 `ti`, bit 15 = 0.
 * class 15: bits 0-7 `previous_command`, bits 8-10 `ti`, bits 11-13
   `min(index, 7)`, bit 14 = 0, bit 15 = 1.
+* a length byte of `copy_command_body` (section 4.2): bits 0-7 the command,
+  bits 8-9 the byte's index, bits 14 and 15 = 1.
 
 `command_class(c)` (`walker.rs:command_class`):
 
@@ -1398,21 +1353,69 @@ its blob parser (rule 10) on its own.
 12. **Walk** (`walker.rs`): the encoder runs the walk of sections 4 and 5 over the source
     bytes and codes what the decoder reads there. What they do not say:
 
-    * **Sizer**: the rows of `command_body_size` (section 4.2) for the commands the walker
-      decodes field by field, sized to choose between walking a command and escaping:
+    * **Sizer** (`protocol.rs:ProtocolState::command_body_size`): `command_body_size(c, b)`
+      is the number of body bytes (the command byte excluded) of command `c` whose body
+      starts at `b[0]`, or `None` if `c` is unknown or the body does not fit in `b`. It
+      chooses between walking a command and escaping, and gives the length that
+      `copy_command_body` codes (section 4.2). Primitives: `skip(n)` (fails if fewer than
+      `n` bytes are left), `u8`, `u16`, `u32` (little-endian; fail if short), `str` (to
+      and including the next NUL; fails if there is none).
 
       | c | name | body |
       |---|---|---|
+      | 1, 27, 28, 34, 35 | `SVC_NOP`, `SVC_KILLED_MONSTER`, `SVC_FOUND_SECRET`, `SVC_SMALL_KICK`, `SVC_BIG_KICK` | empty |
+      | 2, 9, 31 | `SVC_DISCONNECT`, `SVC_STUFF_TEXT`, `SVC_FINALE` | str |
       | 3 | `SVC_UPDATE_STAT` | skip 2 |
       | 6 | `SVC_SOUND` | `ch = u16`; if `ch & SND_VOLUME` skip 1; if `ch & SND_ATTENUATION` skip 1; skip `1 + 3*coord` |
       | 8 | `SVC_PRINT` | skip 1; str |
+      | 10 | `SVC_SET_ANGLE` | skip `1 + 3*angle` |
+      | 11 | `SVC_SERVER_DATA` | loop { `v = u32`; if `v == 28` break; skip 4 }; skip 4; str; skip 4; str; skip 40 |
+      | 12 | `SVC_LIGHT_STYLE` | skip 1; str |
       | 14 | `SVC_UPDATE_FRAGS` | skip 3 |
+      | 19 | `SVC_DAMAGE` | skip `2 + 3*coord` |
+      | 20 | `SVC_SPAWN_STATIC` | skip `4 + 3*(coord + angle)` |
+      | 21, 66 | `SVC_FTE_SPAWN_STATIC_2`, `SVC_FTE_SPAWN_BASELINE_2` | `w = u16`; `delta(w)` |
+      | 22 | `SVC_SPAWN_BASELINE` | skip `2 + 4 + 3*(coord + angle)` |
       | 23 | `SVC_TEMP_ENTITY` | `t = u8`; t in {`TE_LIGHTNING_1`, `TE_LIGHTNING_2`, `TE_LIGHTNING_3`}: skip `2 + 6*coord`; t in {0, 1, 3, 4, 7, 8, 10, 11, 13}: skip `3*coord`; t in {`TE_GUNSHOT`, `TE_BLOOD`}: skip `1 + 3*coord`; else `None` |
+      | 24, 32, 44 | `SVC_SET_PAUSE`, `SVC_CD_TRACK`, `SVC_CHOKE_COUNT` | skip 1 |
       | 26 | `SVC_CENTER_PRINT` | str |
+      | 29 | `SVC_SPAWN_STATIC_SOUND` | skip `3*coord + 3` |
+      | 30 | `SVC_INTERMISSION` | skip `3*wide_coord + 3*angle` |
+      | 36 | `SVC_UPDATE_PING` | skip 3 |
+      | 37 | `SVC_UPDATE_ENTER_TIME` | skip 5 |
       | 38 | `SVC_UPDATE_STAT_LONG` | skip 5 |
+      | 39, 53 | `SVC_MUZZLE_FLASH`, `SVC_UPDATE_PL` | skip 2 |
+      | 40 | `SVC_UPDATE_USER_INFO` | skip 5; str |
+      | 41 | `SVC_DOWNLOAD` | `n = u16` as i16; skip 1; if `n > 0` skip `n` |
       | 42 | `SVC_PLAYER_INFO` | skip 1; `f = u16`; skip 1; for i in 0..3: if `f & (DF_ORIGIN << i)` skip coord; for i in 0..3: if `f & (DF_ANGLES << i)` skip 2; skip 1 for each of `DF_MODEL`, `DF_SKIN_NUM`, `DF_EFFECTS`, `DF_WEAPON_FRAME` that is set |
+      | 43 | `SVC_NAILS` | `n = u8`; skip `6*n` |
+      | 45, 46 | `SVC_MODEL_LIST`, `SVC_SOUND_LIST` | skip 1; loop { str; break if it was just the NUL }; skip 1 |
       | 47 | `SVC_PACKET_ENTITIES` | loop { `w = u16`; if `w == 0` break; `delta(w)` } |
       | 48 | `SVC_DELTA_PACKET_ENTITIES` | skip 1; then as 47 |
+      | 49, 50 | `SVC_MAX_SPEED`, `SVC_ENT_GRAVITY` | skip 4 |
+      | 51 | `SVC_SET_INFO` | skip 1; str; str |
+      | 52 | `SVC_SERVER_INFO` | str; str |
+      | 54 | `SVC_NAILS_2` | `n = u8`; skip `7*n` |
+      | any other | | `None` |
+
+      `delta(w)` (`ProtocolState::skip_entity_delta`):
+
+      ```
+      bits = w & ~511; more = 0
+      if bits & U_MORE_BITS: bits |= u8
+      if bits & U_FTE_EVEN_MORE and fte != 0:
+          more = u8
+          if more & U_FTE_YET_MORE: more |= u8 << 8
+      if bits & U_MODEL: skip 1   elif more & U_FTE_MODEL_DBL: skip 2
+      for m in [U_FRAME, U_COLOR_MAP, U_SKIN, U_EFFECTS]: if bits & m: skip 1
+      for (o, a) in [(U_ORIGIN_1, U_ANGLE_1), (U_ORIGIN_2, U_ANGLE_2), (U_ORIGIN_3, U_ANGLE_3)]:
+          if bits & o: skip coord
+          if bits & a: skip angle
+      if more & U_FTE_TRANS and fte & FTE_PEXT_TRANS: skip 1
+      if more & U_FTE_SCALE: skip 1
+      if more & U_FTE_FATNESS: skip 1
+      if more & U_FTE_COLOR_MOD and fte & FTE_PEXT_COLOR_MOD: skip 3
+      ```
 
     * **Escape** (section 4.5): when the next command byte is 0, unknown to the sizer, or
       its body does not fit before the payload end. `n` is the length of the rest of the

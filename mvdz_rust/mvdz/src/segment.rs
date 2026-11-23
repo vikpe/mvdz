@@ -96,11 +96,6 @@ impl<const IS_ENCODE: bool> Streams<'_, IS_ENCODE> {
             None => false,
         }
     }
-
-    /// Decode: the unread rest of a blob stream.
-    pub(crate) fn blob_rest(&self, stream: usize) -> &[u8] {
-        self.decode_blobs[stream]
-    }
 }
 
 fn walk_decode(streams: Streams<'_, false>, dst: &mut [u8], protocol: ProtocolState) -> Result<()> {
@@ -709,8 +704,12 @@ mod tests {
         let src = [&[0, DEM_ALL][..], &payload_len, &payload].concat();
         let (mut walked, _) = walk(&src, ProtocolState::default()).context("the demo walks")?;
         let command_after_escape_context = 1 << 4 | u16::from(DEM_ALL) << 12;
-        walked.streams[COMMAND].symbols[0] = 0;
-        walked.streams[COMMAND].contexts[1] = command_after_escape_context;
+        let commands = &mut walked.streams[COMMAND];
+        let first_command_length = 1..4;
+        commands.symbols.drain(first_command_length.clone());
+        commands.contexts.drain(first_command_length);
+        commands.symbols[0] = 0;
+        commands.contexts[1] = command_after_escape_context;
         walked.blobs[ESCAPE_LENGTH] = 1u32.to_le_bytes().to_vec();
         walked.blobs[RAW] = vec![SVC_NOP];
         let blob_bytes: Vec<u8> = walked.blobs.iter().flatten().copied().collect();

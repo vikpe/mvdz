@@ -189,16 +189,17 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
         }
     }
 
-    /// The body is sized from the bytes that hold it: the payload's for encode, the blob's
-    /// for decode.
-    fn copy_command_body(&mut self, stream: usize, size_command: u8) {
-        let size = self
-            .protocol
-            .command_body_size(size_command, self.io.command_body_source(stream));
-        match size {
-            Some(size) => self.io.copy_blob(stream, size),
-            None => self.io.has_error = true,
+    /// A command without a layout of its own: the length of its body in three bytes, then
+    /// the body. Only the encoder sizes it.
+    fn copy_command_body(&mut self, stream: usize, command: u8) {
+        const LENGTH_CONTEXTS: u32 = 0xc000;
+        let source_len = self.io.source_command_body_len(&self.protocol, command);
+        let mut len = 0u32;
+        for (index, source_byte) in source_len.to_le_bytes().into_iter().take(3).enumerate() {
+            let context = LENGTH_CONTEXTS | (index as u32) << 8 | u32::from(command);
+            len |= u32::from(self.io.symbol(COMMAND, context, source_byte)) << (8 * index);
         }
+        self.io.copy_blob(stream, len as usize);
     }
 
     fn command(&mut self, command: u8) {
@@ -895,14 +896,10 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
         u8::from(is_block)
     }
 
-    /// The bytes a command body is sized from: the payload's for encode, the blob's for
-    /// decode.
-    fn command_body_source(&self, stream: usize) -> &[u8] {
-        if IS_ENCODE {
-            self.payload_rest()
-        } else {
-            self.streams.blob_rest(stream)
-        }
+    /// Of the source command whose body is at the cursor; 0 for decode.
+    fn source_command_body_len(&self, protocol: &ProtocolState, command: u8) -> u32 {
+        let len = protocol.command_body_size(command, self.payload_rest());
+        len.unwrap_or(0) as u32
     }
 
     /// `changed = flags ^ previous`. The main byte: the often-toggling bits (axes 0-5,

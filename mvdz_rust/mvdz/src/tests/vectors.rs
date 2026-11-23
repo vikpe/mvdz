@@ -193,7 +193,7 @@ fn escape_walks_on() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         &[
             (TIME, &[0]),
             (TYPE, &[DEM_ALL]),
-            (COMMAND, &[ESCAPE, SVC_NOP, END]),
+            (COMMAND, &[ESCAPE, SVC_NOP, 0, 0, 0, END]),
         ],
         &[(ESCAPE_LENGTH, &1u32.to_le_bytes()), (RAW, &[SVC_NOP])],
     )?;
@@ -732,7 +732,7 @@ fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Every frame type, every command the sizer knows (FORMAT.md 4.2 and 8
+/// Every frame type, every command the sizer knows (FORMAT.md 8
 /// rule 12) and the playerinfo, packet-entity, sound and temp-entity forms, first without
 /// and then with FTE extensions. The walk escapes nothing.
 fn commands_demo() -> Vec<u8> {
@@ -1189,7 +1189,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         "escape-walks-on.mvdz",
         escape_walks_on,
         &two_nops,
-        "one frame of two svc_nop, the first as an escape of 1 byte, the second walked (FORMAT.md 4.5): no encoder here writes it",
+        "one frame of two svc_nop, the first as an escape of 1 byte, the second walked with its length of 0 (FORMAT.md 4.5): no encoder here writes it",
     );
     add("empty.normal.mvdz", encode(b"")?, b"", "an empty demo");
     let usercmd = usercmd_demo();

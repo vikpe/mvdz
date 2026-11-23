@@ -704,20 +704,17 @@ func (walker *segmentWalker) copyBlob(stream int, count uint32) {
 	walker.position += count
 }
 
-// copyCommandBody sizes the body from the bytes that hold it, the blob
-// stream's when decoding and the payload's when encoding.
+// copyCommandBody codes a command without a layout of its own: the length of
+// its body in three bytes, then the body. Only an encoder sizes it; a decoder
+// reads zeros ahead and 0 as the source length.
 func (walker *segmentWalker) copyCommandBody(stream int, command uint8) {
-	if walker.err != nil {
-		return
+	const lengthContexts = 0xc000
+	sourceLength, _ := walker.protocol.commandBodySize(command, walker.payloadRest())
+	var length uint32
+	for index := range 3 {
+		context := lengthContexts | uint16(index)<<8 | uint16(command)
+		sourceByte := uint8(sourceLength >> (8 * index))
+		length |= uint32(walker.symbol(streamCommand, context, sourceByte)) << (8 * index)
 	}
-	body := walker.streams.blobs[stream]
-	if walker.streams.isEncoding {
-		body = walker.payloadRest()
-	}
-	size, isSized := walker.protocol.commandBodySize(command, body)
-	if !isSized {
-		walker.fail("command body")
-		return
-	}
-	walker.copyBlob(stream, size)
+	walker.copyBlob(stream, length)
 }
