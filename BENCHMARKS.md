@@ -12,9 +12,8 @@ on how well it compresses.
 An Intel Core i5-12400F (6 cores, 12 threads; AVX2 and SHA extensions), 62 GB of
 memory, Linux 6.8, Rust 1.100, `cargo build --release` (glibc, system allocator,
 portable `x86-64`). Speeds ran pinned to four physical cores (`taskset -c 0,2,4,6`)
-with an editor using about one core in the background. The rc.4 figures are from an
-earlier session on the same machine. Figures are the median over rounds, with
-[min-max].
+on a quiet machine (load 1.4 to 1.9). rc.4 was built from `master` and measured in the
+same session, 2026-11-23. Figures are the median over rounds, with [min-max].
 
 ## Samples
 
@@ -43,30 +42,32 @@ demos:
 
 | format | size / raw | size / archive gzip |
 |---|---|---|
-| **mvdz** | **0.194** [0.191-0.197] | 0.327 |
-| mvdz rc.4, `-s 256K` | 0.192 | |
+| **mvdz** | **0.194** [0.191-0.198] | 0.328 |
+| mvdz rc.4, `-s 256K` | 0.192 [0.189-0.195] | 0.324 |
 | archive gzip | 0.593 [0.581-0.603] | 1 |
 | gzip -9 | 0.566 [0.554-0.577] | 0.956 |
 | xz -9e | 0.429 [0.422-0.435] | 0.724 |
 | zstd -19 | 0.508 [0.498-0.517] | 0.858 |
 
-Projected onto the whole archive (72.0 GB as gzip): 23.5 GB. Unweighted, the 379
-demos (968,979,765 bytes raw) compress to 212,044,254 bytes (0.2188); the median demo
-to 0.243. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
+Projected onto the whole archive (72.0 GB as gzip): 23.6 GB. Unweighted, the 379
+demos (968,979,765 bytes raw) compress to 212,808,429 bytes (0.2196); the median demo
+to 0.244. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
 -9e.
 
-Against rc.4 at the same segment size: +1.1 % (the blob streams as LZ77 tokens coded
-with rANS instead of zstd, fixed-width integers).
+Against rc.4 at the same segment size: +1.4 % (the blob streams as LZ77 tokens coded
+with rANS instead of zstd, fixed-width integers, and a length for every command without
+a layout, FORMAT.md 4.2, so that a decoder sizes no command). The gzip, xz and zstd
+columns are from the earlier run: same demos, same tools.
 
 **By era** (year of the demo; weighted, 95 % intervals):
 
 | era | n | mvdz | gzip -9 | xz -9e | zstd -19 |
 |---|---|---|---|---|---|
-| up to 2006 | 127 | 0.264 [0.260-0.269] | 0.611 | 0.508 | 0.554 |
-| 2007-2010 | 95 | 0.239 [0.232-0.244] | 0.609 | 0.492 | 0.552 |
-| 2011-2020 | 49 | 0.252 [0.242-0.264] | 0.622 | 0.508 | 0.566 |
-| 2021-2022 | 19 | 0.180 [0.176-0.185] | 0.610 | 0.442 | 0.546 |
-| 2023-2024 | 43 | 0.180 [0.175-0.185] | 0.599 | 0.433 | 0.536 |
+| up to 2006 | 127 | 0.265 [0.261-0.269] | 0.611 | 0.508 | 0.554 |
+| 2007-2010 | 95 | 0.240 [0.234-0.245] | 0.609 | 0.492 | 0.552 |
+| 2011-2020 | 49 | 0.253 [0.243-0.266] | 0.622 | 0.508 | 0.566 |
+| 2021-2022 | 19 | 0.180 [0.176-0.184] | 0.610 | 0.442 | 0.546 |
+| 2023-2024 | 43 | 0.180 [0.176-0.185] | 0.599 | 0.433 | 0.536 |
 | 2025-2026 | 45 | 0.156 [0.147-0.164] | 0.493 | 0.359 | 0.439 |
 
 (One undated demo is not listed.) Current mvdsv records a snapshot every server frame
@@ -86,36 +87,40 @@ coded field by field (FORMAT.md 4.11, 5.6):
 | mvdz | 0.107 (0.104 to 0.111 per demo) | 0.266 |
 
 The usercmd layout codes the blocks at 0.058 of their raw bytes; with the blocks stored
-as generic hidden blocks instead, the files are 90 % larger (0.203 of raw).
+as generic hidden blocks instead, the files are 90 % larger (0.203 of raw). This table
+is from the earlier run: of the 10 demos only the two of sample40 are at hand, 0.108 and
+0.111 of raw now.
 
 ## Speeds
 
-`mvdz compress` and `mvdz decompress`, one process per file over the 8 demos of set8
-(sample8 before the usercmd demo replaced its smallest), the output written to tmpfs; 5 rounds. `-j 4` encodes and decodes up to 4 segments at
+`mvdz compress` and `mvdz decompress`, one process per file over the 8 demos of sample8,
+the output written to tmpfs; 5 rounds. `-j 4` encodes and decodes up to 4 segments at
 once.
 
 | | rc.4 `-s 256K` | **this version** |
 |---|---|---|
-| size / raw (sample8) | 0.2207 | 0.2225 |
-| compress, `-j 1` | 22.1 [21.3-22.5] | **28.1** [27.8-28.5] |
-| compress, `-j 4` | 41.1 [38.6-41.5] | **71.1** [70.2-71.4] |
-| decompress, `-j 1` | 72.1 [71.3-72.4] | **82.9** [82.2-83.8] |
-| decompress, `-j 4` | 142.1 [136.9-142.8] | **226.7** [225.8-227.3] |
+| size / raw (sample8) | 0.1476 | 0.1483 |
+| compress, `-j 1` | 30.6 [29.5-30.8] | **34.6** [33.8-35.2] |
+| compress, `-j 4` | 56.6 [55.5-57.2] | **94.6** [74.0-96.0] |
+| decompress, `-j 1` | 93.1 [90.6-94.1] | **102.2** [101.5-103.8] |
+| decompress, `-j 4` | 222.7 [222.0-222.8] | **295.0** [289.7-301.4] |
 
-Compression is 1.3 times faster on one thread and 1.7 times on four (segments encode
-in parallel). Decompression is 1.1 times faster on one thread and 1.6 times on four
-(segments decode in parallel).
+Compression is 1.1 times faster on one thread and 1.7 times on four (segments encode
+in parallel). Decompression is 1.1 times faster on one thread and 1.3 times on four
+(segments decode in parallel). Two thirds of sample8 is one 35.5 MB demo, so these
+figures lean on a large file; on one 14.2 MB 4on4 this version compresses at 96.5 MB/s
+and decompresses at 294 MB/s with `-j 4`.
 
 **Against general-purpose decompressors** (`scripts/bench_cli.sh`, same files, one
 process per file; "batch" = 4 processes in parallel, one thread each; 3 rounds):
 
 | format | size / raw | decode, 1 process | decode, batch of 4 |
 |---|---|---|---|
-| mvdz, `-j 1` | 0.223 | 80.9 [79.6-81.9] | 178.4 [168.3-179.8] |
-| mvdz, `-j 4` | 0.223 | 221.7 [214.2-221.7] | 256.8 [243.8-260.9] |
-| gzip -9 (`gzip -dc`) | 0.603 | 142.8 [142.7-143.3] | 307.9 [306.8-309.1] |
-| xz -9 (`xz -dc`) | 0.475 | 37.8 [37.7-38.0] | 80.2 [80.1-80.3] |
-| zstd -19 (`zstd -dc`) | 0.545 | 403.4 [402.8-404.7] | 750.2 [748.3-776.4] |
+| mvdz, `-j 1` | 0.148 | 102.8 [102.2-102.8] | 171.6 [171.1-174.3] |
+| mvdz, `-j 4` | 0.148 | 297.0 [291.7-299.0] | 427.2 [415.3-434.9] |
+| gzip -9 (`gzip -dc`) | 0.469 | 165.9 [157.5-171.2] | 272.6 [267.8-273.7] |
+| xz -9 (`xz -dc`) | 0.362 | 52.1 [51.8-52.1] | 90.9 [90.8-91.3] |
+| zstd -19 (`zstd -dc`) | 0.417 | 532.1 [475.0-553.3] | 844.0 [729.7-878.7] |
 
 ## Memory
 
@@ -124,9 +129,9 @@ this version:
 
 | demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
 |---|---|---|---|---|
-| 14.2 MB (sample40) | 93 -> **16** MiB | 102 -> **21** MiB | 23 -> **6.9** MiB | 24 -> **9.2** MiB |
-| 6.2 MB (sample8) | 49 -> **14** MiB | 57 -> **19** MiB | 13 -> **5.7** MiB | 15 -> **7.5** MiB |
-| 2.0 MB (sample8) | 23 -> **9.8** MiB | 29 -> **14** MiB | 7.8 -> **4.7** MiB | 8.8 -> **6.5** MiB |
+| 14.2 MB (sample40) | 93 -> **16** MiB | 102 -> **21** MiB | 23 -> **6.9** MiB | 24 -> **9.0** MiB |
+| 6.2 MB (sample8) | 48 -> **15** MiB | 57 -> **19** MiB | 13 -> **5.7** MiB | 15 -> **7.9** MiB |
+| 2.0 MB (sample8) | 23 -> **10** MiB | 29 -> **14** MiB | 7.9 -> **4.8** MiB | 8.6 -> **6.4** MiB |
 
 Neither direction holds the demo: compression reads the file twice (counts, then codes)
 and writes each segment as it is coded; decompression streams. The memory is the models
@@ -141,30 +146,31 @@ length. One 14.2 MB demo repeated, this version:
 | 567 MB (40 times) | 29 MiB | 38 MiB | 12 MiB | 15 MiB |
 
 A longer demo earns more tables (FORMAT.md 8 rule 4), up to the contexts it has: the
-figures level off. 50 different 4on4 demos joined (575 MB), the most models seen: 41 and
-53 MiB to compress, 20 and 23 MiB to decompress. The encoder that held the demo took 836
-MiB for it. rc.4's memory grows with the demo in both directions.
+figures level off. 50 different 4on4 demos joined (575 MB), the most models seen: 42 and
+54 MiB to compress, 20 and 23 MiB to decompress. rc.4's memory grows with the demo in
+both directions: 3.2 GiB to compress that file and 682 MiB to decompress it.
 
 `-M` (`Encoder::max_memory`, `Decoder::max_memory`) lowers the segments worked on at
 once to stay within a figure, approximately; the least is one segment (32 MiB to
-compress, 14 MiB to decompress). The 36 MB usercmd demo at `-j 8`: 18, 25 and 30 MiB to
-compress with `-M` 32, 48 and none; 7.7, 11 and 13 MiB to decompress with `-M` 14, 24
+compress, 14 MiB to decompress). The 36 MB usercmd demo at `-j 8`: 18, 26 and 30 MiB to
+compress with `-M` 32, 48 and none; 7.7, 12 and 12 MiB to decompress with `-M` 14, 24
 and none. Compression from standard input holds the demo, since it is read twice.
 
 ## Correctness
 
-* Round trips (`examples/sweep.rs`): every demo of stratified (379) and sample8 (8), 987
-  MB raw, compressed and decoded by both the whole-file decoder and the streaming
+* Round trips (`examples/sweep.rs`): every demo of stratified (379) and sample8 (8),
+  1,022 MB raw, compressed and decoded by both the whole-file decoder and the streaming
   `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
 * The Go encoder (`mvdz_go/`) writes the same bytes as the Rust one for all 387, and each
   reads the other's files (`TestEncodeAgainstReference`).
 * The test suite (`cargo nextest run`, 65 tests) with the sample8 demos and the FTE float
   demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
   `vectors/` are refused or decoded as `MANIFEST.tsv` records.
-* Fuzzing, one hour per target, no failure, before the two-pass encoder and the escape
-  rule of this version (not repeated since): Rust (`mvdz_rust/mvdz/fuzz/`) `decode`
-  (78k runs, seeded with the vectors), `stream_reader` (4.5M), `compress_rt` (438k),
-  `gen_rt` (290k); Go `FuzzDecode` (2.5M) and `FuzzEncode` (816k).
+* Fuzzing, 10 minutes per target on 2026-11-23, no failure: Rust
+  (`mvdz_rust/mvdz/fuzz/`) `decode` (15k runs, seeded with the vectors), `stream_reader`
+  (15k), `compress_rt` (89k), `gen_rt` (58k); Go `FuzzDecode` (8.9M); `FuzzEncode` was
+  stopped after 5 minutes (124k). These ran before the length rule of FORMAT.md 4.2. The
+  runs of an hour per target predate the two-pass encoder and the escape rule.
 
 ## Reproducing
 
