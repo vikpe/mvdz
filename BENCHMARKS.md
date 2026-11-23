@@ -156,9 +156,8 @@ and none. Compression from standard input holds the demo, since it is read twice
 * Round trips (`examples/sweep.rs`): every demo of stratified (379) and sample8 (8), 987
   MB raw, compressed and decoded by both the whole-file decoder and the streaming
   `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
-* The Go package (`mvdz_go/`) is behind this version: it wrote the same bytes as the Rust
-  encoder for all 387 before the walk went on after an escape (FORMAT.md 4.5), and its
-  decoder does not read a file with one.
+* The Go encoder (`mvdz_go/`) writes the same bytes as the Rust one for all 387, and each
+  reads the other's files (`TestEncodeAgainstReference`).
 * The test suite (`cargo nextest run`, 66 tests) with the sample8 demos and the FTE float
   demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
   `vectors/` are refused or decoded as `MANIFEST.tsv` records.

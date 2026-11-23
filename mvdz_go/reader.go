@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"runtime"
 )
 
 // Error categories, FORMAT.md 7. ErrCorrupt is wrapped with the rule
@@ -22,13 +23,15 @@ var (
 
 // Reader decodes an MVDZ file to the demo it holds.
 type Reader struct {
-	input       io.Reader
-	header      Header
-	models      *fileModels // nil until the models block is read
-	decodedSize uint64
-	demoCrc32   uint32
-	segment     []byte // decoded and checked, not yet delivered
-	err         error
+	input     io.Reader
+	header    Header
+	models    *fileModels // nil until the models block is read
+	readSize  uint64      // the raw length of the segments read
+	demoCrc32 uint32
+	ready     [][]byte // decoded and checked segments, in order
+	readyErr  error    // met after them
+	segment   []byte   // the one being delivered
+	err       error
 }
 
 // NewReader reads the file header from input.
@@ -81,43 +84,97 @@ func (reader *Reader) nextSegment() ([]byte, error) {
 		}
 		reader.models = models
 	}
-	if reader.decodedSize == reader.header.Size {
-		return nil, reader.finish()
+	if len(reader.ready) == 0 && reader.readyErr == nil {
+		reader.decodeBatch()
+	}
+	if len(reader.ready) == 0 {
+		return nil, reader.readyErr
+	}
+	segment := reader.ready[0]
+	reader.ready = reader.ready[1:]
+	return segment, nil
+}
+
+// decodeBatch reads the next segments, one for each CPU, and decodes them
+// together. The segments before one that fails are still delivered.
+func (reader *Reader) decodeBatch() {
+	var batch []codedSegment
+	for len(batch) < runtime.GOMAXPROCS(0) && reader.readSize < reader.header.Size {
+		segment, err := reader.readSegment()
+		if err != nil {
+			reader.readyErr = err
+			break
+		}
+		batch = append(batch, segment)
+	}
+	isDemoComplete := len(batch) == 0 && reader.readyErr == nil
+	if isDemoComplete {
+		reader.readyErr = reader.finish()
+		return
 	}
 
-	// FORMAT.md 2.3; the checks are in the order of 7.
+	decoded := make([][]byte, len(batch))
+	errs := make([]error, len(batch))
+	inParallel(len(batch), func(index int) {
+		decoded[index], errs[index] = batch[index].decode(reader.models)
+	})
+	for index, segment := range decoded {
+		if errs[index] != nil {
+			reader.readyErr = errs[index]
+			return
+		}
+		reader.demoCrc32 = crc32.Update(reader.demoCrc32, crc32.IEEETable, segment)
+		reader.ready = append(reader.ready, segment)
+	}
+}
+
+// codedSegment is a segment as it is read, FORMAT.md 2.3.
+type codedSegment struct {
+	coded    []byte
+	rawLen   uint32
+	checksum uint32
+}
+
+// readSegment reads a segment and checks its fields, in the order of
+// FORMAT.md 7.
+func (reader *Reader) readSegment() (codedSegment, error) {
 	codedLen, err := readU32(reader.input)
 	if err != nil {
-		return nil, err
+		return codedSegment{}, err
 	}
 	if codedLen > maxCodedLen {
-		return nil, corrupt("segment size")
+		return codedSegment{}, corrupt("segment size")
 	}
 	fields := make([]byte, 12+codedLen)
 	if err := readFull(reader.input, fields); err != nil {
-		return nil, err
+		return codedSegment{}, err
 	}
-	rawLen := binary.LittleEndian.Uint32(fields[0:])
-	checksum := binary.LittleEndian.Uint32(fields[8:])
-	if rawLen == 0 {
-		return nil, corrupt("empty segment")
+	segment := codedSegment{
+		coded:    fields[12:],
+		rawLen:   binary.LittleEndian.Uint32(fields[0:]),
+		checksum: binary.LittleEndian.Uint32(fields[8:]),
 	}
-	if rawLen > maxRawLen {
-		return nil, corrupt("segment size")
+	if segment.rawLen == 0 {
+		return codedSegment{}, corrupt("empty segment")
 	}
-	if uint64(rawLen) > reader.header.Size-reader.decodedSize {
-		return nil, corrupt("segment sizes")
+	if segment.rawLen > maxRawLen {
+		return codedSegment{}, corrupt("segment size")
 	}
+	if uint64(segment.rawLen) > reader.header.Size-reader.readSize {
+		return codedSegment{}, corrupt("segment sizes")
+	}
+	reader.readSize += uint64(segment.rawLen)
+	return segment, nil
+}
 
-	decoded, err := decodeSegment(fields[12:], rawLen, reader.models)
+func (segment codedSegment) decode(models *fileModels) ([]byte, error) {
+	decoded, err := decodeSegment(segment.coded, segment.rawLen, models)
 	if err != nil {
 		return nil, err
 	}
-	if crc32.ChecksumIEEE(decoded) != checksum {
+	if crc32.ChecksumIEEE(decoded) != segment.checksum {
 		return nil, corrupt("segment checksum")
 	}
-	reader.demoCrc32 = crc32.Update(reader.demoCrc32, crc32.IEEETable, decoded)
-	reader.decodedSize += uint64(rawLen)
 	return decoded, nil
 }
 

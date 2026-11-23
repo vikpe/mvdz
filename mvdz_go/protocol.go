@@ -360,7 +360,7 @@ func scanFrames(data []byte) (framedLen int, durationMs uint32) {
 }
 
 // frameLen is the length of the frame that starts data, header included;
-// false if data does not start with a whole frame.
+// false if data does not start with a whole frame of at most a segment.
 func frameLen(data []byte) (int, bool) {
 	fields := byteCursor{data: data}
 	fields.skip(1)
@@ -375,5 +375,5 @@ func frameLen(data []byte) (int, bool) {
 	default:
 		return 0, false
 	}
-	return fields.position, !fields.isShort
+	return fields.position, !fields.isShort && fields.position <= maxRawLen
 }

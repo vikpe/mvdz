@@ -9,6 +9,7 @@ demoinfo-multi.normal.mvdz	4ef933ba44606f6528fa631849ed9bc26f6ea1957457ed25ac4bf
 random.normal.mvdz	2d2506480b05f18be895b70c6faeb3b52ad41b68438da3aa23da98961a145f89	3000	3000 random bytes (no frame: all tail), written by the unchecked entry point: rule 1 refuses them
 framed-as-tail.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	synthetic demo with demoinfo, forced to all tail (the encoder's fallback layout), models counted from the tail tokens only
 framed-as-stored.mvdz	fed65e0781791bf952e0f5485bdfba4dedf12114a694ba4e438202ae08e3f96f	5511	the same demo, forced to a stored segment (the encoder's last fallback), no models
+escape-walks-on.mvdz	6f77c0b98e10f94feefa4d4353fdd875ee1ea6dba7b932eb3d84352b3e5cc0c0	8	one frame of two svc_nop, the first as an escape of 1 byte, the second walked (FORMAT.md 4.5): no encoder here writes it
 empty.normal.mvdz	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0	an empty demo
 usercmd.normal.mvdz	85598f84014a7db074614dc585a421db11e52ea0e2ff21aba59f80ee9f447cd3	29377	synthetic demo with usercmd hidden blocks (4 players, angles on and off the grid, other type-1 lengths)
 usercmd.normal.segments.mvdz	b63058bd186b2d3732942c390e17c32b1c68731c08f8ff13fc22beb7a83a495b	1057572	the same, repeated to several segments

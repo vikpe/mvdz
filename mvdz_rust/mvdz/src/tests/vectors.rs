@@ -180,6 +180,26 @@ fn token_models(
     Ok((models, ids, table.build()))
 }
 
+/// A file whose only command loop escapes one command and walks the next, and its demo.
+fn escape_walks_on() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    use crate::streams::{COMMAND, ESCAPE_LENGTH, RAW, TIME, TYPE};
+    const DEM_ALL: u8 = 6;
+    const SVC_NOP: u8 = 1;
+    const ESCAPE: u8 = 0;
+    const END: u8 = 255;
+    let payload = [SVC_NOP, SVC_NOP];
+    let demo = [&[0, DEM_ALL][..], &2u32.to_le_bytes(), &payload].concat();
+    let body = transform_body(
+        &[
+            (TIME, &[0]),
+            (TYPE, &[DEM_ALL]),
+            (COMMAND, &[ESCAPE, SVC_NOP, END]),
+        ],
+        &[(ESCAPE_LENGTH, &1u32.to_le_bytes()), (RAW, &[SVC_NOP])],
+    )?;
+    Ok((one_segment(&demo, &body)?, demo))
+}
+
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
     let crc = crc32fast::hash(demo);
     let duration_ms = crate::segment::duration_ms(demo);
@@ -1163,6 +1183,13 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         all_stored(&framed),
         &framed,
         "the same demo, forced to a stored segment (the encoder's last fallback), no models",
+    );
+    let (escape_walks_on, two_nops) = escape_walks_on()?;
+    add(
+        "escape-walks-on.mvdz",
+        escape_walks_on,
+        &two_nops,
+        "one frame of two svc_nop, the first as an escape of 1 byte, the second walked (FORMAT.md 4.5): no encoder here writes it",
     );
     add("empty.normal.mvdz", encode(b"")?, b"", "an empty demo");
     let usercmd = usercmd_demo();

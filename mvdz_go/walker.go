@@ -162,10 +162,10 @@ func (walker *segmentWalker) payload(frameType uint8) {
 		}
 		if command == 0 {
 			walker.escape()
-			return
+		} else {
+			walker.write(command)
+			walker.command(command)
 		}
-		walker.write(command)
-		walker.command(command)
 		walker.previousCommand = command
 	}
 }
@@ -477,7 +477,7 @@ func (walker *segmentWalker) hiddenPayload() {
 		switch walker.blobByte(streamHiddenTag, walker.sourceHiddenTag()) {
 		case 0:
 			walker.escape()
-			return
+			continue
 		case 1:
 		case 2:
 			return

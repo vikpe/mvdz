@@ -18,10 +18,11 @@ var (
 
 // Encode codes an MVD demo as an MVDZ file, FORMAT.md 8.
 func Encode(demo []byte) ([]byte, error) {
-	if !startsLikeDemo(demo) {
+	segments := cutSegments(demo)
+	if len(segments) == 0 || !startsLikeDemo(segments[0]) {
 		return nil, ErrNotMvd
 	}
-	return encodeAny(demo)
+	return encodeSegments(demo, segments)
 }
 
 const (
@@ -32,23 +33,26 @@ const (
 
 // encodeAny codes any bytes as an MVDZ file: Encode without the input check.
 func encodeAny(demo []byte) ([]byte, error) {
-	segments := cutSegments(demo)
+	return encodeSegments(demo, cutSegments(demo))
+}
+
+func encodeSegments(demo []byte, segments [][]byte) ([]byte, error) {
 	if len(segments) > maxSegmentCount {
 		return nil, ErrDemoTooLarge
 	}
-	models := buildModels(segments)
+	models, startProtocols := buildModels(segments)
 
-	// The second pass: FORMAT.md 8 rules 3, 5 and 9.
+	// The second pass: FORMAT.md 8 rules 5 and 9.
+	coded := make([][]byte, len(segments))
+	inParallel(len(segments), func(index int) {
+		coded[index] = codeSegment(segments[index], startProtocols[index], models)
+	})
 	var codedSegments []byte
-	var isModelUsed [firstBlobStream]bool
-	var protocol protocolState
 	durationMs := uint64(0)
-	for _, segment := range segments {
-		coded, endProtocol := codeSegment(segment, protocol, models, &isModelUsed)
-		protocol = endProtocol
+	for index, segment := range segments {
 		_, segmentDurationMs := scanFrames(segment)
 		durationMs += uint64(segmentDurationMs)
-		codedSegments = appendSegment(codedSegments, segment, segmentDurationMs, coded)
+		codedSegments = appendSegment(codedSegments, segment, segmentDurationMs, coded[index])
 	}
 
 	header := Header{
@@ -58,7 +62,7 @@ func encodeAny(demo []byte) ([]byte, error) {
 		Sha256:     sha256.Sum256(demo),
 	}
 	file := appendHeader(nil, header)
-	file = appendModelsBlock(file, models, &isModelUsed)
+	file = appendModelsBlock(file, models)
 	file = append(file, codedSegments...)
 
 	// FORMAT.md 8 rule 7
@@ -73,35 +77,26 @@ func encodeAny(demo []byte) ([]byte, error) {
 }
 
 // codeSegment writes a segment the first way that works, FORMAT.md 8
-// rule 5: transform-coded, all tail, stored. It marks the models it uses and
-// returns the protocol state at the end of the segment.
-func codeSegment(segment []byte, protocol protocolState, models *fileModels, isModelUsed *[firstBlobStream]bool) ([]byte, protocolState) {
+// rule 5: transform-coded, all tail, stored.
+func codeSegment(segment []byte, protocol protocolState, models *fileModels) []byte {
 	encode := func(streams *segmentStreams) ([]byte, bool) {
-		coded, isCoded := encodeStreams(streams, uint32(len(segment)), models)
-		if isCoded {
-			for stream, values := range streams.collected {
-				isModelUsed[stream] = isModelUsed[stream] || len(values) > 0
-			}
-		}
-		return coded, isCoded
+		return encodeStreams(streams, uint32(len(segment)), models)
 	}
-	endProtocol := protocol
-	walked, walkedProtocol, isWalked := collectStreams(segment, protocol)
-	if isWalked {
-		endProtocol = walkedProtocol
+	if walked, _, isWalked := collectStreams(segment, protocol); isWalked {
 		if coded, isCoded := encode(walked); isCoded {
-			return coded, endProtocol
+			return coded
 		}
 	}
 	if coded, isCoded := encode(allTailStreams(segment, protocol)); isCoded {
-		return coded, endProtocol
+		return coded
 	}
-	return storedSegment(segment, protocol), endProtocol
+	return storedSegment(segment, protocol)
 }
 
-// startsLikeDemo is the input check, FORMAT.md 8 rule 1: the first
-// frame is whole, of a type that carries a payload, and not empty; and it
-// walks without an escape or 16 more whole frames follow it.
+// startsLikeDemo is the input check, FORMAT.md 8 rule 1, on the first
+// segment of a demo: the first frame is whole, of a type that carries a
+// payload, and not empty; and it walks without an escape or 16 more whole
+// frames follow it.
 func startsLikeDemo(demo []byte) bool {
 	isGzip := len(demo) >= 2 && demo[0] == 0x1f && demo[1] == 0x8b
 	firstLen, isFrame := frameLen(demo)
@@ -155,10 +150,7 @@ func cutSegments(demo []byte) [][]byte {
 			}
 			continue
 		}
-		resumeOffset := frameEnd
-		if !isFrame {
-			resumeOffset = nextFrameRun(demo, framedLen)
-		}
+		resumeOffset := nextFrameRun(demo, framedLen)
 		for resumeOffset > maxRawLen {
 			segments = append(segments, demo[:maxRawLen])
 			demo = demo[maxRawLen:]
@@ -190,14 +182,17 @@ func nextFrameRun(segment []byte, unframedStart int) int {
 
 // buildModels is the first pass, FORMAT.md 8 rule 4: it counts the
 // symbols of every segment as walked, or as all tail where the walk fails,
-// and builds one model per stream; nil for a stream without a model.
-func buildModels(segments [][]byte) *fileModels {
+// and builds one model per stream; nil for a stream without a model. It
+// returns the protocol state each segment starts in, rule 3.
+func buildModels(segments [][]byte) (*fileModels, []protocolState) {
 	var tallies [firstBlobStream]streamTally
 	for stream := range tallies {
 		tallies[stream] = streamTally{}
 	}
+	startProtocols := make([]protocolState, len(segments))
 	var protocol protocolState
-	for _, segment := range segments {
+	for index, segment := range segments {
+		startProtocols[index] = protocol
 		streams, endProtocol, isWalked := collectStreams(segment, protocol)
 		if isWalked {
 			protocol = endProtocol
@@ -218,7 +213,7 @@ func buildModels(segments [][]byte) *fileModels {
 		models[stream], _ = newStreamModel(tally.rawModel(alphabet, streamTableCost), alphabet) // built here: valid
 	}
 	fitModelsBlock(models)
-	return models
+	return models, startProtocols
 }
 
 // fitModelsBlock drops the model with the longest raw model (ties: the
@@ -227,7 +222,7 @@ func buildModels(segments [][]byte) *fileModels {
 // but the stored segment needs them.
 func fitModelsBlock(models *fileModels) {
 	for {
-		_, body, rawLen := modelsBlock(models, nil)
+		_, body, rawLen := modelsBlock(models)
 		if len(body) <= maxModelsLen && rawLen <= maxModelsRawLen {
 			return
 		}
@@ -248,13 +243,12 @@ func fitModelsBlock(models *fileModels) {
 	}
 }
 
-// modelsBlock is the body of the models block listing the models of
-// isListed, every model where isListed is nil, with the count of the models
-// and their raw length.
-func modelsBlock(models *fileModels, isListed *[firstBlobStream]bool) (count int, body []byte, rawLen int) {
+// modelsBlock is the body of the models block listing every model, with the
+// count of the models and their raw length.
+func modelsBlock(models *fileModels) (count int, body []byte, rawLen int) {
 	var listed []listedModel
 	for stream, model := range models {
-		if model != nil && (isListed == nil || isListed[stream]) {
+		if model != nil {
 			listed = append(listed, listedModel{stream, model.raw})
 		}
 	}
@@ -364,10 +358,10 @@ func appendTransformFields(coded []byte, protocol protocolState, entryCount uint
 	return binary.LittleEndian.AppendUint32(coded, entryCount)
 }
 
-// appendModelsBlock appends the models block, FORMAT.md 8 rule 6: the
-// models some segment uses.
-func appendModelsBlock(file []byte, models *fileModels, isModelUsed *[firstBlobStream]bool) []byte {
-	_, body, _ := modelsBlock(models, isModelUsed)
+// appendModelsBlock appends the models block, FORMAT.md 8 rule 6: every
+// model.
+func appendModelsBlock(file []byte, models *fileModels) []byte {
+	_, body, _ := modelsBlock(models)
 	file = binary.LittleEndian.AppendUint32(file, uint32(len(body)))
 	return append(file, body...)
 }
