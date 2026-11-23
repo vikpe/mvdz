@@ -304,55 +304,44 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         }
     }
 
+    /// Encode hands the source byte to `code`; decode writes what `code` returns.
     #[inline(always)]
-    fn code_symbol(&mut self, stream: usize, context: u32) -> u8 {
+    fn code_byte(&mut self, code: impl FnOnce(&mut Self, u8) -> u8) -> u8 {
         if IS_ENCODE {
             let byte = self.read_byte();
-            self.symbol(stream, context, byte)
+            code(self, byte);
+            byte
         } else {
-            let byte = self.symbol(stream, context, 0);
+            let byte = code(self, 0);
             self.write_byte(byte);
             byte
         }
+    }
+
+    #[inline(always)]
+    fn code_symbol(&mut self, stream: usize, context: u32) -> u8 {
+        self.code_byte(|walker, source_byte| walker.symbol(stream, context, source_byte))
     }
 
     #[inline(always)]
     fn code_symbol_residual(&mut self, stream: usize, context: u32, prediction: u8) -> u8 {
-        if IS_ENCODE {
-            let byte = self.read_byte();
-            self.symbol(stream, context, byte.wrapping_sub(prediction));
-            byte
-        } else {
-            let byte = self.symbol(stream, context, 0).wrapping_add(prediction);
-            self.write_byte(byte);
-            byte
-        }
+        self.code_byte(|walker, source_byte| {
+            let residual = walker.symbol(stream, context, source_byte.wrapping_sub(prediction));
+            residual.wrapping_add(prediction)
+        })
     }
 
     #[inline(always)]
     fn code_blob_byte(&mut self, stream: usize) -> u8 {
-        if IS_ENCODE {
-            let byte = self.read_byte();
-            self.io.put_blob(stream, &[byte]);
-            byte
-        } else {
-            let byte = self.blob_byte(stream, 0);
-            self.write_byte(byte);
-            byte
-        }
+        self.code_byte(|walker, source_byte| walker.blob_byte(stream, source_byte))
     }
 
     #[inline(always)]
     fn code_blob_residual(&mut self, stream: usize, prediction: u8) -> u8 {
-        if IS_ENCODE {
-            let byte = self.read_byte();
-            self.io.put_blob(stream, &[byte.wrapping_sub(prediction)]);
-            byte
-        } else {
-            let byte = self.blob_byte(stream, 0).wrapping_add(prediction);
-            self.write_byte(byte);
-            byte
-        }
+        self.code_byte(|walker, source_byte| {
+            let residual = walker.blob_byte(stream, source_byte.wrapping_sub(prediction));
+            residual.wrapping_add(prediction)
+        })
     }
 
     #[inline]
