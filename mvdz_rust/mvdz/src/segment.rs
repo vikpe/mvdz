@@ -14,6 +14,9 @@ use crate::streams::{
 };
 use crate::walker::{SegmentWalker, SymbolIo};
 
+#[cfg(feature = "stats")]
+pub mod stats;
+
 pub(crate) const SEGMENT_TARGET_RAW: usize = 256 * 1024;
 
 /// By stream id.

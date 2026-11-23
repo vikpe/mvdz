@@ -184,7 +184,7 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
   start (4.1).
 * `n`: `n = 0` is a stored segment (below). Per entry:
   * `id`: a structural, numeric or blob stream id (3.2), the ids strictly
-    increasing: so `n` is at most 322;
+    increasing: so `n` is at most 315;
   * `size`: for a structural or numeric stream the length of its body;
     for a blob stream the number of its bytes. A blob stream has no body.
 * The stream bodies fill `coded` exactly to its end.
@@ -214,10 +214,10 @@ Three kinds of stream, one id range each:
   vector, with rANS (section 6.4): ids 17-34 are the residuals of the
   numeric fields the walker codes (section 5), ids 35 and 36 belong to the
   blob tokens.
-* **Blob** streams (ids 37-321) are byte arrays the walker consumes in
+* **Blob** streams (ids 37-314) are byte arrays the walker consumes in
   order. They have no body: their bytes come from the blob tokens.
 
-An id of 322 or above is an error.
+An id of 315 or above is an error.
 
 | id | name | kind | content |
 |---|---|---|---|
@@ -253,31 +253,24 @@ An id of 322 or above is an error.
 | 39 | `HIDDEN_TAG` | blob | hidden-block tag (0 escape, 1 block, 2 end) |
 | 40 | `HIDDEN_LENGTH` | blob | hidden-block length (4 bytes) |
 | 41 | `HIDDEN_TYPE` | blob | hidden-block type (2 bytes) |
-| 42 | `HIDDEN_DAMAGE` | blob | hidden damage block (8 bytes) |
-| 43 | `PLAYER_NUMBER` | blob | playerinfo player number |
-| 44 | `PLAYER_MODEL` | blob | playerinfo model |
-| 45 | `PLAYER_SKIN` | blob | playerinfo skin |
-| 46 | `PLAYER_EFFECTS` | blob | playerinfo effects |
-| 47 | `ENTITY_HEADER` | blob | delta packet-entities "from" byte |
-| 48 | `ENTITY_MODEL` | blob | modelindex (1 or 2 bytes) |
-| 49 | `ENTITY_FRAME` | blob | frame |
-| 50 | `ENTITY_MISC` | blob | colormap, skin, effects, FTE trans/scale/fatness/colormod |
-| 51 | `STAT_LONG_INDEX` | blob | svc_updatestatlong index |
-| 52 | `SOUND_MISC` | blob | sound volume, attenuation |
-| 53 | `TEMP_ENTITY_MISC` | blob | temp-entity entity (2 bytes) or count (1 byte) |
-| 54 | `PRINT_LEVEL` | blob | svc_print level |
-| 55 | `FRAGS` | blob | svc_updatefrags (3 bytes) |
-| 56 | `STAT_LONG_VALUE` | blob | svc_updatestatlong value (4 bytes) |
-| 57 | `RAW` | blob | escaped payload bytes |
-| 58 | `TAIL` | blob | unframed bytes at the end of the segment |
-| 59 | `SET` | blob | dem_set bodies (8 bytes each) |
-| 60 | `TEXT` | blob | string bodies of svc 8 (after the level), 9 and 26 |
-| 61 | `PING` | blob | bodies of svc 36, 37 and 53 |
-| 62 | `NAILS` | blob | bodies of svc 43 and 54 |
-| 63 | `HIDDEN_MISC` | blob | hidden-block bodies other than damage |
-| 64 | `SOUND_FLOAT` | blob | sound origins with float coordinates (12 bytes) |
-| 65 | `TEMP_ENTITY_FLOAT` | blob | temp-entity origins with float coordinates |
-| 66 + c | `GENERIC` + c | blob | body of every other svc command c (including 11, serverdata) |
+| 42 | `PLAYER_NUMBER` | blob | playerinfo player number |
+| 43 | `PLAYER_MODEL` | blob | playerinfo model |
+| 44 | `PLAYER_SKIN` | blob | playerinfo skin |
+| 45 | `PLAYER_EFFECTS` | blob | playerinfo effects |
+| 46 | `ENTITY_HEADER` | blob | delta packet-entities "from" byte |
+| 47 | `ENTITY_MODEL` | blob | modelindex (1 or 2 bytes) |
+| 48 | `ENTITY_FRAME` | blob | frame |
+| 49 | `ENTITY_MISC` | blob | colormap, skin, effects, FTE trans/scale/fatness/colormod |
+| 50 | `SOUND_MISC` | blob | sound volume, attenuation |
+| 51 | `TEMP_ENTITY_MISC` | blob | temp-entity entity (2 bytes) or count (1 byte) |
+| 52 | `RAW` | blob | escaped payload bytes |
+| 53 | `TAIL` | blob | unframed bytes at the end of the segment |
+| 54 | `SET` | blob | dem_set bodies (8 bytes each) |
+| 55 | `NAILS` | blob | bodies of svc 43 and 54 |
+| 56 | `HIDDEN_MISC` | blob | hidden-block bodies other than usercmd blocks (4.11) |
+| 57 | `SOUND_FLOAT` | blob | sound origins with float coordinates (12 bytes) |
+| 58 | `TEMP_ENTITY_FLOAT` | blob | temp-entity origins with float coordinates |
+| 59 + c | `GENERIC` + c | blob | body of every other svc command c (including 11, serverdata) |
 
 ### 3.3 Decoding a segment (`decode.rs:decode_segment`, `segment.rs:decode`)
 
@@ -594,13 +587,8 @@ for the first), updated after `command()` returns.
 | `SVC_PLAYER_INFO` | section 4.7 |
 | `SVC_PACKET_ENTITIES`, `SVC_DELTA_PACKET_ENTITIES` | section 4.8 |
 | `SVC_UPDATE_STAT` | `i = code_symbol(STAT_INDEX, stat_previous_index \| (previous_command << 8))`; `prev = stats[target][i]`; `v = code_symbol_residual(STAT_VALUE, i \| (stat_previous_residual << 8), prev)`; `stat_previous_index = i`; `stat_previous_residual = v - prev` (mod 256); `stats[target][i] = v` |
-| `SVC_UPDATE_STAT_LONG` | `code_blob_byte(STAT_LONG_INDEX)`; `copy_blob(STAT_LONG_VALUE, 4)` |
 | `SVC_SOUND` | section 4.9 |
 | `SVC_TEMP_ENTITY` | section 4.10 |
-| `SVC_PRINT` | `code_blob_byte(PRINT_LEVEL)`; `copy_command_body(TEXT, SVC_STUFF_TEXT)` (one string) |
-| `SVC_STUFF_TEXT`, `SVC_CENTER_PRINT` (26) | `copy_command_body(TEXT, SVC_STUFF_TEXT)` |
-| `SVC_UPDATE_FRAGS` | `copy_blob(FRAGS, 3)` |
-| `SVC_UPDATE_PING`, `SVC_UPDATE_ENTER_TIME`, `SVC_UPDATE_PL` | `copy_command_body(PING, c)` |
 | `SVC_NAILS`, `SVC_NAILS_2` | `copy_command_body(NAILS, c)` |
 | `SVC_SERVER_DATA` | `start = p`; `copy_command_body(GENERIC + 11, SVC_SERVER_DATA)`; if no error: `protocol.observe_server_data(dst[start..p])` |
 | any other | `copy_command_body(GENERIC + c, c)` |
@@ -781,9 +769,8 @@ loop:
     if tag != 1: error; return
     len  = code_blob_bytes(HIDDEN_LENGTH, 4)
     type = code_blob_bytes(HIDDEN_TYPE, 2)
-    if type == MVD_HIDDEN_DMG_DONE (7) and len == 8:   copy_blob(HIDDEN_DAMAGE, 8)
-    elif type == MVD_HIDDEN_USERCMD (1) and len == 23: usercmd()
-    else:                                              copy_blob(HIDDEN_MISC, len)
+    if type == MVD_HIDDEN_USERCMD (1) and len == 23: usercmd()
+    else:                                            copy_blob(HIDDEN_MISC, len)
 ```
 
 **usercmd blocks** (`SegmentWalker::usercmd`). mvdsv writes one hidden block of

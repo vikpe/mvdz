@@ -378,7 +378,7 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     add(
         "table-id",
         with_table(&edited),
-        "a blob stream with id 322, past the last",
+        "a blob stream with id 315, past the last",
     );
     let mut edited = table.clone();
     edited.entries[last_blob].0 = table.entries[blob_at[blob_at.len() - 2]].0;
@@ -555,11 +555,11 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         ..structural_entry.clone()
     };
     let mut edited = entries.clone();
-    edited.push(as_stream(crate::streams::TEXT));
+    edited.push(as_stream(crate::streams::TAIL));
     add(
         "tables-blob-id",
         with_entries(&edited),
-        "a model for a blob stream (text)",
+        "a model for a blob stream (the tail)",
     );
     let mut edited = entries.clone();
     edited.push(as_stream(crate::streams::STREAM_COUNT));

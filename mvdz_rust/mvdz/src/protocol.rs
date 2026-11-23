@@ -15,7 +15,6 @@ pub(crate) const DEM_SET: u8 = 2;
 pub(crate) const DEM_SINGLE: u8 = 4;
 pub(crate) const DEM_STATS: u8 = 5;
 
-pub(crate) const SVC_CENTER_PRINT: u8 = 26;
 pub(crate) const SVC_DAMAGE: u8 = 19;
 pub(crate) const SVC_DELTA_PACKET_ENTITIES: u8 = 48;
 pub(crate) const SVC_NAILS: u8 = 43;
@@ -28,10 +27,8 @@ pub(crate) const SVC_SET_INFO: u8 = 51;
 pub(crate) const SVC_SOUND: u8 = 6;
 pub(crate) const SVC_STUFF_TEXT: u8 = 9;
 pub(crate) const SVC_TEMP_ENTITY: u8 = 23;
-pub(crate) const SVC_UPDATE_ENTER_TIME: u8 = 37;
 pub(crate) const SVC_UPDATE_FRAGS: u8 = 14;
 pub(crate) const SVC_UPDATE_PING: u8 = 36;
-pub(crate) const SVC_UPDATE_PL: u8 = 53;
 pub(crate) const SVC_UPDATE_STAT: u8 = 3;
 pub(crate) const SVC_UPDATE_STAT_LONG: u8 = 38;
 
@@ -159,6 +156,7 @@ impl ProtocolState {
     fn size_inner(&self, command: u8, rest: &mut &[u8]) -> Option<()> {
         const SVC_BIG_KICK: u8 = 35;
         const SVC_CD_TRACK: u8 = 32;
+        const SVC_CENTER_PRINT: u8 = 26;
         const SVC_CHOKE_COUNT: u8 = 44;
         const SVC_DISCONNECT: u8 = 2;
         const SVC_DOWNLOAD: u8 = 41;
@@ -182,6 +180,8 @@ impl ProtocolState {
         const SVC_SPAWN_BASELINE: u8 = 22;
         const SVC_SPAWN_STATIC: u8 = 20;
         const SVC_SPAWN_STATIC_SOUND: u8 = 29;
+        const SVC_UPDATE_ENTER_TIME: u8 = 37;
+        const SVC_UPDATE_PL: u8 = 53;
         const SVC_UPDATE_USER_INFO: u8 = 40;
 
         const TE_EXPLOSION: u8 = 3;

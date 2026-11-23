@@ -7,24 +7,23 @@ use crate::numeric::{AxisTrack, FloatTrack, time_deltas};
 use crate::protocol::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
     DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS,
-    ORIGIN_ANGLE_FLAGS, ProtocolState, SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT, SVC_DAMAGE,
+    ORIGIN_ANGLE_FLAGS, ProtocolState, SND_ATTENUATION, SND_VOLUME, SVC_DAMAGE,
     SVC_DELTA_PACKET_ENTITIES, SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES, SVC_PLAYER_INFO,
     SVC_PRINT, SVC_SERVER_DATA, SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT, SVC_TEMP_ENTITY,
-    SVC_UPDATE_ENTER_TIME, SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_PL, SVC_UPDATE_STAT,
-    SVC_UPDATE_STAT_LONG, TE_BLOOD, TE_GUNSHOT, TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3,
-    U_COLOR_MAP, U_EFFECTS, U_FRAME, U_FTE_COLOR_MOD, U_FTE_ENTITY_DBL, U_FTE_ENTITY_DBL_2,
-    U_FTE_EVEN_MORE, U_FTE_FATNESS, U_FTE_MODEL_DBL, U_FTE_SCALE, U_FTE_TRANS, U_FTE_YET_MORE,
-    U_MODEL, U_MORE_BITS, U_SKIN, frame_len,
+    SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_STAT, SVC_UPDATE_STAT_LONG, TE_BLOOD, TE_GUNSHOT,
+    TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3, U_COLOR_MAP, U_EFFECTS, U_FRAME,
+    U_FTE_COLOR_MOD, U_FTE_ENTITY_DBL, U_FTE_ENTITY_DBL_2, U_FTE_EVEN_MORE, U_FTE_FATNESS,
+    U_FTE_MODEL_DBL, U_FTE_SCALE, U_FTE_TRANS, U_FTE_YET_MORE, U_MODEL, U_MORE_BITS, U_SKIN,
+    frame_len,
 };
 use crate::streams::{
     COMMAND, ENTITY_ANGLE, ENTITY_BITS, ENTITY_FLOAT_ORIGIN, ENTITY_FRAME, ENTITY_GAP,
-    ENTITY_HEADER, ENTITY_MISC, ENTITY_MODEL, ENTITY_MORE, ENTITY_ORIGIN, ESCAPE_LENGTH, FRAGS,
-    GENERIC, HIDDEN_DAMAGE, HIDDEN_LENGTH, HIDDEN_MISC, HIDDEN_TAG, HIDDEN_TYPE, MASK, NAILS, PING,
-    PLAYER_ANGLE, PLAYER_EFFECTS, PLAYER_FLAGS, PLAYER_FLOAT_ORIGIN, PLAYER_FRAME, PLAYER_MODEL,
-    PLAYER_NUMBER, PLAYER_ORIGIN, PLAYER_SKIN, PLAYER_WEAPON_FRAME, PRINT_LEVEL, RAW, SET,
-    SOUND_CHANNEL, SOUND_FLOAT, SOUND_MISC, SOUND_NUMBER, SOUND_ORIGIN, STAT_INDEX,
-    STAT_LONG_INDEX, STAT_LONG_VALUE, STAT_VALUE, TAIL, TEMP_ENTITY_FLOAT, TEMP_ENTITY_MISC,
-    TEMP_ENTITY_ORIGIN, TEMP_ENTITY_TYPE, TEXT, TIME, TYPE, USERCMD, USERCMD_ANGLE,
+    ENTITY_HEADER, ENTITY_MISC, ENTITY_MODEL, ENTITY_MORE, ENTITY_ORIGIN, ESCAPE_LENGTH, GENERIC,
+    HIDDEN_LENGTH, HIDDEN_MISC, HIDDEN_TAG, HIDDEN_TYPE, MASK, NAILS, PLAYER_ANGLE, PLAYER_EFFECTS,
+    PLAYER_FLAGS, PLAYER_FLOAT_ORIGIN, PLAYER_FRAME, PLAYER_MODEL, PLAYER_NUMBER, PLAYER_ORIGIN,
+    PLAYER_SKIN, PLAYER_WEAPON_FRAME, RAW, SET, SOUND_CHANNEL, SOUND_FLOAT, SOUND_MISC,
+    SOUND_NUMBER, SOUND_ORIGIN, STAT_INDEX, STAT_VALUE, TAIL, TEMP_ENTITY_FLOAT, TEMP_ENTITY_MISC,
+    TEMP_ENTITY_ORIGIN, TEMP_ENTITY_TYPE, TIME, TYPE, USERCMD, USERCMD_ANGLE,
 };
 
 /// Every `context` fits in 16 bits, the rANS table key (FORMAT.md section 6.2).
@@ -36,6 +35,16 @@ pub(crate) trait SymbolIo {
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);
     fn take_blob(&mut self, stream: usize, len: usize) -> Option<&[u8]>;
     fn blob_rest(&self, stream: usize) -> &[u8];
+    /// A measurement (`segment/stats.rs`): the command without its layout.
+    #[cfg(feature = "stats")]
+    fn is_generic(&self, _command: u8) -> bool {
+        false
+    }
+    /// A measurement (`segment/stats.rs`): the hidden block type without its layout.
+    #[cfg(feature = "stats")]
+    fn is_hidden_misc(&self, _block_type: u32) -> bool {
+        false
+    }
 }
 
 /// FORMAT.md sections 5.3 and 5.4.
@@ -550,6 +559,11 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     }
 
     fn command(&mut self, command: u8) {
+        #[cfg(feature = "stats")]
+        if self.io.is_generic(command) {
+            self.copy_command_body(GENERIC + command as usize, command);
+            return;
+        }
         match command {
             SVC_PLAYER_INFO => self.player_info(),
             SVC_PACKET_ENTITIES | SVC_DELTA_PACKET_ENTITIES => {
@@ -571,25 +585,8 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 self.stat_previous_residual = value.wrapping_sub(previous);
                 self.stats[player][stat as usize] = value;
             }
-            SVC_UPDATE_STAT_LONG => {
-                self.code_blob_byte(STAT_LONG_INDEX);
-                self.copy_blob(STAT_LONG_VALUE, 4);
-            }
             SVC_SOUND => self.sound(),
             SVC_TEMP_ENTITY => self.temp_entity(),
-            SVC_PRINT => {
-                self.code_blob_byte(PRINT_LEVEL);
-                self.copy_command_body(TEXT, SVC_STUFF_TEXT);
-            }
-            SVC_STUFF_TEXT | SVC_CENTER_PRINT => {
-                self.copy_command_body(TEXT, SVC_STUFF_TEXT);
-            }
-            SVC_UPDATE_FRAGS => {
-                self.copy_blob(FRAGS, 3);
-            }
-            SVC_UPDATE_PING | SVC_UPDATE_ENTER_TIME | SVC_UPDATE_PL => {
-                self.copy_command_body(PING, command);
-            }
             SVC_NAILS | SVC_NAILS_2 => {
                 self.copy_command_body(NAILS, command);
             }
@@ -1003,7 +1000,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     /// `dem_multiple` with mask 0: blocks of [u32 len][u16 type][len bytes].
     /// Tags: 1 block, 2 end, 0 escape (rest raw).
     fn hidden_payload(&mut self, end: usize) {
-        const MVD_HIDDEN_DMG_DONE: u32 = 7;
         const MVD_HIDDEN_USERCMD: u32 = 1;
         loop {
             if self.has_error {
@@ -1040,9 +1036,12 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             }
             let block_len = self.code_blob_bytes(HIDDEN_LENGTH, 4);
             let block_type = self.code_blob_bytes(HIDDEN_TYPE, 2);
-            if block_type == MVD_HIDDEN_DMG_DONE && block_len == 8 {
-                self.copy_blob(HIDDEN_DAMAGE, 8);
-            } else if block_type == MVD_HIDDEN_USERCMD && block_len == 23 {
+            #[cfg(feature = "stats")]
+            if self.io.is_hidden_misc(block_type) {
+                self.copy_blob(HIDDEN_MISC, block_len as usize);
+                continue;
+            }
+            if block_type == MVD_HIDDEN_USERCMD && block_len == 23 {
                 self.usercmd();
             } else {
                 self.copy_blob(HIDDEN_MISC, block_len as usize);

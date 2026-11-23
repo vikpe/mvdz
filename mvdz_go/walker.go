@@ -3,7 +3,6 @@ package mvdz
 import "encoding/binary"
 
 const (
-	hiddenDamageDone  = 7
 	hiddenUsercmd     = 1
 	hiddenUsercmdSize = 23
 )
@@ -232,22 +231,10 @@ func (walker *segmentWalker) command(command uint8) {
 		walker.packetEntities(command)
 	case svcUpdateStat:
 		walker.updateStat()
-	case svcUpdateStatLong:
-		walker.codeBlobByte(streamStatLongIndex)
-		walker.copyBlob(streamStatLongValue, 4)
 	case svcSound:
 		walker.sound()
 	case svcTempEntity:
 		walker.tempEntity()
-	case svcPrint:
-		walker.codeBlobByte(streamPrintLevel)
-		walker.copyCommandBody(streamText, svcStuffText)
-	case svcStuffText, svcCenterPrint:
-		walker.copyCommandBody(streamText, svcStuffText)
-	case svcUpdateFrags:
-		walker.copyBlob(streamFrags, 3)
-	case svcUpdatePing, svcUpdateEnterTime, svcUpdatePl:
-		walker.copyCommandBody(streamPing, command)
 	case svcNails, svcNails2:
 		walker.copyCommandBody(streamNails, command)
 	case svcServerData:
@@ -525,12 +512,9 @@ func (walker *segmentWalker) hiddenPayload() {
 		}
 		length := walker.codeBlobBytes(streamHiddenLength, 4)
 		blockType := walker.codeBlobBytes(streamHiddenType, 2)
-		switch {
-		case blockType == hiddenDamageDone && length == 8:
-			walker.copyBlob(streamHiddenDamage, 8)
-		case blockType == hiddenUsercmd && length == hiddenUsercmdSize:
+		if blockType == hiddenUsercmd && length == hiddenUsercmdSize {
 			walker.usercmd()
-		default:
+		} else {
 			walker.copyBlob(streamHiddenMisc, length)
 		}
 	}

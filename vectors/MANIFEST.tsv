@@ -43,7 +43,7 @@ hostile-lz-overrun.mvdz	error: corrupt: blob tokens	-	a match of 9 bytes where 3
 hostile-tail-long.mvdz	error: corrupt: structure	-	a `TAIL` stream of raw_len + 1 bytes
 hostile-stored-len.mvdz	error: corrupt: stored segment	-	a stored segment of 4 bytes holding 3
 hostile-table-count.mvdz	error: corrupt: stream count	-	a stream table declaring 323 streams
-hostile-table-id.mvdz	error: corrupt: stream id	-	a blob stream with id 322, past the last
+hostile-table-id.mvdz	error: corrupt: stream id	-	a blob stream with id 315, past the last
 hostile-table-dup-id.mvdz	error: corrupt: stream order	-	the last blob stream's id set to the one before it (the same id twice)
 hostile-table-order.mvdz	error: corrupt: stream order	-	the first two streams swapped, entries and bodies (stream ids not increasing)
 hostile-table-blob-total.mvdz	error: corrupt: blob streams	-	the last blob stream's size raised so the blob sizes sum to 2 * raw_len + 1
@@ -56,7 +56,7 @@ hostile-tables-no-entry.mvdz	error: corrupt: stream without a model	-	the models
 hostile-tables-missing.mvdz	error: corrupt: stream without a model	-	an empty models block: rANS streams without a model
 hostile-tables-order.mvdz	error: corrupt: tables	-	two entries of the models block swapped (stream ids not increasing)
 hostile-tables-dup-id.mvdz	error: corrupt: tables	-	an entry of the models block repeated (the same stream id twice)
-hostile-tables-blob-id.mvdz	error: corrupt: tables	-	a model for a blob stream (text)
+hostile-tables-blob-id.mvdz	error: corrupt: tables	-	a model for a blob stream (the tail)
 hostile-tables-unassigned-id.mvdz	error: corrupt: tables	-	a model for a stream id past the last
 hostile-tables-empty.mvdz	error: corrupt: tables	-	a models block with n = 0
 hostile-tables-trailing.mvdz	error: corrupt: tables	-	a models block with one byte after its last entry
