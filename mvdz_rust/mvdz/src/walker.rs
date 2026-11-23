@@ -45,20 +45,15 @@ pub(crate) trait SymbolIo {
     }
 }
 
-/// FORMAT.md sections 5.3 and 5.4.
-#[derive(Debug, Clone, Copy, Default)]
-struct PlayerTracks {
-    origins: [AxisTrack; 3],
-    angles: [AxisTrack; 3],
-    /// Of the player's last two records.
-    frame_times: (u32, u32),
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 struct PlayerState {
     flags: u16,
     frame: u8,
     weapon_frame: u8,
+    origins: [AxisTrack; 3], // FORMAT.md section 5.3
+    angles: [AxisTrack; 3],  // FORMAT.md section 5.4
+    frame_times: (u32, u32),
+    float_origins: [FloatTrack; 3], // FORMAT.md section 5.2
 }
 
 /// The previous usercmd fields of one player (FORMAT.md section 4.11).
@@ -70,6 +65,7 @@ struct UsercmdState {
     buttons: u8,
     impulse: u8,
     moves: [u16; 3],
+    angles: [AxisTrack; 3], // FORMAT.md section 5.6
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -80,6 +76,8 @@ struct EntityState {
     model: u8,
     bits: u8,
     last_packet: u32,
+    origins: [AxisTrack; 3],        // FORMAT.md section 5.5
+    float_origins: [FloatTrack; 3], // FORMAT.md section 5.2
 }
 
 #[derive(Debug)]
@@ -93,11 +91,6 @@ pub(crate) struct SegmentWalker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     players: Box<[PlayerState; 256]>,
     entities: Box<[EntityState; 2048]>,
     stats: Box<[[u8; 256]; 32]>,
-    player_tracks: Vec<PlayerTracks>,
-    player_float_origins: Vec<[FloatTrack; 3]>,
-    entity_origins: Vec<[AxisTrack; 3]>,
-    entity_float_origins: Vec<[FloatTrack; 3]>,
-    usercmd_tracks: Vec<[AxisTrack; 3]>,
     temp_entity_last: [u16; 3],
     time: u32,
     target: u8,
@@ -142,11 +135,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             players: Box::new([PlayerState::default(); 256]),
             entities: Box::new([EntityState::default(); 2048]),
             stats: Box::new([[0u8; 256]; 32]),
-            player_tracks: vec![PlayerTracks::default(); 256],
-            player_float_origins: vec![[FloatTrack::default(); 3]; 256],
-            entity_origins: vec![[AxisTrack::default(); 3]; 2048],
-            entity_float_origins: vec![[FloatTrack::default(); 3]; 2048],
-            usercmd_tracks: vec![[AxisTrack::default(); 3]; 256],
             temp_entity_last: [0; 3],
             time: 0,
             target: 0,
@@ -208,7 +196,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     fn player_origin(&self, entity: usize) -> Option<[u16; 3]> {
         (1..=32)
             .contains(&entity)
-            .then(|| self.player_tracks[entity - 1].origins.map(AxisTrack::last))
+            .then(|| self.players[entity - 1].origins.map(AxisTrack::last))
     }
 
     /// A 16-bit numeric field and its residual (FORMAT.md section 5.1).
@@ -647,14 +635,14 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         const DF_DEAD: u16 = 1 << 8;
         const DF_GIB: u16 = 1 << 9;
         let number = self.code_blob_byte(PLAYER_NUMBER);
-        let previous = self.players[number as usize];
-        let flags = self.player_info_flags(previous.flags);
+        let mut player = self.players[number as usize];
+        let flags = self.player_info_flags(player.flags);
         let frame = self.code_symbol_residual(
             PLAYER_FRAME,
-            u32::from(previous.frame) | u32::from(flags & (DF_DEAD | DF_GIB)),
-            previous.frame,
+            u32::from(player.frame) | u32::from(flags & (DF_DEAD | DF_GIB)),
+            player.frame,
         );
-        self.player_origins_and_angles(number, flags);
+        self.player_origins_and_angles(&mut player, flags);
         if flags & DF_MODEL != 0 {
             self.code_blob_byte(PLAYER_MODEL);
         }
@@ -664,36 +652,28 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         if flags & DF_EFFECTS != 0 {
             self.code_blob_byte(PLAYER_EFFECTS);
         }
-        let weapon_frame = if flags & DF_WEAPON_FRAME != 0 {
-            self.code_symbol_residual(
+        if flags & DF_WEAPON_FRAME != 0 {
+            player.weapon_frame = self.code_symbol_residual(
                 PLAYER_WEAPON_FRAME,
-                u32::from(previous.weapon_frame),
-                previous.weapon_frame,
-            )
-        } else {
-            previous.weapon_frame
-        };
-        self.players[number as usize] = PlayerState {
-            flags,
-            frame,
-            weapon_frame,
-        };
+                u32::from(player.weapon_frame),
+                player.weapon_frame,
+            );
+        }
+        player.flags = flags;
+        player.frame = frame;
+        self.players[number as usize] = player;
     }
 
     /// FORMAT.md sections 5.3 and 5.4.
-    fn player_origins_and_angles(&mut self, number: u8, flags: u16) {
-        let player = number as usize;
-        let mut tracks = self.player_tracks[player];
-        let time_deltas = time_deltas(&mut tracks.frame_times, self.time);
+    fn player_origins_and_angles(&mut self, player: &mut PlayerState, flags: u16) {
+        let time_deltas = time_deltas(&mut player.frame_times, self.time);
         if self.protocol.has_float_coords {
-            let mut float_origins = self.player_float_origins[player];
-            for (axis, track) in float_origins.iter_mut().enumerate() {
+            for (axis, track) in player.float_origins.iter_mut().enumerate() {
                 let is_sent = flags & DF_ORIGIN << axis != 0;
                 self.float_origin(PLAYER_FLOAT_ORIGIN + axis, axis, is_sent, track);
             }
-            self.player_float_origins[player] = float_origins;
         } else {
-            for (axis, track) in tracks.origins.iter_mut().enumerate() {
+            for (axis, track) in player.origins.iter_mut().enumerate() {
                 if flags & DF_ORIGIN << axis == 0 {
                     track.hold();
                     continue;
@@ -705,7 +685,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 track.push(value, residual);
             }
         }
-        for (axis, track) in tracks.angles.iter_mut().enumerate() {
+        for (axis, track) in player.angles.iter_mut().enumerate() {
             if flags & DF_ANGLES << axis == 0 {
                 track.hold();
                 continue;
@@ -716,7 +696,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             let (value, residual) = self.code_u16(PLAYER_ANGLE + axis, context, prediction);
             track.push(value, residual);
         }
-        self.player_tracks[player] = tracks;
     }
 
     fn packet_entities(&mut self, is_delta: bool) {
@@ -840,12 +819,11 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {
             let is_origin_sent = bits & origin_flag != 0;
             if self.protocol.has_float_coords {
-                let mut track = self.entity_float_origins[number][axis];
                 let stream = ENTITY_FLOAT_ORIGIN + axis;
-                self.float_origin(stream, axis, is_origin_sent, &mut track);
-                self.entity_float_origins[number][axis] = track;
+                let track = &mut state.float_origins[axis];
+                self.float_origin(stream, axis, is_origin_sent, track);
             } else {
-                let mut track = self.entity_origins[number][axis];
+                let track = &mut state.origins[axis];
                 if is_origin_sent {
                     let context = clamped_bucket(track.residual(), 17)
                         | clamped_bucket(track.velocity(), 17) << 5
@@ -856,7 +834,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 } else {
                     track.hold();
                 }
-                self.entity_origins[number][axis] = track;
             }
             if bits & angle_flag != 0 {
                 if self.protocol.has_fte_float_coords {
@@ -909,7 +886,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         let (origin, kind) = if let Some(origin) = self.player_origin(entity) {
             (origin, 1)
         } else {
-            (self.entity_origins[entity].map(AxisTrack::last), 2)
+            (self.entities[entity].origins.map(AxisTrack::last), 2)
         };
         for (axis, prediction) in origin.into_iter().enumerate() {
             let context = axis as u32 | kind << 2 | u32::from(sound_number) << 4;
@@ -1048,8 +1025,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             return;
         }
         state.grid = grid;
-        let mut tracks = self.usercmd_tracks[player as usize];
-        for (axis, track) in tracks.iter_mut().enumerate() {
+        for (axis, track) in state.angles.iter_mut().enumerate() {
             if grid & (1 << axis) != 0 {
                 self.usercmd_grid_angle(axis, track);
             } else {
@@ -1058,7 +1034,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 }
             }
         }
-        self.usercmd_tracks[player as usize] = tracks;
         for (axis, axis_move) in state.moves.iter_mut().enumerate() {
             let low = self.code_symbol(
                 USERCMD,

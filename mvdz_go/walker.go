@@ -40,25 +40,22 @@ type segmentWalker struct {
 	entities               [2048]entityState
 	stats                  [32][256]uint8
 	packetNumber           uint32
-
-	// FORMAT.md section 5
-	playerTracks       [256]playerTracks
-	playerFloatOrigins [256][3]floatTrack
-	entityOrigins      [2048][3]axisTrack
-	entityFloatOrigins [2048][3]floatTrack
-	usercmdTracks      [256][3]axisTrack
-	tempEntityLast     [3]uint16
+	tempEntityLast         [3]uint16
 }
 
 type playerState struct {
-	flags       uint16
-	frame       uint8
-	weaponFrame uint8
+	flags           uint16
+	frame           uint8
+	weaponFrame     uint8
+	origins, angles [3]axisTrack // FORMAT.md sections 5.3 and 5.4
+	times           frameTimes
+	floatOrigins    [3]floatTrack // FORMAT.md section 5.2
 }
 
 type usercmdState struct {
 	drop, msec, grid, buttons, impulse uint8
 	moves                              [3]uint16
+	angles                             [3]axisTrack // FORMAT.md section 5.6
 }
 
 type entityState struct {
@@ -68,6 +65,8 @@ type entityState struct {
 	model          uint8
 	bits           uint8
 	lastPacket     uint32
+	origins        [3]axisTrack  // FORMAT.md section 5.5
+	floatOrigins   [3]floatTrack // FORMAT.md section 5.2
 }
 
 func newWalker(segment []byte, streams *segmentStreams) *segmentWalker {
@@ -260,7 +259,7 @@ func (walker *segmentWalker) playerInfo() {
 	frameContext := uint16(player.frame) | flags&(dfDead|dfGib)
 	frame := walker.codeSymbolResidual(streamPlayerFrame, frameContext, player.frame)
 
-	walker.playerOriginsAndAngles(number, flags)
+	walker.playerOriginsAndAngles(player, flags)
 
 	if flags&dfModel != 0 {
 		walker.codeBlobByte(streamPlayerModel)
@@ -271,11 +270,11 @@ func (walker *segmentWalker) playerInfo() {
 	if flags&dfEffects != 0 {
 		walker.codeBlobByte(streamPlayerEffects)
 	}
-	weaponFrame := player.weaponFrame
 	if flags&dfWeaponFrame != 0 {
-		weaponFrame = walker.codeSymbolResidual(streamPlayerWeaponFrame, uint16(weaponFrame), weaponFrame)
+		player.weaponFrame = walker.codeSymbolResidual(streamPlayerWeaponFrame, uint16(player.weaponFrame), player.weaponFrame)
 	}
-	*player = playerState{flags, frame, weaponFrame}
+	player.flags = flags
+	player.frame = frame
 }
 
 // playerInfoFlags decodes the flags as the bits that changed since previous.
@@ -380,7 +379,7 @@ func (walker *segmentWalker) entityDelta(word uint16) {
 	}
 	for axis := range 3 {
 		isOriginSent := bits&entityOriginBits[axis] != 0
-		walker.entityOrigin(number, axis, isOriginSent, isInPrevious)
+		walker.entityOrigin(entity, axis, isOriginSent, isInPrevious)
 		if bits&entityAngleBits[axis] != 0 {
 			walker.entityAngle(entity, axis)
 		}
@@ -433,9 +432,9 @@ func (walker *segmentWalker) sound() {
 	}
 	isPlayer := 1 <= entity && entity <= 32
 	if isPlayer {
-		walker.soundOrigin(lastValues(&walker.playerTracks[entity-1].origins), 1, number)
+		walker.soundOrigin(lastValues(&walker.players[entity-1].origins), 1, number)
 	} else {
-		walker.soundOrigin(lastValues(&walker.entityOrigins[entity]), 2, number)
+		walker.soundOrigin(lastValues(&walker.entities[entity].origins), 2, number)
 	}
 }
 
@@ -455,7 +454,7 @@ func (walker *segmentWalker) tempEntity() {
 		entity := walker.codeBlobBytes(streamTempEntityMisc, 2)
 		isPlayer := 1 <= entity && entity <= 32
 		if isPlayer {
-			beamOrigin = lastValues(&walker.playerTracks[entity-1].origins)
+			beamOrigin = lastValues(&walker.players[entity-1].origins)
 		}
 		isBeam = true
 	case teGunshot, teBlood:
@@ -521,7 +520,7 @@ func (walker *segmentWalker) usercmd() {
 	for axis := range 3 {
 		isOnGrid := grid&(1<<axis) != 0
 		if isOnGrid {
-			walker.usercmdGridAngle(axis, &walker.usercmdTracks[player][axis])
+			walker.usercmdGridAngle(axis, &state.angles[axis])
 			continue
 		}
 		for index := range uint16(4) {

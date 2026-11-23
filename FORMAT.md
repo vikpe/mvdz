@@ -461,15 +461,11 @@ Fresh for every segment; zero unless noted:
 | `stat_previous_residual` | u8 | 0 | reset to 0 at each payload start |
 | `last_header` | u8 | 0 | per segment |
 | `previous_temp_entity` | u8 | 0 | per segment |
-| `players[256]` | {flags u16, frame u8, weapon_frame u8} | 0 | per player number |
+| `players[256]` | {flags u16, frame u8, weapon_frame u8; origins[3], angles[3] AxisTrack; frame_times (u32, u32); float_origins[3] FloatTrack} | 0 | per player number; the tracks per sections 5.2 to 5.4 |
 | `usercmd_previous_players[2]` | u8 | 0 | per segment |
-| `usercmds[256]` | {drop, msec, grid, buttons, impulse u8; moves[3] u16} | 0 | per usercmd player number |
-| `entities[2048]` | {angles[3] u8, angle_residuals[3] u8, frame u8, model u8, bits u8, last_packet u32} | 0 | per entity number |
+| `usercmds[256]` | {drop, msec, grid, buttons, impulse u8; moves[3] u16; angles[3] AxisTrack} | 0 | per usercmd player number; the tracks per section 5.6 |
+| `entities[2048]` | {angles[3] u8, angle_residuals[3] u8, frame u8, model u8, bits u8, last_packet u32; origins[3] AxisTrack; float_origins[3] FloatTrack} | 0 | per entity number; the tracks per sections 5.2 and 5.5 |
 | `stats[32][256]` | u8 | 0 | per (target, stat index) |
-| `player_tracks[256]` | {origins[3], angles[3]: AxisTrack; frame_times: (u32, u32)} | 0 | per player number, sections 5.3 and 5.4 |
-| `entity_origins[2048][3]` | AxisTrack | 0 | per entity number and axis, section 5.5 |
-| `player_float_origins[256][3]`, `entity_float_origins[2048][3]` | FloatTrack | 0 | per number and axis, section 5.2 |
-| `usercmd_tracks[256][3]` | AxisTrack | 0 | per usercmd player number and axis, section 5.6 |
 | `temp_entity_last[3]` | u16 | 0 | the latest temp-entity point, section 5.6 |
 | `packet_number` | u32 | 1 | packet counter |
 | `protocol` | ProtocolState | the transform header's | section 4.1 |
@@ -594,16 +590,15 @@ for the first), updated after `command()` returns.
 
 ```
 number = code_blob_byte(PLAYER_NUMBER)
-ps = players[number]
+ps = players[number]                                     // by reference
 flags = player_info_flags(ps.flags)
 frame = code_symbol_residual(PLAYER_FRAME, ps.frame | (flags & (DF_DEAD | DF_GIB)), ps.frame)  // bits 8-9
-player_origins_and_angles(number, flags)                 // sections 5.3 and 5.4
+player_origins_and_angles(ps, flags)                     // sections 5.3 and 5.4
 if flags & DF_MODEL:    code_blob_byte(PLAYER_MODEL)
 if flags & DF_SKIN_NUM: code_blob_byte(PLAYER_SKIN)
 if flags & DF_EFFECTS:  code_blob_byte(PLAYER_EFFECTS)
-wf = ps.weapon_frame
-if flags & DF_WEAPON_FRAME: wf = code_symbol_residual(PLAYER_WEAPON_FRAME, ps.weapon_frame, ps.weapon_frame)
-players[number] = {flags, frame, wf}
+if flags & DF_WEAPON_FRAME: ps.weapon_frame = code_symbol_residual(PLAYER_WEAPON_FRAME, ps.weapon_frame, ps.weapon_frame)
+ps.flags = flags; ps.frame = frame
 ```
 
 `DF_DEAD` is 1<<8 and `DF_GIB` 1<<9. The origin coords come first (flag
@@ -677,7 +672,7 @@ if bits & U_COLOR_MAP: code_blob_byte(ENTITY_MISC)
 if bits & U_SKIN:      code_blob_byte(ENTITY_MISC)
 if bits & U_EFFECTS:   code_blob_byte(ENTITY_MISC)
 for i in 0..3 over (U_ORIGIN_1, U_ANGLE_1), (U_ORIGIN_2, U_ANGLE_2), (U_ORIGIN_3, U_ANGLE_3):
-    entity_origin(number, i, bits & origin_i, in_previous)           // section 5.5
+    entity_origin(es, i, bits & origin_i, in_previous)               // section 5.5
     if bits & angle_i:
         if protocol.has_fte_float_coords:
             code_symbol(ENTITY_ANGLE, 3 | (model << 6))
@@ -713,8 +708,8 @@ if ch & SND_ATTENUATION: code_blob_byte(SOUND_MISC)
 e = (ch >> 3) & 1023
 number = code_symbol(SOUND_NUMBER, (ch & 7) | (min(e, 33) << 3))
 if protocol.coord_size != 2: copy_blob(SOUND_FLOAT, 12); return
-if 1 <= e <= 32: origin = player_tracks[e - 1].origins; kind = 1
-else:            origin = entity_origins[e];            kind = 2
+if 1 <= e <= 32: origin = players[e - 1].origins; kind = 1
+else:            origin = entities[e].origins;    kind = 2
 for i in 0..3: code_u16(SOUND_ORIGIN, [i | kind << 2, number], origin[i].last)     // section 5.1
 ```
 
@@ -735,7 +730,7 @@ if c != 2:
     return
 if t in {TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3}:       // beams
     e = code_blob_bytes(TEMP_ENTITY_MISC, 2)
-    origin = (1 <= e <= 32) ? last of player_tracks[e - 1].origins : [0, 0, 0]
+    origin = (1 <= e <= 32) ? last of players[e - 1].origins : [0, 0, 0]
     temp_entity_beam(t, origin)                                  // section 5.6
 else:
     if t in {TE_GUNSHOT, TE_BLOOD}: code_blob_byte(TEMP_ENTITY_MISC)
@@ -781,7 +776,7 @@ usercmd():
     if grid > 7: error; return
     s.grid = grid
     for a in 0..3:
-        if grid & (1 << a): usercmd_grid_angle(a, usercmd_tracks[player][a])     // section 5.6
+        if grid & (1 << a): usercmd_grid_angle(a, s.angles[a])                 // section 5.6
         else: for k in 0..4: code_symbol(USERCMD, (4 << 12) | (a << 2) | k)
     for m in 0..3:
         lo = code_symbol(USERCMD, (5 << 12) | (m << 8) | (s.moves[m] & 0xff))
@@ -887,22 +882,21 @@ its width back.
 
 ### 5.3 Player origins: streams 16-18 and 27-29 (`SegmentWalker::player_origins_and_angles`)
 
-Called by `player_info` (4.7) with the player number and flags of the
+Called by `player_info` (4.7) with the player's state and the flags of the
 record. `time_deltas` runs for every record of the player, whatever its
 flags.
 
 ```
-player_origins_and_angles(number, flags):
-    t = player_tracks[number]
-    (now, before) = time_deltas(t.frame_times, time)
+player_origins_and_angles(ps, flags):
+    (now, before) = time_deltas(ps.frame_times, time)
     for a in 0..3:
         sent = flags & (DF_ORIGIN << a)
         if protocol.has_float_coords:                   // stream 27 + a
-            float_origin(27 + a, a, sent, player_float_origins[number][a])
+            float_origin(27 + a, a, sent, ps.float_origins[a])
         elif not sent:
-            t.origins[a].hold()
+            ps.origins[a].hold()
         else:                                           // stream 16 + a
-            s    = t.origins[a]
+            s    = ps.origins[a]
             pred = s.predict_time_scaled(now, before)
             f    = [residual_bucket(s.residual), residual_bucket(s.velocity)]
             v, r = code_u16(16 + a, f, pred)
@@ -918,7 +912,7 @@ The second loop of `player_origins_and_angles`, with the same `now` and
 `before`:
 
 ```
-s = t.angles[a]
+s = ps.angles[a]
 if not flags & (DF_ANGLES << a):
     s.hold()
 else:
@@ -933,16 +927,17 @@ Angles are 16-bit whether the coordinates are float or not.
 ### 5.5 Entity origins: streams 22-24 and 30-32 (`SegmentWalker::entity_delta`)
 
 Called by `entity_delta` (4.8) for every axis of every entity word, with
-the extended entity number (at most 511 + 512 + 1024 = 2047):
+`es`, the state of the extended entity number (at most 511 + 512 + 1024 =
+2047):
 
 ```
-entity_origin(number, a, sent, in_previous):
+entity_origin(es, a, sent, in_previous):
     if protocol.has_float_coords:                       // stream 30 + a
-        float_origin(30 + a, a, sent, entity_float_origins[number][a])
+        float_origin(30 + a, a, sent, es.float_origins[a])
     elif not sent:
-        entity_origins[number][a].hold()
+        es.origins[a].hold()
     else:                                               // stream 22 + a
-        s    = entity_origins[number][a]
+        s    = es.origins[a]
         f    = [residual_bucket(s.residual), residual_bucket(s.velocity), in_previous ? 1 : 0]
         v, r = code_u16(22 + a, f, s.predict_linear())
         s.push(v, r)
@@ -954,7 +949,7 @@ Entity origins use no time.
 
 **Usercmd angles, stream 33** (`SegmentWalker::usercmd_grid_angle`). Called
 by `usercmd` (4.11) for an angle on the grid, with `s =
-usercmd_tracks[player][a]`; the track of an angle off the grid is not
+usercmds[player].angles[a]`; the track of an angle off the grid is not
 touched.
 
 ```

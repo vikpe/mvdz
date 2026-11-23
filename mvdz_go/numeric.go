@@ -70,27 +70,21 @@ func (times *frameTimes) deltas(time uint32) (now, before int32) {
 	return now, before
 }
 
-type playerTracks struct {
-	origins, angles [3]axisTrack
-	times           frameTimes
-}
-
 func lastValues(tracks *[3]axisTrack) [3]uint16 {
 	return [3]uint16{tracks[0].last, tracks[1].last, tracks[2].last}
 }
 
 // FORMAT.md sections 5.3 and 5.4
-func (walker *segmentWalker) playerOriginsAndAngles(number uint8, flags uint16) {
-	tracks := &walker.playerTracks[number]
-	now, before := tracks.times.deltas(walker.time)
+func (walker *segmentWalker) playerOriginsAndAngles(player *playerState, flags uint16) {
+	now, before := player.times.deltas(walker.time)
 	hasFloatCoords := walker.protocol.hasFloatCoords()
 	for axis := range 3 {
 		isSent := flags&(dfOrigin<<axis) != 0
 		if hasFloatCoords {
-			walker.floatOrigin(streamPlayerFloatOrigin+axis, axis, isSent, &walker.playerFloatOrigins[number][axis])
+			walker.floatOrigin(streamPlayerFloatOrigin+axis, axis, isSent, &player.floatOrigins[axis])
 			continue
 		}
-		track := &tracks.origins[axis]
+		track := &player.origins[axis]
 		if !isSent {
 			track.hold()
 			continue
@@ -100,7 +94,7 @@ func (walker *segmentWalker) playerOriginsAndAngles(number uint8, flags uint16) 
 		track.push(value, residual)
 	}
 	for axis := range 3 {
-		track := &tracks.angles[axis]
+		track := &player.angles[axis]
 		isSent := flags&(dfAngles<<axis) != 0
 		if !isSent {
 			track.hold()
@@ -113,12 +107,12 @@ func (walker *segmentWalker) playerOriginsAndAngles(number uint8, flags uint16) 
 }
 
 // FORMAT.md section 5.5
-func (walker *segmentWalker) entityOrigin(number uint16, axis int, isSent, isInPrevious bool) {
+func (walker *segmentWalker) entityOrigin(entity *entityState, axis int, isSent, isInPrevious bool) {
 	if walker.protocol.hasFloatCoords() {
-		walker.floatOrigin(streamEntityFloatOrigin+axis, axis, isSent, &walker.entityFloatOrigins[number][axis])
+		walker.floatOrigin(streamEntityFloatOrigin+axis, axis, isSent, &entity.floatOrigins[axis])
 		return
 	}
-	track := &walker.entityOrigins[number][axis]
+	track := &entity.origins[axis]
 	if !isSent {
 		track.hold()
 		return
