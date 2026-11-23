@@ -155,6 +155,12 @@ the header's `size`. A file that ends before that is incomplete; bytes
 after that are an error ("trailing bytes"). An empty demo (`size` 0) has
 no segment.
 
+**One demo a file.** A demo that holds several matches is one demo here:
+the header describes all of it. Should one file ever hold several demos,
+each with its own size, duration and hash, the way is decided: whole files
+back to back, as gzip members, a reader going on to the next header where
+it reports trailing bytes today. Not in this version.
+
 **Segment boundaries.** Segments are independent: every walker and
 predictor state starts fresh in each segment, and the protocol state at
 its start is in its transform header (3.1). A reader does not check where
