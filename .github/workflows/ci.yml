@@ -55,3 +55,17 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - run: cargo build --lib --target wasm32-unknown-unknown
+
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mvdz_go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mvdz_go/go.mod
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...

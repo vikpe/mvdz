@@ -14,15 +14,15 @@ pub(crate) struct Tokens {
     /// Each under the byte before it, 0 before the first byte.
     pub(crate) literals: StreamSymbols,
     /// One per token, 0 for a literal.
-    pub(crate) lens: StreamSymbols,
+    pub(crate) lengths: StreamSymbols,
     /// One per match.
-    pub(crate) dists: StreamSymbols,
+    pub(crate) distances: StreamSymbols,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Token {
     Literal(u8),
-    Match { len: usize, dist: usize },
+    Match { len: usize, distance: usize },
 }
 
 pub(crate) fn tokens(bytes: &[u8]) -> Tokens {
@@ -32,8 +32,8 @@ pub(crate) fn tokens(bytes: &[u8]) -> Tokens {
 /// `tokens` as their streams code them; `bytes` is what they expand to.
 pub(crate) fn code(bytes: &[u8], tokens: &[Token]) -> Tokens {
     let mut literals = StreamWriter::default();
-    let mut lens = StreamWriter::default();
-    let mut dists = StreamWriter::default();
+    let mut lengths = StreamWriter::default();
+    let mut distances = StreamWriter::default();
     let mut position = 0usize;
     let mut previous_len = 0;
     for &token in tokens {
@@ -45,19 +45,19 @@ pub(crate) fn code(bytes: &[u8], tokens: &[Token]) -> Tokens {
                 position += 1;
                 0
             }
-            Token::Match { len, dist } => {
-                dists.push_value(bucket_context(len), coded_value(dist));
+            Token::Match { len, distance } => {
+                distances.push_value(bucket_context(len), coded_value(distance));
                 position += len;
                 len
             }
         };
-        lens.push_value(bucket_context(previous_len), coded_value(len));
+        lengths.push_value(bucket_context(previous_len), coded_value(len));
         previous_len = len;
     }
     Tokens {
         literals: literals.finish(),
-        lens: lens.finish(),
-        dists: dists.finish(),
+        lengths: lengths.finish(),
+        distances: distances.finish(),
     }
 }
 
@@ -94,7 +94,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Vec<Token> {
         let advance = if best_len >= MIN_MATCH {
             tokens.push(Token::Match {
                 len: best_len,
-                dist: position - best_start,
+                distance: position - best_start,
             });
             best_len
         } else {
@@ -128,17 +128,18 @@ pub(crate) fn expand(decoders: &mut [StreamDecoder], len: usize) -> Result<Vec<u
             let literal = decoders[LZ_LITERAL].symbol(u32::from(previous_byte));
             bytes.push(literal.ok_or(corrupt)?);
         } else {
-            let dist = decoders[LZ_DISTANCE]
+            let distance = decoders[LZ_DISTANCE]
                 .value(bucket_context(token_len))
                 .ok_or(corrupt)?;
-            let dist = usize::try_from(dist).map_err(|_| corrupt)?;
-            let is_inside = dist >= 1 && dist <= bytes.len() && token_len <= len - bytes.len();
+            let distance = usize::try_from(distance).map_err(|_| corrupt)?;
+            let is_inside =
+                distance >= 1 && distance <= bytes.len() && token_len <= len - bytes.len();
             if !is_inside {
                 return Err(corrupt);
             }
             // byte by byte: a match may run into the bytes it produces
             for _ in 0..token_len {
-                bytes.push(bytes[bytes.len() - dist]);
+                bytes.push(bytes[bytes.len() - distance]);
             }
         }
         previous_len = token_len;
@@ -167,6 +168,7 @@ fn common_prefix_len(earlier: &[u8], later: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Token, parse};
+    use crate::tests::common::Rng;
     use pretty_assertions::assert_eq;
 
     fn replay(tokens: &[Token]) -> Vec<u8> {
@@ -174,9 +176,9 @@ mod tests {
         for &token in tokens {
             match token {
                 Token::Literal(byte) => bytes.push(byte),
-                Token::Match { len, dist } => {
+                Token::Match { len, distance } => {
                     for _ in 0..len {
-                        bytes.push(bytes[bytes.len() - dist]);
+                        bytes.push(bytes[bytes.len() - distance]);
                     }
                 }
             }
@@ -190,13 +192,22 @@ mod tests {
             |text: &[u8]| -> Vec<Token> { text.iter().map(|&byte| Token::Literal(byte)).collect() };
         // "abcd" occurs twice before the last one: the nearer start wins
         let mut expected = literals(b"abcdX");
-        expected.push(Token::Match { len: 4, dist: 5 });
+        expected.push(Token::Match {
+            len: 4,
+            distance: 5,
+        });
         expected.push(Token::Literal(b'Y'));
-        expected.push(Token::Match { len: 4, dist: 5 });
+        expected.push(Token::Match {
+            len: 4,
+            distance: 5,
+        });
         assert_eq!(parse(b"abcdXabcdYabcd"), expected);
         // a match may overlap the bytes it produces
         let mut expected = literals(b"a");
-        expected.push(Token::Match { len: 9, dist: 1 });
+        expected.push(Token::Match {
+            len: 9,
+            distance: 1,
+        });
         assert_eq!(parse(b"aaaaaaaaaa"), expected);
         // three equal bytes are under the shortest match
         assert_eq!(parse(b"abcXabc"), literals(b"abcXabc"));
@@ -205,13 +216,8 @@ mod tests {
 
     #[test]
     fn tokens_replay_to_the_input() {
-        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let mut noise = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut noise = || rng.next();
         let text = b"\\name\\player\\team\\red\\skin\\base\n".repeat(40);
         let zeros = vec![0u8; 5000];
         let random: Vec<u8> = (0..5000).map(|_| noise() as u8).collect();

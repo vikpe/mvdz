@@ -2,22 +2,25 @@
 //! Giesen, "Interleaved entropy coders" (2014); written fresh.
 
 use crate::error::{Error, Result};
-use crate::fields::{put_usize, read_bytes, read_length_prefixed, read_usize};
+use crate::fields::{read_bytes, read_length_prefixed, read_usize, write_usize};
 use crate::format::MAX_MODELS_RAW_LEN;
 use crate::math::{MAX_QUANTIZED, bucket, log2_fixed, normalize, quantize, quantized_weight};
 use crate::memory::try_with_capacity;
-use crate::parallel::par_map;
+use crate::parallel::parallel_map;
 use crate::streams::{STREAM_COUNT, is_numeric, is_structural};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) const SCALE: u32 = 12;
-const FREQ_TOTAL: u32 = 1 << SCALE;
-const STATE_MIN: u32 = 1 << 16;
+pub(crate) const STRUCTURAL_ALPHABET_SIZE: usize = 256;
+pub(crate) const NUMERIC_ALPHABET_SIZE: usize = 65;
+
+const SCALE_BITS: u32 = 12;
+const FREQUENCY_TOTAL: u32 = 1 << SCALE_BITS;
+const LOWER_BOUND: u32 = 1 << 16;
 
 #[derive(Debug, Clone)]
 struct Table {
     quantized: Vec<u32>,
-    freq: Vec<u32>,
+    frequencies: Vec<u32>,
     cumulative: Vec<u32>,
 }
 
@@ -27,14 +30,14 @@ impl Table {
             .iter()
             .map(|&count| quantized_weight(count))
             .collect();
-        let freq = normalize(&weights, FREQ_TOTAL);
-        let mut cumulative = vec![0u32; freq.len() + 1];
-        for symbol in 0..freq.len() {
-            cumulative[symbol + 1] = cumulative[symbol] + freq[symbol];
+        let frequencies = normalize(&weights, FREQUENCY_TOTAL);
+        let mut cumulative = vec![0u32; frequencies.len() + 1];
+        for symbol in 0..frequencies.len() {
+            cumulative[symbol + 1] = cumulative[symbol] + frequencies[symbol];
         }
         Self {
             quantized,
-            freq,
+            frequencies,
             cumulative,
         }
     }
@@ -73,8 +76,8 @@ fn cross_bits(counts: &[u32], reference: &[u32]) -> Option<u64> {
 
 #[derive(Debug)]
 struct Model {
-    /// Own contexts, ascending: `own[i]` codes with `tables[i + 1]`.
-    own: Vec<u32>,
+    /// Ascending: `own_contexts[i]` codes with `tables[i + 1]`.
+    own_contexts: Vec<u32>,
     map: Vec<u32>,
     tables: Vec<Table>,
 }
@@ -82,7 +85,7 @@ struct Model {
 #[derive(Debug)]
 struct Counts {
     alphabet_size: usize,
-    own: Vec<u32>,
+    own_contexts: Vec<u32>,
     own_rows: Vec<u32>,
     rest: Vec<u32>,
 }
@@ -139,27 +142,27 @@ impl Tally {
 
     pub(crate) fn file_model(&self) -> FileModel {
         /// The best of a sweep over 387 demos; part of the canonical encoder.
-        const TABLE_COST: TableCost = TableCost {
+        const STREAM_TABLE_COST: TableCost = TableCost {
             base: 48,
             per_symbol: 6,
         };
-        self.model_at(TABLE_COST)
+        self.model_at(STREAM_TABLE_COST)
     }
 
     /// The model the models block codes the other models with (FORMAT.md 2.2).
     fn meta_model(&self) -> FileModel {
         /// A table of the meta model is stored as it is, a byte per symbol.
-        const TABLE_COST: TableCost = TableCost {
-            base: 16 + 8 * 256,
+        const META_TABLE_COST: TableCost = TableCost {
+            base: 16 + 8 * STRUCTURAL_ALPHABET_SIZE as u64,
             per_symbol: 0,
         };
-        self.model_at(TABLE_COST)
+        self.model_at(META_TABLE_COST)
     }
 
     fn model_at(&self, table_cost: TableCost) -> FileModel {
-        let model = build_model(&select(self, table_cost));
+        let model = build_model(&own_contexts(self, table_cost));
         FileModel {
-            bytes: raw_model(&model),
+            raw: raw_model(&model),
             model,
         }
     }
@@ -178,26 +181,26 @@ fn add_counts(into: &mut [u32], counts: &[u32]) {
     }
 }
 
-fn select(tally: &Tally, table_cost: TableCost) -> Counts {
+fn own_contexts(tally: &Tally, table_cost: TableCost) -> Counts {
     let (alphabet_size, row_of, rows, keys) =
         (tally.alphabet_size, &tally.row_of, &tally.rows, &tally.keys);
     let row =
         |context: u32| &rows[row_of[context as usize] as usize * alphabet_size..][..alphabet_size];
-    let mut own: Vec<u32> = Vec::new();
+    let mut own_contexts: Vec<u32> = Vec::new();
     let mut fallback = tally.global.clone();
     // the contexts not taken as own, summed: the fallback of the next pass
     let mut rest = vec![0u32; alphabet_size];
     for pass in 0..2 {
-        own.clear();
+        own_contexts.clear();
         for &context in keys {
             let counts = row(context);
-            let present = counts.iter().filter(|&&count| count > 0).count() as u64;
-            let table_bits = (table_cost.base + table_cost.per_symbol * present) << 16;
+            let present_count = counts.iter().filter(|&&count| count > 0).count() as u64;
+            let table_bits = (table_cost.base + table_cost.per_symbol * present_count) << 16;
             let own_cost = entropy_bits(counts) + table_bits;
             let is_cheaper_as_own =
                 cross_bits(counts, &fallback).is_none_or(|fallback_cost| own_cost < fallback_cost);
             if is_cheaper_as_own {
-                own.push(context);
+                own_contexts.push(context);
             } else {
                 add_counts(&mut rest, counts);
             }
@@ -206,14 +209,14 @@ fn select(tally: &Tally, table_cost: TableCost) -> Counts {
             fallback = std::mem::replace(&mut rest, vec![0u32; alphabet_size]);
         }
     }
-    own.sort_unstable();
-    let mut own_rows = Vec::with_capacity(own.len() * alphabet_size);
-    for &context in &own {
+    own_contexts.sort_unstable();
+    let mut own_rows = Vec::with_capacity(own_contexts.len() * alphabet_size);
+    for &context in &own_contexts {
         own_rows.extend_from_slice(row(context));
     }
     Counts {
         alphabet_size,
-        own,
+        own_contexts,
         own_rows,
         rest,
     }
@@ -224,9 +227,9 @@ fn build_model(counts: &Counts) -> Model {
     let mut tables = vec![Table::from_quantized(
         counts.rest.iter().map(|&count| quantize(count)).collect(),
     )];
-    let map_len = counts.own.last().map_or(0, |&context| context as usize + 1);
+    let map_len = (counts.own_contexts.last()).map_or(0, |&context| context as usize + 1);
     let mut map = vec![0u32; map_len];
-    for (index, &context) in counts.own.iter().enumerate() {
+    for (index, &context) in counts.own_contexts.iter().enumerate() {
         tables.push(Table::from_quantized(
             counts.own_rows[index * alphabet_size..(index + 1) * alphabet_size]
                 .iter()
@@ -236,7 +239,7 @@ fn build_model(counts: &Counts) -> Model {
         map[context as usize] = (index + 1) as u32;
     }
     Model {
-        own: counts.own.clone(),
+        own_contexts: counts.own_contexts.clone(),
         map,
         tables,
     }
@@ -246,8 +249,8 @@ fn build_model(counts: &Counts) -> Model {
 /// and the quantized counts of every table, the fallback first.
 fn raw_model(model: &Model) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_usize(&mut bytes, model.own.len());
-    for &context in &model.own {
+    write_usize(&mut bytes, model.own_contexts.len());
+    for &context in &model.own_contexts {
         bytes.extend_from_slice(&(context as u16).to_le_bytes());
     }
     for table in &model.tables {
@@ -259,19 +262,17 @@ fn raw_model(model: &Model) -> Vec<u8> {
 /// `None` for more own contexts than 16 bits can number.
 fn raw_model_len(own_count: usize, alphabet_size: usize) -> Option<usize> {
     const MAX_OWN_COUNT: usize = 1 << 16;
-    const OWN_COUNT_LEN: usize = 4;
+    const OWN_COUNT_SIZE: usize = 4;
     (own_count <= MAX_OWN_COUNT)
-        .then_some(OWN_COUNT_LEN + 2 * own_count + (own_count + 1) * alphabet_size)
+        .then_some(OWN_COUNT_SIZE + 2 * own_count + (own_count + 1) * alphabet_size)
 }
 
-/// Wider tables, and hot ones (`read_model`), decode with a slot LUT instead of a search.
-const SEARCH_MAX: usize = 64;
-
-// Context-map entry: a `pool` offset (search table), or with a flag a LUT offset or empty.
+// Context-map entry: a `pool` offset (search table), or with a flag a lookup table offset
+// or empty.
 const ENTRY_EMPTY: u32 = 1 << 31;
-const ENTRY_LUT: u32 = 1 << 30;
+const ENTRY_LOOKUP: u32 = 1 << 30;
 
-/// A search table in `pool` is `[0, c1, .., cn = FREQ_TOTAL, pad..]` (16*chunks + 1
+/// A search table in `pool` is `[0, c1, .., cn = FREQUENCY_TOTAL, pad..]` (16*chunks + 1
 /// entries), then its 16*chunks symbols: one or two cache lines.
 #[derive(Debug)]
 pub(crate) struct DecoderModel {
@@ -279,7 +280,7 @@ pub(crate) struct DecoderModel {
     fallback: u32,
     chunks: usize,
     pool: Vec<u16>,
-    luts: Vec<u32>,
+    lookup_tables: Vec<u32>,
 }
 
 /// The cold tables only; about 6 % slower than the SSE2 search it replaced, which needs
@@ -359,14 +360,16 @@ fn read_model(
     alphabet_size: usize,
     table_memory: &TableMemory,
 ) -> Result<DecoderModel> {
-    /// Estimated symbols coded with a table from which its slot LUT pays off.
-    const LUT_MIN_USE: u64 = 1 << 14;
+    /// Wider tables, and hot ones, decode with a slot lookup table instead of a search.
+    const SEARCH_MAX: usize = 64;
+    /// Estimated symbols coded with a table from which its lookup table pays off.
+    const LOOKUP_MIN_USE: u64 = 1 << 14;
     /// Of a model, beside its wide tables: the memory does not grow with the demo.
-    const HOT_LUT_MAX: usize = 16;
+    const HOT_LOOKUP_MAX: usize = 16;
     let (keys, quantized_tables) = read_model_header(header, alphabet_size)?;
     // present (frequency >= 1) exactly when the quantized count is non-zero (`normalize`):
     // the layout is known before any table is built
-    let present = |quantized: &[u8]| quantized.iter().filter(|&&count| count > 0).count();
+    let present_count = |quantized: &[u8]| quantized.iter().filter(|&&count| count > 0).count();
     // the quantized counts are within a sqrt(2) step of the real ones: their weights sum
     // to about the symbols the table codes in the file
     let estimated_use = |quantized: &[u8]| {
@@ -380,54 +383,55 @@ fn read_model(
         .collect();
     uses.sort_unstable_by(|a, b| b.cmp(a));
     let hot_min_use = uses
-        .get(HOT_LUT_MAX)
-        .map_or(LUT_MIN_USE, |&next_use| LUT_MIN_USE.max(next_use + 1));
-    let is_lut = |quantized: &[u8]| {
-        present(quantized) > SEARCH_MAX || estimated_use(quantized) >= hot_min_use
+        .get(HOT_LOOKUP_MAX)
+        .map_or(LOOKUP_MIN_USE, |&next_use| LOOKUP_MIN_USE.max(next_use + 1));
+    let is_lookup = |quantized: &[u8]| {
+        present_count(quantized) > SEARCH_MAX || estimated_use(quantized) >= hot_min_use
     };
     // one chunk count for every search table: a fixed trip count avoids mispredicted exits
     let chunks = quantized_tables
         .chunks(alphabet_size)
-        .filter(|quantized| !is_lut(quantized))
-        .map(present)
-        .filter(|&present_count| present_count > 0)
+        .filter(|quantized| !is_lookup(quantized))
+        .map(present_count)
+        .filter(|&count| count > 0)
         .max()
         .unwrap_or(1)
         .div_ceil(16);
-    let (mut pool_len, mut lut_len) = (0usize, 0usize);
+    let (mut pool_len, mut lookup_len) = (0usize, 0usize);
     for quantized in quantized_tables.chunks(alphabet_size) {
-        if is_lut(quantized) {
-            lut_len += FREQ_TOTAL as usize;
-        } else if present(quantized) > 0 {
+        if is_lookup(quantized) {
+            lookup_len += FREQUENCY_TOTAL as usize;
+        } else if present_count(quantized) > 0 {
             pool_len += 2 * 16 * chunks + 1;
         }
     }
     let map_len = keys.last().map_or(0, |&context| context as usize + 1);
-    table_memory.reserve((pool_len * 2 + lut_len * 4 + map_len * 4) as u64)?;
+    table_memory.reserve((pool_len * 2 + lookup_len * 4 + map_len * 4) as u64)?;
     let mut model = DecoderModel {
         map: try_with_capacity(map_len)?,
         fallback: ENTRY_EMPTY,
         chunks,
         pool: try_with_capacity(pool_len)?,
-        luts: try_with_capacity(lut_len)?,
+        lookup_tables: try_with_capacity(lookup_len)?,
     };
     let mut entries = try_with_capacity(keys.len() + 1)?;
     for quantized in quantized_tables.chunks(alphabet_size) {
         let table =
             Table::from_quantized(quantized.iter().map(|&count| u32::from(count)).collect());
-        let present: Vec<usize> = (0..alphabet_size)
-            .filter(|&symbol| table.freq[symbol] > 0)
+        let present_symbols: Vec<usize> = (0..alphabet_size)
+            .filter(|&symbol| table.frequencies[symbol] > 0)
             .collect();
-        let entry = if present.is_empty() {
+        let entry = if present_symbols.is_empty() {
             ENTRY_EMPTY
-        } else if is_lut(quantized) {
-            model.push_lut(&table, &present)
+        } else if is_lookup(quantized) {
+            model.push_lookup_table(&table, &present_symbols)
         } else {
-            model.push_search_table(&table, &present)
+            model.push_search_table(&table, &present_symbols)
         };
         entries.push(entry);
     }
-    if model.pool.len() >= ENTRY_LUT as usize || model.luts.len() >= ENTRY_LUT as usize {
+    let entry_max = ENTRY_LOOKUP as usize;
+    if model.pool.len() >= entry_max || model.lookup_tables.len() >= entry_max {
         return Err(Error::Corrupt("model size"));
     }
     model.fallback = entries[0];
@@ -443,40 +447,40 @@ static EMPTY_MODEL: DecoderModel = DecoderModel {
     fallback: ENTRY_EMPTY,
     chunks: 1,
     pool: Vec::new(),
-    luts: Vec::new(),
+    lookup_tables: Vec::new(),
 };
 
 impl DecoderModel {
-    /// The entry of a cold table with at most [`SEARCH_MAX`] symbols: its offset in `pool`.
-    fn push_search_table(&mut self, table: &Table, present: &[usize]) -> u32 {
+    /// The entry of a cold, narrow table: its offset in `pool`.
+    fn push_search_table(&mut self, table: &Table, present_symbols: &[usize]) -> u32 {
         let width = 16 * self.chunks;
         let offset = self.pool.len() as u32;
         self.pool.push(0);
-        for &symbol in present {
+        for &symbol in present_symbols {
             self.pool.push(table.cumulative[symbol + 1] as u16);
         }
         self.pool.resize(offset as usize + 1 + width, 0x7fff);
-        for &symbol in present {
+        for &symbol in present_symbols {
             self.pool.push(symbol as u16);
         }
         self.pool.resize(offset as usize + 1 + 2 * width, 0);
         offset
     }
-    /// The entry of a wider or hot table: `ENTRY_LUT` and its offset in `luts`. Each slot holds
-    /// the symbol, its frequency less one (a lone symbol's 4096 needs the 13th bit) and
-    /// the slot's offset into it.
-    fn push_lut(&mut self, table: &Table, present: &[usize]) -> u32 {
-        let offset = self.luts.len();
-        self.luts.resize(offset + FREQ_TOTAL as usize, 0);
-        let lut = &mut self.luts[offset..];
-        for &symbol in present {
+    /// `ENTRY_LOOKUP` and the table's offset in `lookup_tables`. A slot: the symbol, its
+    /// frequency less one (a lone symbol's 4096 needs the 13th bit), its offset into it.
+    fn push_lookup_table(&mut self, table: &Table, present_symbols: &[usize]) -> u32 {
+        let offset = self.lookup_tables.len();
+        self.lookup_tables
+            .resize(offset + FREQUENCY_TOTAL as usize, 0);
+        let lookup_table = &mut self.lookup_tables[offset..];
+        for &symbol in present_symbols {
             for slot in table.cumulative[symbol]..table.cumulative[symbol + 1] {
-                lut[slot as usize] = symbol as u32
-                    | (table.freq[symbol] - 1) << 8
+                lookup_table[slot as usize] = symbol as u32
+                    | (table.frequencies[symbol] - 1) << 8
                     | (slot - table.cumulative[symbol]) << 20;
             }
         }
-        ENTRY_LUT | offset as u32
+        ENTRY_LOOKUP | offset as u32
     }
     #[inline(always)]
     fn entry(&self, context: u32) -> u32 {
@@ -494,26 +498,26 @@ impl DecoderModel {
             return None;
         }
         let state = decoder.state;
-        let slot = state & (FREQ_TOTAL - 1);
-        let (symbol, mut state) = if entry & ENTRY_LUT == 0 {
+        let slot = state & (FREQUENCY_TOTAL - 1);
+        let (symbol, mut state) = if entry & ENTRY_LOOKUP == 0 {
             let width = 16 * self.chunks;
             // in range: `read_model` points every search entry at 2*width + 1 pool entries
             let table = &self.pool[entry as usize..=entry as usize + 2 * width];
             let index = count_le(&table[1..], self.chunks, slot);
-            let lo = u32::from(table[index]);
-            let hi = u32::from(table[index + 1]);
+            let low = u32::from(table[index]);
+            let high = u32::from(table[index + 1]);
             (
                 u32::from(table[width + 1 + index]),
-                (hi - lo) * (state >> SCALE) + (slot - lo),
+                (high - low) * (state >> SCALE_BITS) + (slot - low),
             )
         } else {
-            let lut_entry = self.luts[(entry & !ENTRY_LUT) as usize + slot as usize];
+            let slot_entry = self.lookup_tables[(entry & !ENTRY_LOOKUP) as usize + slot as usize];
             (
-                lut_entry & 0xff,
-                (((lut_entry >> 8) & 0xfff) + 1) * (state >> SCALE) + (lut_entry >> 20),
+                slot_entry & 0xff,
+                (((slot_entry >> 8) & 0xfff) + 1) * (state >> SCALE_BITS) + (slot_entry >> 20),
             )
         };
-        if state < STATE_MIN {
+        if state < LOWER_BOUND {
             state = (state << 16) | u32::from(decoder.word());
         }
         decoder.state = state;
@@ -530,19 +534,19 @@ struct RansEncoder {
 impl RansEncoder {
     fn new() -> Self {
         Self {
-            state: STATE_MIN,
+            state: LOWER_BOUND,
             words: Vec::new(),
         }
     }
     #[inline]
-    fn put(&mut self, freq: u32, cumulative: u32) {
+    fn push(&mut self, frequency: u32, cumulative: u32) {
         let mut state = self.state;
-        let state_max = u64::from(freq) << (16 + 16 - SCALE);
+        let state_max = u64::from(frequency) << (16 + 16 - SCALE_BITS);
         if u64::from(state) >= state_max {
             self.words.push(state as u16);
             state >>= 16;
         }
-        self.state = ((state / freq) << SCALE) + (state % freq) + cumulative;
+        self.state = ((state / frequency) << SCALE_BITS) + (state % frequency) + cumulative;
     }
     fn finish(mut self) -> Vec<u8> {
         self.words.push(self.state as u16);
@@ -560,7 +564,7 @@ impl RansEncoder {
 struct RansDecoder<'a> {
     state: u32,
     input: &'a [u8],
-    pos: usize,
+    position: usize,
 }
 
 impl<'a> RansDecoder<'a> {
@@ -568,33 +572,33 @@ impl<'a> RansDecoder<'a> {
         let mut decoder = RansDecoder {
             state: 0,
             input,
-            pos: 0,
+            position: 0,
         };
-        let hi = u32::from(decoder.word());
-        let lo = u32::from(decoder.word());
-        decoder.state = hi << 16 | lo;
+        let high = u32::from(decoder.word());
+        let low = u32::from(decoder.word());
+        decoder.state = high << 16 | low;
         decoder
     }
     #[inline(always)]
     fn word(&mut self) -> u16 {
         let word = self
             .input
-            .get(self.pos..)
+            .get(self.position..)
             .and_then(<[u8]>::first_chunk)
             .map_or(0, |bytes| u16::from_le_bytes(*bytes));
-        self.pos += 2;
+        self.position += 2;
         word
     }
     fn finished_empty() -> RansDecoder<'static> {
         RansDecoder {
-            state: STATE_MIN,
+            state: LOWER_BOUND,
             input: &[],
-            pos: 0,
+            position: 0,
         }
     }
     /// Every word read and the state back at its initial value.
-    fn is_finished(&self) -> bool {
-        self.pos == self.input.len() && self.state == STATE_MIN
+    fn is_done(&self) -> bool {
+        self.position == self.input.len() && self.state == LOWER_BOUND
     }
 }
 
@@ -604,11 +608,11 @@ fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Option<Vec<u8
     for (&symbol, &context) in symbols.iter().zip(contexts).rev() {
         let table_index = model.map.get(context as usize).copied().unwrap_or(0) as usize;
         let table = &model.tables[table_index];
-        let freq = table.freq[symbol as usize];
-        if freq == 0 {
+        let frequency = table.frequencies[symbol as usize];
+        if frequency == 0 {
             return None;
         }
-        encoder.put(freq, table.cumulative[symbol as usize]);
+        encoder.push(frequency, table.cumulative[symbol as usize]);
     }
     Some(encoder.finish())
 }
@@ -616,7 +620,7 @@ fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Option<Vec<u8
 fn pack_body(model: &Model, symbols: &[u8], contexts: &[u16], extra: &[u8]) -> Option<Vec<u8>> {
     let body = rans_encode(model, symbols, contexts)?;
     let mut out = Vec::with_capacity(body.len() + extra.len() + 4);
-    put_usize(&mut out, body.len());
+    write_usize(&mut out, body.len());
     out.extend_from_slice(&body);
     out.extend_from_slice(extra);
     Some(out)
@@ -638,7 +642,7 @@ fn unpack(body: &[u8]) -> Result<Unpacked<'_>> {
 #[derive(Debug)]
 pub(crate) struct FileModel {
     model: Model,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) raw: Vec<u8>,
 }
 
 /// By stream id.
@@ -674,20 +678,20 @@ pub(crate) struct ModelsBlock {
 /// FORMAT.md 2.2: the meta model as it is, then every raw model (by stream id,
 /// ascending) coded under it.
 pub(crate) fn write_models_block(raw_models: &[(usize, &[u8])]) -> ModelsBlock {
-    let mut tally = Tally::new(256);
+    let mut tally = Tally::new(STRUCTURAL_ALPHABET_SIZE);
     for (_, raw_model) in raw_models {
         tally.add(raw_model, &previous_bytes(raw_model));
     }
     let meta = tally.meta_model();
-    let mut body = meta.bytes.clone();
-    let mut raw_len = meta.bytes.len();
-    put_usize(&mut body, raw_models.len());
+    let mut body = meta.raw.clone();
+    let mut raw_len = meta.raw.len();
+    write_usize(&mut body, raw_models.len());
     for &(stream, raw_model) in raw_models {
         let coded = pack_body(&meta.model, raw_model, &previous_bytes(raw_model), &[])
             .expect("the meta model is built from these bytes");
-        put_usize(&mut body, stream);
-        put_usize(&mut body, raw_model.len());
-        put_usize(&mut body, coded.len());
+        write_usize(&mut body, stream);
+        write_usize(&mut body, raw_model.len());
+        write_usize(&mut body, coded.len());
         body.extend_from_slice(&coded);
         raw_len += raw_model.len();
     }
@@ -705,10 +709,10 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
     let table_memory = TableMemory::new(max_memory);
     let mut rest = body;
     let meta_own_count = read_usize(&mut &*rest).ok_or(corrupt)?;
-    let meta_len = raw_model_len(meta_own_count, 256).ok_or(corrupt)?;
+    let meta_len = raw_model_len(meta_own_count, STRUCTURAL_ALPHABET_SIZE).ok_or(corrupt)?;
     let meta = read_model(
         read_bytes(&mut rest, meta_len).ok_or(corrupt)?,
-        256,
+        STRUCTURAL_ALPHABET_SIZE,
         &table_memory,
     )?;
     let count = read_usize(&mut rest).ok_or(corrupt)?;
@@ -724,9 +728,9 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
             return Err(corrupt);
         }
         let alphabet_size = if is_structural(stream) {
-            256
+            STRUCTURAL_ALPHABET_SIZE
         } else if is_numeric(stream) {
-            NUMERIC_ALPHABET
+            NUMERIC_ALPHABET_SIZE
         } else {
             return Err(corrupt);
         };
@@ -742,7 +746,7 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
     if raw_total > MAX_MODELS_RAW_LEN {
         return Err(Error::Corrupt("models size"));
     }
-    let built = par_map(threads, &entries, |&(_, alphabet_size, raw_len, coded)| {
+    let built = parallel_map(threads, &entries, |&(_, alphabet_size, raw_len, coded)| {
         let raw_model = decode_raw_model(coded, raw_len, &meta)?;
         read_model(&raw_model, alphabet_size, &table_memory)
     });
@@ -768,10 +772,8 @@ fn decode_raw_model(coded: &[u8], raw_len: usize, meta: &DecoderModel) -> Result
     Ok(raw_model)
 }
 
-pub(crate) const NUMERIC_ALPHABET: usize = 65;
-
 #[derive(Debug, Default)]
-pub(crate) struct BitWriter {
+struct BitWriter {
     accumulator: u64,
     bit_count: u32,
     out: Vec<u8>,
@@ -779,7 +781,7 @@ pub(crate) struct BitWriter {
 
 impl BitWriter {
     #[inline]
-    pub(crate) fn put(&mut self, value: u32, bit_count: u32) {
+    fn write(&mut self, value: u32, bit_count: u32) {
         self.accumulator |= u64::from(value) << self.bit_count;
         self.bit_count += bit_count;
         while self.bit_count >= 8 {
@@ -788,7 +790,7 @@ impl BitWriter {
             self.bit_count -= 8;
         }
     }
-    pub(crate) fn finish(mut self) -> Vec<u8> {
+    fn finish(mut self) -> Vec<u8> {
         if self.bit_count > 0 {
             self.out.push(self.accumulator as u8);
         }
@@ -797,19 +799,19 @@ impl BitWriter {
 }
 
 #[derive(Debug)]
-pub(crate) struct BitReader<'a> {
+struct BitReader<'a> {
     input: &'a [u8],
-    pos: usize,
+    position: usize,
     accumulator: u64,
     bit_count: u32,
     bits_used: u64,
 }
 
 impl<'a> BitReader<'a> {
-    pub(crate) fn new(input: &'a [u8]) -> Self {
+    fn new(input: &'a [u8]) -> Self {
         BitReader {
             input,
-            pos: 0,
+            position: 0,
             accumulator: 0,
             bit_count: 0,
             bits_used: 0,
@@ -817,24 +819,24 @@ impl<'a> BitReader<'a> {
     }
     #[inline(always)]
     fn refill(&mut self) {
-        if let Some(word) = self.input.get(self.pos..).and_then(<[u8]>::first_chunk) {
+        if let Some(word) = (self.input.get(self.position..)).and_then(<[u8]>::first_chunk) {
             let bits = u64::from_le_bytes(*word);
             self.accumulator |= bits << self.bit_count;
             let take = (63 - self.bit_count) / 8;
-            self.pos += take as usize;
+            self.position += take as usize;
             self.bit_count += take * 8;
         } else {
             while self.bit_count <= 56 {
-                let byte = u64::from(self.input.get(self.pos).copied().unwrap_or(0));
+                let byte = u64::from(self.input.get(self.position).copied().unwrap_or(0));
                 self.accumulator |= byte << self.bit_count;
-                self.pos += 1;
+                self.position += 1;
                 self.bit_count += 8;
             }
         }
     }
     /// At most 31 bits, least significant first; zeros past the end.
     #[inline(always)]
-    pub(crate) fn get(&mut self, bit_count: u32) -> u32 {
+    fn read(&mut self, bit_count: u32) -> u32 {
         if self.bit_count < bit_count {
             self.refill();
         }
@@ -845,25 +847,25 @@ impl<'a> BitReader<'a> {
         value
     }
     /// At most 7 padding bits.
-    pub(crate) fn is_finished(&self) -> bool {
+    fn is_done(&self) -> bool {
         self.bits_used.div_ceil(8) == self.input.len() as u64
     }
 }
 
 /// What one stream codes. `symbols`: the bytes of a structural stream, the bucket of each
-/// value of a numeric one; `extra`: the mantissa bits of the values.
+/// value of a numeric one; `mantissas`: the mantissa bits of the values.
 #[derive(Debug)]
 pub(crate) struct StreamSymbols {
     pub(crate) symbols: Vec<u8>,
     pub(crate) contexts: Vec<u16>,
-    pub(crate) extra: Vec<u8>,
+    pub(crate) mantissas: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct StreamWriter {
     symbols: Vec<u8>,
     contexts: Vec<u16>,
-    bits: BitWriter,
+    mantissas: BitWriter,
 }
 
 impl StreamWriter {
@@ -877,13 +879,13 @@ impl StreamWriter {
     pub(crate) fn push_value(&mut self, context: u32, value: i32) {
         let (symbol, mantissa_bits, mantissa) = bucket(value);
         self.push_symbol(context, symbol as u8);
-        self.bits.put(mantissa, mantissa_bits);
+        self.mantissas.write(mantissa, mantissa_bits);
     }
     pub(crate) fn finish(self) -> StreamSymbols {
         StreamSymbols {
             symbols: self.symbols,
             contexts: self.contexts,
-            extra: self.bits.finish(),
+            mantissas: self.mantissas.finish(),
         }
     }
 }
@@ -894,7 +896,7 @@ pub(crate) fn encode_stream(stream: &StreamSymbols, file_model: &FileModel) -> O
         &file_model.model,
         &stream.symbols,
         &stream.contexts,
-        &stream.extra,
+        &stream.mantissas,
     )
 }
 
@@ -903,7 +905,7 @@ pub(crate) fn encode_stream(stream: &StreamSymbols, file_model: &FileModel) -> O
 pub(crate) struct StreamDecoder<'a> {
     model: &'a DecoderModel,
     decoder: RansDecoder<'a>,
-    bits: BitReader<'a>,
+    mantissas: BitReader<'a>,
 }
 
 impl<'a> StreamDecoder<'a> {
@@ -912,19 +914,19 @@ impl<'a> StreamDecoder<'a> {
         StreamDecoder {
             model: &EMPTY_MODEL,
             decoder: RansDecoder::finished_empty(),
-            bits: BitReader::new(&[]),
+            mantissas: BitReader::new(&[]),
         }
     }
-    pub(crate) fn new(body: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
+    pub(crate) fn new(body: &'a [u8], model: &'a DecoderModel) -> Result<Self> {
         let unpacked = unpack(body)?;
         let decoder = RansDecoder::new(unpacked.rans);
-        if decoder.state < STATE_MIN {
+        if decoder.state < LOWER_BOUND {
             return Err(Error::Corrupt("rans stream"));
         }
         Ok(StreamDecoder {
-            model: file_model,
+            model,
             decoder,
-            bits: BitReader::new(unpacked.extra),
+            mantissas: BitReader::new(unpacked.extra),
         })
     }
     #[inline(always)]
@@ -943,7 +945,7 @@ impl<'a> StreamDecoder<'a> {
         let width = symbol.div_ceil(2);
         let bit_count = width.saturating_sub(1);
         let lead = u32::from(width > 0) << bit_count;
-        let magnitude = (lead | self.bits.get(bit_count)).cast_signed();
+        let magnitude = (lead | self.mantissas.read(bit_count)).cast_signed();
         Some(if symbol & 1 == 0 {
             magnitude.wrapping_neg()
         } else {
@@ -952,7 +954,7 @@ impl<'a> StreamDecoder<'a> {
     }
     /// A structural stream has no mantissa bits: its `extra` is empty.
     pub(crate) fn is_done(&self) -> bool {
-        self.decoder.is_finished() && self.bits.is_finished()
+        self.decoder.is_done() && self.mantissas.is_done()
     }
 }
 
@@ -970,11 +972,7 @@ mod tests {
         let mut tally = Tally::new(alphabet_size);
         tally.add(symbols, contexts);
         let file_model = tally.file_model();
-        let model = read_model(
-            &file_model.bytes,
-            alphabet_size,
-            &TableMemory::new(u64::MAX),
-        )?;
+        let model = read_model(&file_model.raw, alphabet_size, &TableMemory::new(u64::MAX))?;
         Ok((file_model, model))
     }
 
@@ -1008,10 +1006,10 @@ mod tests {
         let stream = StreamSymbols {
             symbols,
             contexts,
-            extra: Vec::new(),
+            mantissas: Vec::new(),
         };
         let (symbols, contexts) = (&stream.symbols, &stream.contexts);
-        let (file_model, model) = models(symbols, contexts, 256)?;
+        let (file_model, model) = models(symbols, contexts, STRUCTURAL_ALPHABET_SIZE)?;
         let body = encode_stream(&stream, &file_model).context("every symbol has a code")?;
         let mut decoder = StreamDecoder::new(&body, &model)?;
         for (index, &symbol) in symbols.iter().enumerate() {
@@ -1021,8 +1019,8 @@ mod tests {
         // the model of a byte stream is refused as a numeric stream's
         assert!(
             read_model(
-                &file_model.bytes,
-                NUMERIC_ALPHABET,
+                &file_model.raw,
+                NUMERIC_ALPHABET_SIZE,
                 &TableMemory::new(u64::MAX)
             )
             .is_err()
@@ -1041,33 +1039,40 @@ mod tests {
     fn quantized_count_over_the_maximum_is_refused() {
         let table_memory = TableMemory::new(u64::MAX);
         let no_own_contexts = 0u32.to_le_bytes();
-        let model_of = |quantized: u8| [&no_own_contexts[..], &[quantized; 256]].concat();
-        assert!(read_model(&model_of(MAX_QUANTIZED as u8), 256, &table_memory).is_ok());
-        assert!(read_model(&model_of(MAX_QUANTIZED as u8 + 1), 256, &table_memory).is_err());
+        let alphabet_size = STRUCTURAL_ALPHABET_SIZE;
+        let model_of =
+            |quantized: u8| [&no_own_contexts[..], &[quantized; STRUCTURAL_ALPHABET_SIZE]].concat();
+        assert!(read_model(&model_of(MAX_QUANTIZED as u8), alphabet_size, &table_memory).is_ok());
+        let over = model_of(MAX_QUANTIZED as u8 + 1);
+        assert!(read_model(&over, alphabet_size, &table_memory).is_err());
         assert_eq!(quantize(u32::MAX), MAX_QUANTIZED);
     }
 
     #[test]
-    fn hot_tables_take_a_lut_within_the_reservation() -> anyhow::Result<()> {
+    fn hot_tables_take_a_lookup_table_within_the_reservation() -> anyhow::Result<()> {
         let no_own_contexts = 0u32.to_le_bytes();
-        let mut quantized = [0u8; NUMERIC_ALPHABET];
+        let mut quantized = [0u8; NUMERIC_ALPHABET_SIZE];
         quantized[3] = 1;
         quantized[4] = 1;
         let cold = [&no_own_contexts[..], &quantized].concat();
-        let model = read_model(&cold, NUMERIC_ALPHABET, &TableMemory::new(u64::MAX))?;
-        assert_eq!((model.pool.len(), model.luts.len()), (2 * 16 + 1, 0));
+        let model = read_model(&cold, NUMERIC_ALPHABET_SIZE, &TableMemory::new(u64::MAX))?;
+        assert_eq!(
+            (model.pool.len(), model.lookup_tables.len()),
+            (2 * 16 + 1, 0)
+        );
 
         quantized[3] = MAX_QUANTIZED as u8;
         let hot = [&no_own_contexts[..], &quantized].concat();
-        let model = read_model(&hot, NUMERIC_ALPHABET, &TableMemory::new(u64::MAX))?;
+        let model = read_model(&hot, NUMERIC_ALPHABET_SIZE, &TableMemory::new(u64::MAX))?;
         assert_eq!(
-            (model.pool.len(), model.luts.len()),
-            (0, FREQ_TOTAL as usize)
+            (model.pool.len(), model.lookup_tables.len()),
+            (0, FREQUENCY_TOTAL as usize)
         );
-        let reserved = (model.pool.len() * 2 + model.luts.len() * 4 + model.map.len() * 4) as u64;
-        assert!(read_model(&hot, NUMERIC_ALPHABET, &TableMemory::new(reserved)).is_ok());
+        let reserved =
+            (model.pool.len() * 2 + model.lookup_tables.len() * 4 + model.map.len() * 4) as u64;
+        assert!(read_model(&hot, NUMERIC_ALPHABET_SIZE, &TableMemory::new(reserved)).is_ok());
         assert_eq!(
-            read_model(&hot, NUMERIC_ALPHABET, &TableMemory::new(reserved - 1)).err(),
+            read_model(&hot, NUMERIC_ALPHABET_SIZE, &TableMemory::new(reserved - 1)).err(),
             Some(Error::MemoryLimit("models"))
         );
         Ok(())
@@ -1084,8 +1089,8 @@ mod tests {
             writer.push_value(*context, *value);
         }
         let stream = writer.finish();
-        let (file_model, model) = models(&stream.symbols, &stream.contexts, NUMERIC_ALPHABET)?;
-        assert_eq!(model.luts.len(), 2 * FREQ_TOTAL as usize);
+        let (file_model, model) = models(&stream.symbols, &stream.contexts, NUMERIC_ALPHABET_SIZE)?;
+        assert_eq!(model.lookup_tables.len(), 2 * FREQUENCY_TOTAL as usize);
         let body = encode_stream(&stream, &file_model).context("every symbol has a code")?;
         let mut decoder = StreamDecoder::new(&body, &model)?;
         for &(context, value) in &values {
@@ -1105,7 +1110,7 @@ mod tests {
             writer.push_value(*context, *value);
         }
         let stream = writer.finish();
-        let (file_model, model) = models(&stream.symbols, &stream.contexts, NUMERIC_ALPHABET)?;
+        let (file_model, model) = models(&stream.symbols, &stream.contexts, NUMERIC_ALPHABET_SIZE)?;
         let body = encode_stream(&stream, &file_model).context("every symbol has a code")?;
         let mut decoder = StreamDecoder::new(&body, &model)?;
         for &(context, value) in &values {

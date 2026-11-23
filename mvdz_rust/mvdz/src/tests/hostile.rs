@@ -2,7 +2,7 @@
 
 use super::common::*;
 use crate::Error;
-use crate::fields::put_usize;
+use crate::fields::write_usize;
 use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
@@ -83,9 +83,9 @@ fn structure_rules() -> anyhow::Result<()> {
         .segments
         .insert(1, segment_header_bytes(0, 0, crc32fast::hash(&[])));
     refused(&edited.build(), "empty segment", is_corrupt);
-    let mut no_models = file[..HEADER_LEN].to_vec();
+    let mut no_models = file[..HEADER_SIZE].to_vec();
     for segment in &file_parts.segments {
-        segment_block(&mut no_models, segment);
+        write_segment(&mut no_models, segment);
     }
     refused(&no_models, "no models block", is_corrupt);
     for (bytes, what) in [
@@ -94,7 +94,7 @@ fn structure_rules() -> anyhow::Result<()> {
         (b"MVDZ\x03\x00\x00\x00", "v3"),
         (b"MVDZ\x01\x00\x00\x00", "v1"),
         (b"MVDZ\x02\x00", "header cut"),
-        (&file[..HEADER_LEN], "header only"),
+        (&file[..HEADER_SIZE], "header only"),
     ] {
         assert!(readers_agree(bytes, what).is_none(), "{what}");
     }
@@ -107,30 +107,27 @@ fn declared_sizes() -> anyhow::Result<()> {
     let (_, file) = small_demo_and_file(false)?;
     let file_parts = parts(&file)?;
     let mut edited = file_parts.clone();
-    let mut segment = segment_header_bytes(u32::try_from(MAX_SEGMENT_RAW)?, 0, 0);
+    let mut segment = segment_header_bytes(u32::try_from(MAX_RAW_LEN)?, 0, 0);
     segment.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
-    edited.header.size_bytes = MAX_SEGMENT_RAW;
+    edited.header.size = MAX_RAW_LEN;
     edited.segments = vec![segment];
     refused(&edited.build(), "1 MiB segment in 9 bytes", is_corrupt);
     let mut edited = file_parts.clone();
-    edited.segments[0].resize(
-        SEGMENT_FIELDS_LEN + usize::try_from(MAX_SEGMENT_CODED)? + 1,
-        0,
-    );
+    edited.segments[0].resize(SEGMENT_FIELDS_SIZE + usize::try_from(MAX_CODED_LEN)? + 1, 0);
     refused(&edited.build(), "coded length", |error| {
         *error == Error::Corrupt("segment size")
     });
     let mut edited = file_parts.clone();
-    edited.header.size_bytes = 60 << 30;
+    edited.header.size = 60 << 30;
     refused(&edited.build(), "60 GB header", is_corrupt);
-    let mut huge_models = file[..HEADER_LEN].to_vec();
+    let mut huge_models = file[..HEADER_SIZE].to_vec();
     huge_models.extend_from_slice(&(256u32 << 20).to_le_bytes());
     huge_models.extend_from_slice(&[0; 100]);
     refused(&huge_models, "256 MiB models", |error| {
         *error == Error::Corrupt("models too large")
     });
-    let mut past_end = file[..HEADER_LEN].to_vec();
-    models_block(&mut past_end, &file_parts.models);
+    let mut past_end = file[..HEADER_SIZE].to_vec();
+    write_models(&mut past_end, &file_parts.models);
     past_end.extend_from_slice(&u32::MAX.to_le_bytes());
     past_end.extend_from_slice(&file_parts.segments[0]);
     refused(&past_end, "segment length", is_corrupt);
@@ -138,7 +135,7 @@ fn declared_sizes() -> anyhow::Result<()> {
     let (demo, file) = small_demo_and_file(true)?;
     let max_memory = demo.len() as u64 - 1;
     assert_eq!(
-        crate::decode::decompress(&file, 1, max_memory).err(),
+        crate::decode::decode_with_max_memory(&file, 1, max_memory).err(),
         Some(Error::MemoryLimit("demo size"))
     );
     let mut streamed = Vec::new();
@@ -185,7 +182,7 @@ fn wide_model(table_count: u16) -> Vec<u8> {
         (1 + (state >> 16) % 12) as u8
     };
     let mut model = Vec::new();
-    put_usize(&mut model, usize::from(table_count));
+    write_usize(&mut model, usize::from(table_count));
     for context in 0..table_count {
         model.extend_from_slice(&context.to_le_bytes());
     }
@@ -215,7 +212,7 @@ fn large_models_block() -> anyhow::Result<()> {
         read_models(max_memory).err(),
         Some(Error::MemoryLimit("models"))
     );
-    let error = crate::decode::decompress(&file_parts.build(), 1, max_memory).err();
+    let error = crate::decode::decode_with_max_memory(&file_parts.build(), 1, max_memory).err();
     assert_eq!(error, Some(Error::MemoryLimit("models")));
     let start = Instant::now();
     read_models(crate::memory::DEFAULT_MAX_MEMORY)?;

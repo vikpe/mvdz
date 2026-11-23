@@ -59,8 +59,8 @@ func TestEncodeVectors(test *testing.T) {
 			if isDemo && (err != nil || !bytes.Equal(checked, file)) {
 				test.Errorf("Encode: %v", err)
 			}
-			if !isDemo && !errors.Is(err, ErrNotMvd) {
-				test.Errorf("Encode: got %v, want %v", err, ErrNotMvd)
+			if !isDemo && !errors.Is(err, ErrNotMVD) {
+				test.Errorf("Encode: got %v, want %v", err, ErrNotMVD)
 			}
 			if !bytes.Equal(file, vector.file) {
 				test.Errorf("%d bytes, not the %d of the vector", len(file), len(vector.file))
@@ -69,9 +69,9 @@ func TestEncodeVectors(test *testing.T) {
 	}
 }
 
-// With MVDZ_TEST_DEMOS=<directory>, every *.mvd in it round-trips.
+// With MVDZ_TEST_DATA=<directory>, every *.mvd in its sample directory round-trips.
 func TestEncodeDemos(test *testing.T) {
-	for _, path := range testDemos(test) {
+	for _, path := range testDemos(test, true) {
 		demo, err := os.ReadFile(path)
 		if err != nil {
 			test.Fatal(err)
@@ -94,13 +94,13 @@ func TestEncodeDemos(test *testing.T) {
 	}
 }
 
-// Decode speed over the MVDZ_TEST_DEMOS demos, in bytes of demo per second:
+// Decode speed over the MVDZ_TEST_DATA demos, in bytes of demo per second:
 //
-//	MVDZ_TEST_DEMOS=../demos/sample8 go test -run - -bench Decode -benchtime 3x
+//	MVDZ_TEST_DATA=<directory> go test -run - -bench Decode -benchtime 3x
 func BenchmarkDecode(bench *testing.B) {
 	var files [][]byte
 	rawBytes := 0
-	for _, path := range testDemos(bench) {
+	for _, path := range testDemos(bench, true) {
 		demo, err := os.ReadFile(path)
 		if err != nil {
 			bench.Fatal(err)
@@ -126,8 +126,8 @@ func BenchmarkDecode(bench *testing.B) {
 // With MVDZ_REFERENCE_CLI=<path>, the reference tool and this package read
 // each other's files, and write the same file for the same demo.
 func TestEncodeAgainstReference(test *testing.T) {
-	cli := os.Getenv("MVDZ_REFERENCE_CLI")
-	if cli == "" {
+	reference := os.Getenv("MVDZ_REFERENCE_CLI")
+	if reference == "" {
 		test.Skip("MVDZ_REFERENCE_CLI is not set")
 	}
 	demos := map[string][]byte{}
@@ -140,7 +140,7 @@ func TestEncodeAgainstReference(test *testing.T) {
 			demos[vector.name] = demo
 		}
 	}
-	for _, path := range testDemos(test) {
+	for _, path := range testDemos(test, false) {
 		demo, err := os.ReadFile(path)
 		if err != nil {
 			test.Fatal(err)
@@ -153,8 +153,8 @@ func TestEncodeAgainstReference(test *testing.T) {
 	filePath := filepath.Join(directory, "demo.mvdz")
 	decodedPath := filepath.Join(directory, "decoded.mvd")
 	run := func(arguments ...string) {
-		if output, err := exec.Command(cli, arguments...).CombinedOutput(); err != nil {
-			test.Fatalf("%s %v: %v: %s", cli, arguments, err, output)
+		if output, err := exec.Command(reference, arguments...).CombinedOutput(); err != nil {
+			test.Fatalf("%s %v: %v: %s", reference, arguments, err, output)
 		}
 	}
 	for name, demo := range demos {
@@ -192,14 +192,16 @@ func TestEncodeAgainstReference(test *testing.T) {
 	}
 }
 
-func testDemos(test testing.TB) []string {
-	directory := os.Getenv("MVDZ_TEST_DEMOS")
-	if directory == "" {
-		if test.Name() == "TestEncodeDemos" || test.Name() == "BenchmarkDecode" {
-			test.Skip("MVDZ_TEST_DEMOS is not set")
+func testDemos(test testing.TB, isRequired bool) []string {
+	test.Helper()
+	data := os.Getenv("MVDZ_TEST_DATA")
+	if data == "" {
+		if isRequired {
+			test.Skip("MVDZ_TEST_DATA is not set")
 		}
 		return nil
 	}
+	directory := filepath.Join(data, "sample")
 	paths, err := filepath.Glob(filepath.Join(directory, "*.mvd"))
 	if err != nil || len(paths) == 0 {
 		test.Fatalf("no demos in %s: %v", directory, err)
@@ -233,7 +235,7 @@ func FuzzEncode(fuzzer *testing.F) {
 		}
 		checked, err := Encode(demo)
 		isSame := err == nil && bytes.Equal(checked, file)
-		if !isSame && !errors.Is(err, ErrNotMvd) {
+		if !isSame && !errors.Is(err, ErrNotMVD) {
 			test.Fatalf("Encode: %v", err)
 		}
 	})

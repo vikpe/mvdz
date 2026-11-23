@@ -1,29 +1,29 @@
 //! Little-endian fields on a `&mut &[u8]` cursor: `None` past the end, nothing consumed.
 
-pub(crate) fn put_u32(out: &mut Vec<u8>, value: u32) {
+pub(crate) fn write_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
 /// As a u32: callers' values are bounded by the 1 MiB segment, 2 MiB coded segment or 4 MiB
 /// models block.
-pub(crate) fn put_usize(out: &mut Vec<u8>, value: usize) {
+pub(crate) fn write_usize(out: &mut Vec<u8>, value: usize) {
     debug_assert!(
         u32::try_from(value).is_ok(),
         "{value} does not fit in a u32"
     );
-    put_u32(out, value as u32);
+    write_u32(out, value as u32);
 }
 
 pub(crate) fn read_array<'a, const N: usize>(bytes: &mut &'a [u8]) -> Option<&'a [u8; N]> {
-    let (head, tail) = bytes.split_first_chunk::<N>()?;
-    *bytes = tail;
-    Some(head)
+    let (array, rest) = bytes.split_first_chunk::<N>()?;
+    *bytes = rest;
+    Some(array)
 }
 
 pub(crate) fn read_u8(bytes: &mut &[u8]) -> Option<u8> {
-    let (&head, tail) = bytes.split_first()?;
-    *bytes = tail;
-    Some(head)
+    let (&byte, rest) = bytes.split_first()?;
+    *bytes = rest;
+    Some(byte)
 }
 
 pub(crate) fn read_u16(bytes: &mut &[u8]) -> Option<u16> {
@@ -43,9 +43,9 @@ pub(crate) fn read_usize(bytes: &mut &[u8]) -> Option<usize> {
 }
 
 pub(crate) fn read_bytes<'a>(bytes: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
-    let (head, tail) = bytes.split_at_checked(len)?;
-    *bytes = tail;
-    Some(head)
+    let (taken, rest) = bytes.split_at_checked(len)?;
+    *bytes = rest;
+    Some(taken)
 }
 
 pub(crate) fn read_length_prefixed<'a>(bytes: &mut &'a [u8]) -> Option<&'a [u8]> {
@@ -58,7 +58,7 @@ pub(crate) fn skip(bytes: &mut &[u8], len: usize) -> Option<()> {
 }
 
 /// Past the NUL too.
-pub(crate) fn skip_cstr(bytes: &mut &[u8]) -> Option<()> {
+pub(crate) fn skip_c_str(bytes: &mut &[u8]) -> Option<()> {
     let len = bytes.iter().position(|&byte| byte == 0)?;
     skip(bytes, len + 1)
 }

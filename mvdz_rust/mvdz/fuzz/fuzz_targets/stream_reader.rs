@@ -5,9 +5,9 @@ use std::io::Read;
 
 struct Dribble<'a>(&'a [u8], usize);
 impl Read for Dribble<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let len = buf.len().min(5).min(self.0.len() - self.1);
-        buf[..len].copy_from_slice(&self.0[self.1..self.1 + len]);
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let len = buffer.len().min(5).min(self.0.len() - self.1);
+        buffer[..len].copy_from_slice(&self.0[self.1..self.1 + len]);
         self.1 += len;
         Ok(len)
     }

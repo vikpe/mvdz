@@ -81,9 +81,9 @@ fn closed_stdout_is_quiet() -> anyhow::Result<()> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        let mut buf = [0u8; 16];
+        let mut buffer = [0u8; 16];
         let mut stdout = child.stdout.take().context("a piped stdout")?;
-        stdout.read_exact(&mut buf).ok();
+        stdout.read_exact(&mut buffer).ok();
         drop(stdout);
         let outcome = child.wait_with_output()?;
         let stderr = String::from_utf8_lossy(&outcome.stderr);

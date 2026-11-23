@@ -4,11 +4,11 @@
 use crate::decode::decode_segment;
 use crate::error::{Error, Result};
 use crate::format::{
-    Header, MAX_SEGMENT_CODED, MAX_SEGMENTS, SEGMENT_FIELDS_LEN, header_bytes, models_block,
-    parse_segment_header, segment_block, segment_header_bytes,
+    Header, MAX_CODED_LEN, SEGMENT_FIELDS_SIZE, header_bytes, parse_segment_header,
+    segment_header_bytes, write_models, write_segment,
 };
 use crate::memory::segments_in_flight;
-use crate::parallel::{par_map, thread_count};
+use crate::parallel::{parallel_map, thread_count};
 use crate::protocol::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, FrameRun, ProtocolState, frame_len,
     frame_run,
@@ -23,11 +23,11 @@ use std::io::{Cursor, ErrorKind, Read, Seek, Write};
 /// # Errors
 ///
 /// As [`Encoder::encode`].
-pub fn encode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
+pub fn encode(demo: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     let mut file = Vec::new();
     Encoder::new()
         .max_threads(max_threads)
-        .encode(Cursor::new(bytes), &mut file)?;
+        .encode(Cursor::new(demo), &mut file)?;
     Ok(file)
 }
 
@@ -77,31 +77,33 @@ impl Encoder {
     /// segments, [`Error::Io`] when reading or writing fails or the input changes between the
     /// passes, [`Error::Internal`] when a segment fails its self-check (a bug).
     pub fn encode(&self, mut input: impl Read + Seek, mut output: impl Write) -> Result<()> {
-        let counted = self.count(&mut input)?;
-        let ids: Vec<usize> = (0..counted.file_models.len())
-            .filter(|&stream| counted.file_models[stream].is_some())
-            .collect();
-        let mut start = header_bytes(&counted.header).to_vec();
-        let decoder_models = if ids.is_empty() {
-            models_block(&mut start, &[]);
+        let first_pass = self.first_pass(&mut input)?;
+        let mut start = header_bytes(&first_pass.header).to_vec();
+        let models_body = segment::models_body(&first_pass.file_models);
+        write_models(&mut start, &models_body);
+        let decoder_models = if models_body.is_empty() {
             None
         } else {
-            let models_body = segment::models_body(&counted.file_models, &ids);
-            models_block(&mut start, &models_body);
             let models = read_models_block(&models_body, self.threads, u64::MAX)
                 .map_err(|_| Error::Internal("the encoder's models do not read back"))?;
             Some(models)
         };
         output.write_all(&start)?;
         input.rewind()?;
-        self.code(&counted, decoder_models.as_ref(), &mut input, &mut output)?;
+        self.second_pass(
+            &first_pass,
+            decoder_models.as_ref(),
+            &mut input,
+            &mut output,
+        )?;
         Ok(output.flush()?)
     }
 
-    /// Pass 1 (FORMAT.md 8). A segment starts in the protocol the one before ends in, so
-    /// the segments of a batch are walked in parallel from the end protocol of the batch
-    /// before, and the few that start in another protocol walked again.
-    fn count(&self, input: &mut impl Read) -> Result<Counted> {
+    /// FORMAT.md 8 rule 3: a batch is walked in parallel from the end protocol of the batch
+    /// before; the few segments that start in another protocol are walked again.
+    fn first_pass(&self, input: &mut impl Read) -> Result<FirstPass> {
+        /// An encoder rule, not a reader rule.
+        const MAX_SEGMENT_COUNT: usize = 1 << 16;
         let mut segments = SegmentReader::new(input);
         let mut model_builder = segment::ModelBuilder::default();
         let mut protocol = ProtocolState::default();
@@ -129,7 +131,7 @@ impl Encoder {
                 break;
             }
             let batch_protocol = protocol;
-            let mut walks = par_map(self.threads, &batch, |raw| {
+            let mut walks = parallel_map(self.threads, &batch, |raw| {
                 SegmentWalk::new(raw, batch_protocol)
             });
             for (raw, walk) in batch.iter().zip(walks.iter_mut()) {
@@ -143,16 +145,16 @@ impl Encoder {
                     raw.len() as u64,
                 ));
                 sha256.update(raw);
-                header.size_bytes += raw.len() as u64;
+                header.size += raw.len() as u64;
                 header.duration_ms += u64::from(segment::duration_ms(raw));
                 plans.push(SegmentPlan {
                     len: raw.len(),
                     crc32: segment_crc32,
                     start_protocol: walk.start_protocol,
-                    is_walkable: walk.is_walkable,
+                    is_walked: walk.is_walked,
                 });
             }
-            if plans.len() > MAX_SEGMENTS {
+            if plans.len() > MAX_SEGMENT_COUNT {
                 return Err(Error::DemoTooLarge);
             }
             let walked: Vec<&Walked> = walks.iter().map(|walk| &walk.walked).collect();
@@ -160,34 +162,34 @@ impl Encoder {
         }
         header.crc32 = crc32.finalize();
         header.sha256 = sha256.finalize().into();
-        Ok(Counted {
+        Ok(FirstPass {
             header,
             file_models: model_builder.models(self.threads),
             plans,
         })
     }
 
-    /// Pass 2: the segments as pass 1 cut them, each written once it decodes to its input.
-    fn code(
+    /// The segments as the first pass cut them, each written once it decodes to its input.
+    fn second_pass(
         &self,
-        counted: &Counted,
+        first_pass: &FirstPass,
         decoder_models: Option<&Models>,
         input: &mut impl Read,
         output: &mut impl Write,
     ) -> Result<()> {
-        for plans in counted.plans.chunks(self.segments_in_flight()) {
+        for plans in first_pass.plans.chunks(self.segments_in_flight()) {
             let mut batch = Vec::with_capacity(plans.len());
             for plan in plans {
                 let mut raw = vec![0u8; plan.len];
                 input.read_exact(&mut raw)?;
                 batch.push((raw, plan));
             }
-            let bodies = par_map(self.threads, &batch, |(raw, plan)| {
-                segment_body(raw, plan, &counted.file_models, decoder_models)
+            let bodies = parallel_map(self.threads, &batch, |(raw, plan)| {
+                encode_segment(raw, plan, &first_pass.file_models, decoder_models)
             });
             for body in bodies {
                 let mut block = Vec::new();
-                segment_block(&mut block, &body?);
+                write_segment(&mut block, &body?);
                 output.write_all(&block)?;
             }
         }
@@ -204,14 +206,14 @@ impl Encoder {
 
 /// Threads never change the file written. Skips the input check.
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) fn compress(src: &[u8], threads: usize) -> Result<Vec<u8>> {
+pub(crate) fn encode_any(demo: &[u8], threads: usize) -> Result<Vec<u8>> {
     let encoder = Encoder {
         threads,
         max_memory: None,
         is_input_checked: false,
     };
     let mut file = Vec::new();
-    encoder.encode(Cursor::new(src), &mut file)?;
+    encoder.encode(Cursor::new(demo), &mut file)?;
     Ok(file)
 }
 
@@ -241,7 +243,7 @@ fn starts_like_mvd(bytes: &[u8]) -> bool {
     if bytes.len() < 2 {
         return false;
     }
-    let head = match bytes[1] & 7 {
+    let header_size = match bytes[1] & 7 {
         DEM_MULTIPLE => 10,
         DEM_READ | DEM_SINGLE | DEM_STATS | DEM_ALL => 6,
         _ => return false,
@@ -249,11 +251,11 @@ fn starts_like_mvd(bytes: &[u8]) -> bool {
     let Some(first_len) = frame_len(bytes, 0) else {
         return false;
     };
-    if first_len <= head {
+    if first_len <= header_size {
         return false;
     }
     if segment::walk(&bytes[..first_len], ProtocolState::default())
-        .is_some_and(|(walked, _)| walked.unstructured_len() == 0)
+        .is_some_and(|(walked, _)| !walked.has_escape())
     {
         return true;
     }
@@ -261,7 +263,7 @@ fn starts_like_mvd(bytes: &[u8]) -> bool {
 }
 
 #[derive(Debug)]
-struct Counted {
+struct FirstPass {
     header: Header,
     file_models: Vec<Option<FileModel>>,
     plans: Vec<SegmentPlan>,
@@ -273,21 +275,21 @@ struct SegmentPlan {
     len: usize,
     crc32: u32,
     start_protocol: ProtocolState,
-    is_walkable: bool,
+    is_walked: bool,
 }
 
 /// A pass 1 walk of one segment.
 struct SegmentWalk {
     start_protocol: ProtocolState,
     end_protocol: ProtocolState,
-    is_walkable: bool,
+    is_walked: bool,
     /// All tail when the segment does not walk.
     walked: Walked,
 }
 
 impl SegmentWalk {
     fn new(raw: &[u8], start_protocol: ProtocolState) -> Self {
-        let (walked, end_protocol, is_walkable) = match segment::walk(raw, start_protocol) {
+        let (walked, end_protocol, is_walked) = match segment::walk(raw, start_protocol) {
             Some((walked, end_protocol)) => (walked, end_protocol, true),
             None => (
                 segment::walk_tail(raw, start_protocol),
@@ -298,7 +300,7 @@ impl SegmentWalk {
         Self {
             start_protocol,
             end_protocol,
-            is_walkable,
+            is_walked,
             walked,
         }
     }
@@ -306,7 +308,7 @@ impl SegmentWalk {
 
 /// The segment fields and the coded segment. FORMAT.md 8 rule 5: transform-coded, else
 /// all tail, else stored; rule 7: it decodes to `raw`.
-fn segment_body(
+fn encode_segment(
     raw: &[u8],
     plan: &SegmentPlan,
     file_models: &[Option<FileModel>],
@@ -317,9 +319,10 @@ fn segment_body(
         return Err(Error::Io(ErrorKind::InvalidData));
     }
     let coded_with_models = |walked: &Walked| {
-        segment::encode(walked, file_models).filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)
+        segment::encode_transform(walked, file_models)
+            .filter(|coded| coded.len() as u64 <= MAX_CODED_LEN)
     };
-    let transform_coded = (plan.is_walkable)
+    let transform_coded = (plan.is_walked)
         .then(|| segment::walk(raw, plan.start_protocol))
         .flatten()
         .and_then(|(walked, _)| coded_with_models(&walked));
@@ -337,7 +340,7 @@ fn segment_body(
 }
 
 fn decodes_to(body: &[u8], raw: &[u8], decoder_models: Option<&Models>) -> bool {
-    let Ok(header) = parse_segment_header(&body[..SEGMENT_FIELDS_LEN]) else {
+    let Ok(header) = parse_segment_header(&body[..SEGMENT_FIELDS_SIZE]) else {
         return false;
     };
     let mut decoded = vec![0u8; raw.len()];
@@ -356,11 +359,11 @@ mod tests {
             len: demo.len(),
             crc32: crc32fast::hash(demo),
             start_protocol: ProtocolState::default(),
-            is_walkable: false,
+            is_walked: false,
         };
-        let body = segment_body(demo, &plan, &[], None)?;
+        let body = encode_segment(demo, &plan, &[], None)?;
         let stored_len = demo.len() + 16;
-        assert!(body.ends_with(demo) && body.len() == SEGMENT_FIELDS_LEN + stored_len);
+        assert!(body.ends_with(demo) && body.len() == SEGMENT_FIELDS_SIZE + stored_len);
         Ok(())
     }
 }

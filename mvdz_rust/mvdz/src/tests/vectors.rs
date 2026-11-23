@@ -106,12 +106,12 @@ fn token_body(
     blob_counts: &[(usize, usize)],
     tokens: &crate::lz::Tokens,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    let (models, ids, body) = token_models(structural, blob_counts, tokens)?;
-    Ok((crate::segment::models_body(&models, &ids), body))
+    let (models, body) = token_models(structural, blob_counts, tokens)?;
+    Ok((crate::segment::models_body(&models), body))
 }
 
-/// The models by stream id before they are coded, their ids, and the transform body.
-type TokenModels = (Vec<Option<crate::rans::FileModel>>, Vec<usize>, Vec<u8>);
+/// The models by stream id before they are coded, and the transform body.
+type TokenModels = (Vec<Option<crate::rans::FileModel>>, Vec<u8>);
 
 /// As [`token_body`], with the models not yet coded.
 fn token_models(
@@ -121,8 +121,8 @@ fn token_models(
 ) -> anyhow::Result<TokenModels> {
     use crate::rans;
     use crate::streams::{LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL, is_structural};
-    fn file_model(alphabet: usize, symbols: &[u8], contexts: &[u16]) -> rans::FileModel {
-        let mut tally = rans::Tally::new(alphabet);
+    fn file_model(alphabet_size: usize, symbols: &[u8], contexts: &[u16]) -> rans::FileModel {
+        let mut tally = rans::Tally::new(alphabet_size);
         tally.add(symbols, contexts);
         tally.file_model()
     }
@@ -132,15 +132,15 @@ fn token_models(
             let stream = rans::StreamSymbols {
                 symbols: symbols.to_vec(),
                 contexts: vec![0; symbols.len()],
-                extra: Vec::new(),
+                mantissas: Vec::new(),
             };
             (id, stream)
         })
         .collect();
     let token_streams = [
         (LZ_LITERAL, &tokens.literals),
-        (LZ_LENGTH, &tokens.lens),
-        (LZ_DISTANCE, &tokens.dists),
+        (LZ_LENGTH, &tokens.lengths),
+        (LZ_DISTANCE, &tokens.distances),
     ];
     let streams = (structural_streams.iter())
         .map(|(id, stream)| (*id, stream))
@@ -149,12 +149,12 @@ fn token_models(
     let mut coded: Vec<(usize, rans::FileModel, Vec<u8>)> = Vec::new();
     for (id, stream) in streams {
         if !stream.symbols.is_empty() {
-            let alphabet = if is_structural(id) {
-                256
+            let alphabet_size = if is_structural(id) {
+                rans::STRUCTURAL_ALPHABET_SIZE
             } else {
-                rans::NUMERIC_ALPHABET
+                rans::NUMERIC_ALPHABET_SIZE
             };
-            let model = file_model(alphabet, &stream.symbols, &stream.contexts);
+            let model = file_model(alphabet_size, &stream.symbols, &stream.contexts);
             let body = rans::encode_stream(stream, &model).context(UNCODABLE)?;
             coded.push((id, model, body));
         }
@@ -163,13 +163,11 @@ fn token_models(
     let coded_entries = (coded.iter()).map(|(id, _, stream_body)| (*id, stream_body.len()));
     let entries: Vec<(usize, usize)> = coded_entries.chain(blob_counts.iter().copied()).collect();
     let mut bodies = Vec::new();
-    let mut ids = Vec::new();
     let mut models: Vec<Option<rans::FileModel>> = Vec::new();
     for (id, model, stream_body) in coded {
         bodies.extend_from_slice(&stream_body);
         models.resize_with(models.len().max(id + 1), || None);
         models[id] = Some(model);
-        ids.push(id);
     }
     let table = StreamTable {
         fields: [0; 3],
@@ -177,7 +175,7 @@ fn token_models(
         entries,
         bodies,
     };
-    Ok((models, ids, table.build()))
+    Ok((models, table.build()))
 }
 
 /// A file whose only command loop escapes one command and walks the next, and its demo.
@@ -207,7 +205,7 @@ fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Resu
     segment.extend_from_slice(body);
     Ok(Parts {
         header: Header {
-            size_bytes: demo.len() as u64,
+            size: demo.len() as u64,
             duration_ms: u64::from(duration_ms),
             crc32: crc,
             sha256: Sha256::digest(demo).into(),
@@ -239,7 +237,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         "one byte after the last segment",
     );
     let mut edited = file_parts.clone();
-    edited.header.size_bytes += 1;
+    edited.header.size += 1;
     add("header-size", edited.build(), "the header's size + 1");
     let mut edited = file_parts.clone();
     edited.header.crc32 ^= 1;
@@ -273,7 +271,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         "the second segment twice",
     );
     let mut edited = file_parts.clone();
-    edited.segments[1][SEGMENT_FIELDS_LEN - 2] ^= 0x10;
+    edited.segments[1][SEGMENT_FIELDS_SIZE - 2] ^= 0x10;
     add(
         "segment-crc",
         edited.build(),
@@ -285,16 +283,13 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         .insert(1, segment_header_bytes(0, 0, crc32fast::hash(&[])));
     add("segment-empty", edited.build(), "an empty segment");
     let mut edited = file_parts.clone();
-    edited.segments[0].resize(
-        SEGMENT_FIELDS_LEN + usize::try_from(MAX_SEGMENT_CODED)? + 1,
-        0,
-    );
+    edited.segments[0].resize(SEGMENT_FIELDS_SIZE + usize::try_from(MAX_CODED_LEN)? + 1, 0);
     add(
         "segment-length",
         edited.build(),
         "the first segment padded with zeros to one byte over the largest coded length (2 MiB)",
     );
-    let mut edited_file = base[..HEADER_LEN].to_vec();
+    let mut edited_file = base[..HEADER_SIZE].to_vec();
     edited_file.extend_from_slice(&(256u32 << 20).to_le_bytes());
     edited_file.extend_from_slice(&[0; 100]);
     add(
@@ -302,9 +297,9 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         edited_file,
         "a models block of 256 MiB declared in a few bytes",
     );
-    let mut edited_file = base[..HEADER_LEN].to_vec();
+    let mut edited_file = base[..HEADER_SIZE].to_vec();
     for segment in &file_parts.segments {
-        segment_block(&mut edited_file, segment);
+        write_segment(&mut edited_file, segment);
     }
     add(
         "models-missing",
@@ -346,9 +341,9 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
         "a usercmd block (type 1, 23 bytes) stored in HIDDEN_MISC, no USERCMD stream",
     );
     let mut edited = file_parts.clone();
-    let mut segment = segment_header_bytes(u32::try_from(MAX_SEGMENT_RAW)?, 0, 0);
+    let mut segment = segment_header_bytes(u32::try_from(MAX_RAW_LEN)?, 0, 0);
     segment.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0, 0]);
-    edited.header.size_bytes = MAX_SEGMENT_RAW;
+    edited.header.size = MAX_RAW_LEN;
     edited.segments = vec![segment];
     add(
         "segment-declared",
@@ -375,11 +370,11 @@ fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     let file_parts = parts(&compress(&demo)?)?;
     anyhow::ensure!(file_parts.segments.len() == 1, "one segment");
     let segment = &file_parts.segments[0];
-    let table = StreamTable::parse(&segment[SEGMENT_FIELDS_LEN..])?;
+    let table = StreamTable::parse(&segment[SEGMENT_FIELDS_SIZE..])?;
     let raw_len = demo.len();
     let with_table = |table: &StreamTable| {
         let mut edited = file_parts.clone();
-        edited.segments[0] = [&segment[..SEGMENT_FIELDS_LEN], &table.build()].concat();
+        edited.segments[0] = [&segment[..SEGMENT_FIELDS_SIZE], &table.build()].concat();
         edited.build()
     };
     let blob_at: Vec<usize> = (0..table.entries.len())
@@ -478,12 +473,24 @@ fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> 
     for (name, tokens, how) in [
         (
             "lz-distance",
-            vec![literal, Token::Match { len: 3, dist: 2 }],
+            vec![
+                literal,
+                Token::Match {
+                    len: 3,
+                    distance: 2,
+                },
+            ],
             "a match reaching 2 bytes back after 1 byte",
         ),
         (
             "lz-overrun",
-            vec![literal, Token::Match { len: 9, dist: 1 }],
+            vec![
+                literal,
+                Token::Match {
+                    len: 9,
+                    distance: 1,
+                },
+            ],
             "a match of 9 bytes where 3 are left",
         ),
     ] {
@@ -625,12 +632,12 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     // slot whatever its count, so only the limit refuses the file
     let literals = b"abc";
     let tokens = crate::lz::tokens(literals);
-    let (mut literal_models, ids, body) = token_models(&[], &[(TAIL, literals.len())], &tokens)?;
+    let (mut literal_models, body) = token_models(&[], &[(TAIL, literals.len())], &tokens)?;
     let lengths = (literal_models[LZ_LENGTH].as_mut()).context("a model of the lengths")?;
     let no_own_contexts = 0u32.to_le_bytes();
-    assert!(lengths.bytes.starts_with(&no_own_contexts) && lengths.bytes[4] > 0);
-    lengths.bytes[4] = crate::math::MAX_QUANTIZED as u8 + 1;
-    let models_body = crate::segment::models_body(&literal_models, &ids);
+    assert!(lengths.raw.starts_with(&no_own_contexts) && lengths.raw[4] > 0);
+    lengths.raw[4] = crate::math::MAX_QUANTIZED as u8 + 1;
+    let models_body = crate::segment::models_body(&literal_models);
     add(
         "tables-quantized",
         one_segment(literals, &(models_body, body))?,
@@ -945,7 +952,7 @@ fn commands_demo() -> Vec<u8> {
 
 fn protocol_change_demo() -> Vec<u8> {
     let small = synthetic(&[(0, "{}")], false);
-    let copies = 3 * crate::segment::SEGMENT_TARGET_RAW / (2 * small.len());
+    let copies = 3 * crate::segment::SEGMENT_TARGET_LEN / (2 * small.len());
     let mut demo = Demo(small.repeat(copies));
     let server_data = message(
         crate::protocol::SVC_SERVER_DATA,
@@ -966,7 +973,7 @@ fn protocol_change_demo() -> Vec<u8> {
 }
 
 fn oversized_frame_demo() -> Vec<u8> {
-    let max_segment = MAX_SEGMENT_RAW as usize;
+    let max_segment = MAX_RAW_LEN as usize;
     let mut demo = Demo(synthetic(&[], false));
     demo.frame(0, 1, &vec![1u8; max_segment + max_segment / 2]);
     demo.0.extend_from_slice(&synthetic(&[], false));
@@ -1100,7 +1107,7 @@ fn truncated_match_demo() -> Vec<u8> {
 fn frames_are_walked_again_after_a_truncated_match() -> anyhow::Result<()> {
     let demo = truncated_match_demo();
     let file = compress(&demo)?;
-    let unframed_segment_or_two = 2 * crate::segment::SEGMENT_TARGET_RAW;
+    let unframed_segment_or_two = 2 * crate::segment::SEGMENT_TARGET_LEN;
     assert!(unstructured_len(&file)? < unframed_segment_or_two);
     assert_eq!(decompress(&file, 1)?, demo);
     Ok(())
@@ -1314,13 +1321,8 @@ fn vectors_reproduce() -> anyhow::Result<()> {
 /// language to check its parser before it compares whole files.
 fn lz_tokens_text() -> String {
     use crate::lz::Token;
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    let mut noise = |bound: u64| {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        (state % bound) as u8
-    };
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut noise = |bound: u64| (rng.next() % bound) as u8;
     // the fifth byte differs each time: only a chain longer than the limit finds the first
     let mut over_the_chain_limit = Vec::new();
     for occurrence in 0..40u8 {
@@ -1348,7 +1350,7 @@ fn lz_tokens_text() -> String {
             .into_iter()
             .map(|token| match token {
                 Token::Literal(byte) => format!("L{byte:02x}"),
-                Token::Match { len, dist } => format!("M{len},{dist}"),
+                Token::Match { len, distance } => format!("M{len},{distance}"),
             })
             .collect();
         let _ = writeln!(text, "{}\t{}", hex(&input), tokens.join(" "));

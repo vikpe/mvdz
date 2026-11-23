@@ -5,26 +5,26 @@ use anyhow::Context as _;
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 
-pub(crate) fn compress(src: &[u8]) -> crate::Result<Vec<u8>> {
-    crate::encode(src, 1)
+pub(crate) fn compress(source: &[u8]) -> crate::Result<Vec<u8>> {
+    crate::encode(source, 1)
 }
 
 pub(crate) fn decompress(file: &[u8], max_threads: u8) -> crate::Result<Vec<u8>> {
     crate::decode(file, max_threads)
 }
 
-pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<Vec<u8>> {
-    crate::encode::compress(src, 1)
+pub(crate) fn compress_unchecked(source: &[u8]) -> crate::Result<Vec<u8>> {
+    crate::encode::encode_any(source, 1)
 }
 
 /// Every segment all tail: the encoder's fallback layout.
-pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn all_tail(source: &[u8]) -> anyhow::Result<Vec<u8>> {
     use crate::segment::{ModelBuilder, cut_points, models_body, walk_tail};
     let protocol = crate::protocol::ProtocolState::default();
-    let walked_segments: Vec<_> = cut_points(src)
+    let walked_segments: Vec<_> = cut_points(source)
         .windows(2)
         .map(|cut| {
-            let raw = &src[cut[0]..cut[1]];
+            let raw = &source[cut[0]..cut[1]];
             (raw, walk_tail(raw, protocol))
         })
         .collect();
@@ -32,12 +32,9 @@ pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
     let counted: Vec<_> = walked_segments.iter().map(|(_, walked)| walked).collect();
     model_builder.add(&counted, 1);
     let models = model_builder.models(1);
-    let model_ids: Vec<usize> = (0..models.len())
-        .filter(|&stream| models[stream].is_some())
-        .collect();
     let mut segments = Vec::new();
     for (raw, walked) in &walked_segments {
-        let coded = crate::segment::encode(walked, &models).context("a tail segment")?;
+        let coded = crate::segment::encode_transform(walked, &models).context("a tail segment")?;
         let mut segment = segment_header_bytes(
             raw.len() as u32,
             crate::segment::duration_ms(raw),
@@ -47,30 +44,26 @@ pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
         segments.push(segment);
     }
     let header = Header {
-        size_bytes: src.len() as u64,
-        duration_ms: u64::from(crate::segment::duration_ms(src)),
-        crc32: crc32fast::hash(src),
-        sha256: Sha256::digest(src).into(),
+        size: source.len() as u64,
+        duration_ms: u64::from(crate::segment::duration_ms(source)),
+        crc32: crc32fast::hash(source),
+        sha256: Sha256::digest(source).into(),
     };
     Ok(Parts {
         header,
-        models: if model_ids.is_empty() {
-            Vec::new()
-        } else {
-            models_body(&models, &model_ids)
-        },
+        models: models_body(&models),
         segments,
     }
     .build())
 }
 
 /// Every segment stored: the encoder's last fallback, a file without models.
-pub(crate) fn all_stored(src: &[u8]) -> Vec<u8> {
+pub(crate) fn all_stored(source: &[u8]) -> Vec<u8> {
     let protocol = crate::protocol::ProtocolState::default();
-    let segments = crate::segment::cut_points(src)
+    let segments = crate::segment::cut_points(source)
         .windows(2)
         .map(|cut| {
-            let raw = &src[cut[0]..cut[1]];
+            let raw = &source[cut[0]..cut[1]];
             let mut segment = segment_header_bytes(
                 raw.len() as u32,
                 crate::segment::duration_ms(raw),
@@ -81,10 +74,10 @@ pub(crate) fn all_stored(src: &[u8]) -> Vec<u8> {
         })
         .collect();
     let header = Header {
-        size_bytes: src.len() as u64,
-        duration_ms: u64::from(crate::segment::duration_ms(src)),
-        crc32: crc32fast::hash(src),
-        sha256: Sha256::digest(src).into(),
+        size: source.len() as u64,
+        duration_ms: u64::from(crate::segment::duration_ms(source)),
+        crc32: crc32fast::hash(source),
+        sha256: Sha256::digest(source).into(),
     };
     Parts {
         header,
@@ -99,7 +92,7 @@ pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
     use crate::streams::{RAW, TAIL};
     let mut total = 0;
     for segment in parts(file)?.segments {
-        let table = StreamTable::parse(&segment[SEGMENT_FIELDS_LEN..])?;
+        let table = StreamTable::parse(&segment[SEGMENT_FIELDS_SIZE..])?;
         let unstructured = (table.entries.iter()).filter(|&&(id, _)| id == RAW || id == TAIL);
         total += unstructured.map(|&(_, size)| size).sum::<usize>();
     }
@@ -139,11 +132,11 @@ impl StreamTable {
     pub(crate) fn build(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for field in self.fields.into_iter().chain([self.stream_count]) {
-            crate::fields::put_usize(&mut out, field);
+            crate::fields::write_usize(&mut out, field);
         }
         for &(id, size) in &self.entries {
-            crate::fields::put_usize(&mut out, id);
-            crate::fields::put_usize(&mut out, size);
+            crate::fields::write_usize(&mut out, id);
+            crate::fields::write_usize(&mut out, size);
         }
         out.extend_from_slice(&self.bodies);
         out
@@ -151,7 +144,7 @@ impl StreamTable {
 }
 
 pub(crate) fn several_segments(demo: &[u8]) -> Vec<u8> {
-    demo.repeat(4 * crate::segment::SEGMENT_TARGET_RAW / demo.len().max(1) + 1)
+    demo.repeat(4 * crate::segment::SEGMENT_TARGET_LEN / demo.len().max(1) + 1)
 }
 
 #[derive(Debug)]
@@ -411,9 +404,9 @@ pub(crate) fn duel() -> Option<Vec<u8>> {
 #[derive(Debug)]
 pub(crate) struct Dribble<'a>(pub &'a [u8], pub usize);
 impl Read for Dribble<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let len = buf.len().min(7).min(self.0.len() - self.1);
-        buf[..len].copy_from_slice(&self.0[self.1..self.1 + len]);
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let len = buffer.len().min(7).min(self.0.len() - self.1);
+        buffer[..len].copy_from_slice(&self.0[self.1..self.1 + len]);
         self.1 += len;
         Ok(len)
     }
@@ -510,12 +503,12 @@ pub(crate) fn models_parts(body: &[u8]) -> anyhow::Result<ModelsParts> {
 
 impl ModelsParts {
     pub(crate) fn build(&self) -> Vec<u8> {
-        use crate::fields::put_usize;
+        use crate::fields::write_usize;
         let mut body = self.meta.clone();
-        put_usize(&mut body, self.entries.len());
+        write_usize(&mut body, self.entries.len());
         for entry in &self.entries {
             for field in [entry.stream, entry.raw_len, entry.coded.len()] {
-                put_usize(&mut body, field);
+                write_usize(&mut body, field);
             }
             body.extend_from_slice(&entry.coded);
         }
@@ -532,20 +525,20 @@ pub(crate) struct Parts {
 
 pub(crate) fn parts(file: &[u8]) -> anyhow::Result<Parts> {
     let header = parse_header(file)?;
-    let mut offset = HEADER_LEN;
+    let mut offset = HEADER_SIZE;
     let mut next_block = |file: &[u8], fields_len: usize| -> anyhow::Result<Vec<u8>> {
         let len =
             crate::fields::read_usize(&mut &file[offset..]).context("a length field")? + fields_len;
-        let block = file[offset + LEN_FIELD_LEN..offset + LEN_FIELD_LEN + len].to_vec();
-        offset += LEN_FIELD_LEN + len;
+        let block = file[offset + LEN_FIELD_SIZE..offset + LEN_FIELD_SIZE + len].to_vec();
+        offset += LEN_FIELD_SIZE + len;
         Ok(block)
     };
     let models = next_block(file, 0)?;
     let mut segments = Vec::new();
     let mut raw = 0;
-    while raw < header.size_bytes {
-        let segment = next_block(file, SEGMENT_FIELDS_LEN)?;
-        raw += u64::from(parse_segment_header(&segment[..SEGMENT_FIELDS_LEN])?.raw_len);
+    while raw < header.size {
+        let segment = next_block(file, SEGMENT_FIELDS_SIZE)?;
+        raw += u64::from(parse_segment_header(&segment[..SEGMENT_FIELDS_SIZE])?.raw_len);
         segments.push(segment);
     }
     Ok(Parts {
@@ -558,9 +551,9 @@ pub(crate) fn parts(file: &[u8]) -> anyhow::Result<Parts> {
 impl Parts {
     pub(crate) fn build(&self) -> Vec<u8> {
         let mut out = header_bytes(&self.header).to_vec();
-        models_block(&mut out, &self.models);
+        write_models(&mut out, &self.models);
         for segment in &self.segments {
-            segment_block(&mut out, segment);
+            write_segment(&mut out, segment);
         }
         out
     }

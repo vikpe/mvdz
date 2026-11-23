@@ -20,6 +20,11 @@ func residualBucket(value int32) uint16 {
 	return uint16(2*bits.Len32(magnitude) - 1 + sign)
 }
 
+// FORMAT.md 1
+func byteResidualBucket(residual uint8) uint16 {
+	return residualBucket(int32(int8(residual)))
+}
+
 // divRound divides by a positive divisor; halves round away from zero.
 func divRound(dividend, divisor int32) int32 {
 	magnitude := uint32(dividend)
@@ -33,9 +38,9 @@ func divRound(dividend, divisor int32) int32 {
 	return quotient
 }
 
-// gridFromF32Bits is the grid value of a usercmd angle, FORMAT.md 4.11; false
+// gridFromFloat32Bits is the grid value of a usercmd angle, FORMAT.md 4.11; false
 // for -0.0, NaN, +180 and anything else off the 360/65536 grid.
-func gridFromF32Bits(angleBits uint32) (uint16, bool) {
+func gridFromFloat32Bits(angleBits uint32) (uint16, bool) {
 	// The float is significand * 2^(exponent - 150): 8192 times it is
 	// significand >> shift.
 	const shiftBias = 150 - 13
@@ -49,12 +54,12 @@ func gridFromF32Bits(angleBits uint32) (uint16, bool) {
 	if angleBits>>31 != 0 {
 		grid = -magnitude
 	}
-	return grid, gridToF32Bits(grid) == angleBits
+	return grid, gridToFloat32Bits(grid) == angleBits
 }
 
-// gridToF32Bits is the float bits of grid * 45/8192, FORMAT.md 5.6. It is
+// gridToFloat32Bits is the float bits of grid * 45/8192, FORMAT.md 5.6. It is
 // exact: |grid| * 45 has at most 21 bits.
-func gridToF32Bits(grid uint16) uint32 {
+func gridToFloat32Bits(grid uint16) uint32 {
 	value := int32(int16(grid))
 	if value == 0 {
 		return 0

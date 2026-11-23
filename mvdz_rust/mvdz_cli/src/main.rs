@@ -325,7 +325,7 @@ fn header_json(header: &mvdz::Header) -> String {
     // numbers and hexadecimal strings only: nothing needs escaping
     let mut json = format!(
         "{{\"size_bytes\":{},\"duration_ms\":{},\"crc32\":\"{:08x}\",\"sha256\":\"",
-        header.size_bytes(),
+        header.size(),
         header.duration_ms(),
         header.crc32(),
     );

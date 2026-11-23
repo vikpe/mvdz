@@ -3,7 +3,7 @@
 use crate::math::div_round;
 
 /// One player's or entity's last 16-bit values on one axis.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct AxisTrack {
     last: u16,
     previous: u16,
@@ -50,18 +50,18 @@ impl AxisTrack {
         self.last
             .wrapping_add(self.velocity().cast_unsigned() as u16)
     }
-    /// last + velocity * `time_delta_now` / `time_delta_previous`, rounded, wrapping at 16 bits.
+    /// last + velocity * `now` / `before`, rounded, wrapping at 16 bits.
     #[inline(always)]
     pub(crate) fn predict_time_scaled(self, time_deltas: TimeDeltas) -> u16 {
         /// Frame intervals are clamped so the scaled velocity fits 32 bits.
         const TIME_DELTA_MAX: i32 = 32767;
-        let TimeDeltas { now, previous } = time_deltas;
-        if now == previous || previous <= 0 || now < 0 {
+        let TimeDeltas { now, before } = time_deltas;
+        if now == before || before <= 0 || now < 0 {
             return self.predict_linear();
         }
         let scaled_velocity = div_round(
             self.velocity() * now.min(TIME_DELTA_MAX),
-            previous.min(TIME_DELTA_MAX),
+            before.min(TIME_DELTA_MAX),
         );
         self.last
             .wrapping_add(scaled_velocity.cast_unsigned() as u16)
@@ -69,7 +69,7 @@ impl AxisTrack {
 }
 
 /// One player's or entity's last float coordinates on one axis, as f32 bits.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct FloatTrack {
     last_bits: u32,
     previous_bits: u32,
@@ -99,10 +99,10 @@ impl FloatTrack {
 }
 
 /// Between a player's frames: this one and the one before.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TimeDeltas {
     now: i32,
-    previous: i32,
+    before: i32,
 }
 
 #[inline(always)]
@@ -111,6 +111,6 @@ pub(crate) fn time_deltas(frame_times: &mut (u32, u32), time: u32) -> TimeDeltas
     *frame_times = (time, last);
     TimeDeltas {
         now: time.wrapping_sub(last).cast_signed(),
-        previous: last.wrapping_sub(previous).cast_signed(),
+        before: last.wrapping_sub(previous).cast_signed(),
     }
 }

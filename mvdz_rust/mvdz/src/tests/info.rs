@@ -1,5 +1,5 @@
 use super::common::*;
-use crate::format::{HEADER_LEN, Header, header_bytes, parse_header};
+use crate::format::{HEADER_SIZE, Header, header_bytes, parse_header};
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
@@ -15,7 +15,7 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         let file = compress(&demo)?;
         let header = parse_header(&file)?;
         assert_eq!(&file[..4], b"MVDZ");
-        assert_eq!(header.size_bytes, demo.len() as u64);
+        assert_eq!(header.size, demo.len() as u64);
         assert_eq!(
             header.duration_ms,
             u64::from(crate::segment::duration_ms(&demo))
@@ -29,12 +29,12 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         assert_eq!(segment_durations, header.duration_ms);
         assert_eq!(header.crc32, crc32fast::hash(&demo));
         assert_eq!(header.sha256, <[u8; 32]>::from(Sha256::digest(&demo)));
-        assert_eq!(header_bytes(&header), file[..HEADER_LEN]);
+        assert_eq!(header_bytes(&header), file[..HEADER_SIZE]);
         let decoder = crate::Decoder::new(Cursor::new(&file))?;
         assert_eq!(*decoder.header(), header);
         assert_eq!(
             parts(&file)?.segments.len() > 1,
-            demo.len() > crate::segment::SEGMENT_TARGET_RAW
+            demo.len() > crate::segment::SEGMENT_TARGET_LEN
         );
         assert_eq!(
             readers_agree(&file, "header").context("every reader refuses")?,
@@ -53,8 +53,8 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
     assert_eq!(file_parts.build(), file);
     #[expect(clippy::type_complexity, reason = "a table of named edits")]
     let cases: [(&str, fn(&mut Header)); 3] = [
-        ("size + 1", |header| header.size_bytes += 1),
-        ("size - 1", |header| header.size_bytes -= 1),
+        ("size + 1", |header| header.size += 1),
+        ("size - 1", |header| header.size -= 1),
         ("crc", |header| header.crc32 ^= 1),
     ];
     for (what, edit) in cases {
@@ -92,9 +92,9 @@ fn wrong_header_fields_are_refused() -> anyhow::Result<()> {
         0,
         3,
         7,
-        HEADER_LEN - 1,
-        HEADER_LEN,
-        HEADER_LEN + 1,
+        HEADER_SIZE - 1,
+        HEADER_SIZE,
+        HEADER_SIZE + 1,
         file.len() / 2,
         file.len() - 1,
     ] {

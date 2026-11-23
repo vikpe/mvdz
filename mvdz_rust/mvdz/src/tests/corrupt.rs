@@ -42,9 +42,9 @@ fn mutated_streams_never_panic() -> anyhow::Result<()> {
         return Ok(());
     };
     let mut rng = Rng(0xdead_beef_cafe_f00d);
-    for src in demos {
-        let file = compress(&src)?;
-        assert_eq!(decompress(&file, 1)?, src);
+    for source in demos {
+        let file = compress(&source)?;
+        assert_eq!(decompress(&file, 1)?, source);
         for _ in 0..50 {
             let mut mutated = file.clone();
             match rng.below(4) {
@@ -71,7 +71,7 @@ fn mutated_streams_never_panic() -> anyhow::Result<()> {
                 }
             }
             if let Some(decoded) = readers_agree(&mutated, "mutation") {
-                assert!(decoded == src, "a corrupt file decoded to other bytes");
+                assert!(decoded == source, "a corrupt file decoded to other bytes");
             }
         }
     }

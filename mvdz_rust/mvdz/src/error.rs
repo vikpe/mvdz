@@ -52,6 +52,6 @@ impl From<Error> for std::io::Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[inline]
-pub(crate) fn bad<T>(what: &'static str) -> Result<T> {
-    Err(Error::Corrupt(what))
+pub(crate) fn corrupt<T>(rule: &'static str) -> Result<T> {
+    Err(Error::Corrupt(rule))
 }

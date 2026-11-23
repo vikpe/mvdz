@@ -1,66 +1,69 @@
 package mvdz
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"hash/crc32"
-	"io"
 )
 
 // Header describes the original demo.
 type Header struct {
 	Size       uint64
 	DurationMs uint64
-	Crc32      uint32
-	Sha256     [32]byte // a claim of the encoder: not checked by decoding
+	CRC32      uint32
+	SHA256     [sha256.Size]byte // a claim of the encoder: not checked by decoding
 }
 
 const (
-	headerSize    = 60
-	formatVersion = 3
-	maxModelsLen  = 1 << 22
+	magic             = "MVDZ"
+	formatVersion     = 3
+	headerSize        = 60
+	segmentFieldsSize = 4 + 4 + 4
+
+	maxRawLen    = 1 << 20
+	maxCodedLen  = 1 << 21
+	maxModelsLen = 1 << 22
 	// Of the models before they are coded, the meta model included.
 	maxModelsRawLen = 1 << 22
-	maxCodedLen     = 1 << 21
-	maxRawLen       = 1 << 20
 )
 
 // FORMAT.md 2.1
-func readHeader(input io.Reader) (Header, error) {
-	var fields [headerSize]byte
-	count, err := io.ReadFull(input, fields[:])
-	isTruncated := err == io.EOF || err == io.ErrUnexpectedEOF
-	if err != nil && !isTruncated {
-		return Header{}, err
+func parseHeader(block []byte) (Header, error) {
+	if len(block) < len(magic) || string(block[:len(magic)]) != magic {
+		return Header{}, ErrNotMVDZ
 	}
-	if count < 4 || string(fields[:4]) != "MVDZ" {
-		return Header{}, ErrNotMvdz
-	}
-	if count >= 8 && binary.LittleEndian.Uint32(fields[4:]) != formatVersion {
+	if len(block) >= 8 && binary.LittleEndian.Uint32(block[4:]) != formatVersion {
 		return Header{}, ErrUnsupportedVersion
 	}
-	if isTruncated {
-		return Header{}, corrupt("incomplete file")
+	if len(block) < headerSize {
+		return Header{}, corrupt("truncated header")
 	}
 	header := Header{
-		Size:       binary.LittleEndian.Uint64(fields[8:]),
-		DurationMs: binary.LittleEndian.Uint64(fields[16:]),
-		Crc32:      binary.LittleEndian.Uint32(fields[24:]),
+		Size:       binary.LittleEndian.Uint64(block[8:]),
+		DurationMs: binary.LittleEndian.Uint64(block[16:]),
+		CRC32:      binary.LittleEndian.Uint32(block[24:]),
 	}
-	copy(header.Sha256[:], fields[28:])
+	copy(header.SHA256[:], block[28:])
 	return header, nil
 }
 
-// appendHeader writes the file header, FORMAT.md 2.1.
+// FORMAT.md 2.1
 func appendHeader(file []byte, header Header) []byte {
-	file = append(file, "MVDZ"...)
+	file = append(file, magic...)
 	file = binary.LittleEndian.AppendUint32(file, formatVersion)
 	file = binary.LittleEndian.AppendUint64(file, header.Size)
 	file = binary.LittleEndian.AppendUint64(file, header.DurationMs)
-	file = binary.LittleEndian.AppendUint32(file, header.Crc32)
-	return append(file, header.Sha256[:]...)
+	file = binary.LittleEndian.AppendUint32(file, header.CRC32)
+	return append(file, header.SHA256[:]...)
 }
 
-// appendSegment writes a segment block, FORMAT.md 2.3.
+// FORMAT.md 2.2
+func appendModels(file []byte, body []byte) []byte {
+	file = binary.LittleEndian.AppendUint32(file, uint32(len(body)))
+	return append(file, body...)
+}
+
+// FORMAT.md 2.3
 func appendSegment(file []byte, raw []byte, durationMs uint32, coded []byte) []byte {
 	file = binary.LittleEndian.AppendUint32(file, uint32(len(coded)))
 	file = binary.LittleEndian.AppendUint32(file, uint32(len(raw)))

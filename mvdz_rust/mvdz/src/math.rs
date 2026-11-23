@@ -29,21 +29,20 @@ pub(crate) fn clamped_bucket(residual: i32, max: u8) -> u32 {
     u32::from(residual_bucket(residual).min(max))
 }
 
-/// floor(2^40 / d) + 1: n * RECIPROCALS[d] >> 40 == n / d exactly for
-/// 0 <= n < 2^31, 1 <= d <= 255 (the error n/2^40 < 2^-9 < 1/d).
-static RECIPROCALS: [u64; 256] = {
-    let mut table = [0u64; 256];
-    let mut divisor = 1;
-    while divisor < 256 {
-        table[divisor] = (1u64 << 40) / divisor as u64 + 1;
-        divisor += 1;
-    }
-    table
-};
-
 /// `divisor` > 0; halves round away from zero.
 #[inline(always)]
 pub(crate) fn div_round(dividend: i32, divisor: i32) -> i32 {
+    /// floor(2^40 / d) + 1: `n * RECIPROCALS[d] >> 40 == n / d` exactly for
+    /// 0 <= n < 2^31, 1 <= d <= 255 (the error n/2^40 < 2^-9 < 1/d).
+    static RECIPROCALS: [u64; 256] = {
+        let mut table = [0u64; 256];
+        let mut divisor = 1;
+        while divisor < 256 {
+            table[divisor] = (1u64 << 40) / divisor as u64 + 1;
+            divisor += 1;
+        }
+        table
+    };
     let magnitude = dividend.unsigned_abs() + divisor.cast_unsigned() / 2;
     let quotient = if divisor < 256 {
         ((u128::from(magnitude) * u128::from(RECIPROCALS[divisor.cast_unsigned() as usize])) >> 40)
@@ -123,14 +122,14 @@ pub(crate) fn quantize(count: u32) -> u32 {
             step = octave * STEPS_PER_OCTAVE + octave_step;
         }
     }
-    let lo = quantized_weight(1 + step);
-    let hi = quantized_weight(2 + step);
-    // compare weight/lo with hi/weight  <=>  weight*weight vs lo*hi
+    let low = quantized_weight(1 + step);
+    let high = quantized_weight(2 + step);
+    // compare weight/low with high/weight  <=>  weight*weight vs low*high
     #[expect(
         clippy::suspicious_operation_groupings,
-        reason = "weight*weight against lo*hi is meant"
+        reason = "weight*weight against low*high is meant"
     )]
-    if u128::from(weight) * u128::from(weight) > u128::from(lo) * u128::from(hi) {
+    if u128::from(weight) * u128::from(weight) > u128::from(low) * u128::from(high) {
         2 + step
     } else {
         1 + step
@@ -141,41 +140,41 @@ pub(crate) fn quantize(count: u32) -> u32 {
 /// for at most 256 `weights` of [`quantized_weight`] and a `total` of at most 2^12.
 pub(crate) fn normalize(weights: &[u64], total: u32) -> Vec<u32> {
     let weight_total: u64 = weights.iter().sum();
-    let mut freqs = vec![0u32; weights.len()];
+    let mut frequencies = vec![0u32; weights.len()];
     if weight_total == 0 {
-        return freqs;
+        return frequencies;
     }
     let mut sum: i64 = 0;
     for (symbol, &weight) in weights.iter().enumerate() {
         if weight > 0 {
-            freqs[symbol] = ((weight * u64::from(total) / weight_total) as u32).max(1);
-            sum += i64::from(freqs[symbol]);
+            frequencies[symbol] = ((weight * u64::from(total) / weight_total) as u32).max(1);
+            sum += i64::from(frequencies[symbol]);
         }
     }
-    let mut diff = i64::from(total) - sum;
-    while diff != 0 {
+    let mut difference = i64::from(total) - sum;
+    while difference != 0 {
         // adjust the largest entry (first one on ties)
         let mut largest = 0;
-        for symbol in 0..freqs.len() {
-            if freqs[symbol] > freqs[largest] {
+        for symbol in 0..frequencies.len() {
+            if frequencies[symbol] > frequencies[largest] {
                 largest = symbol;
             }
         }
-        if diff > 0 {
-            freqs[largest] += diff.cast_unsigned() as u32;
-            diff = 0;
+        if difference > 0 {
+            frequencies[largest] += difference.cast_unsigned() as u32;
+            difference = 0;
         } else {
-            let take = (-diff)
-                .min(i64::from(freqs[largest]) - 1)
-                .min((i64::from(freqs[largest]) + 1) / 2);
+            let take = (-difference)
+                .min(i64::from(frequencies[largest]) - 1)
+                .min((i64::from(frequencies[largest]) + 1) / 2);
             if take <= 0 {
                 break;
             }
-            freqs[largest] -= take.cast_unsigned() as u32;
-            diff += take;
+            frequencies[largest] -= take.cast_unsigned() as u32;
+            difference += take;
         }
     }
-    freqs
+    frequencies
 }
 
 /// log2 of `value` (at least 1) with 16 fraction bits, rounded down: integer arithmetic,
@@ -205,6 +204,7 @@ pub(crate) fn log2_fixed(value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::common::Rng;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -274,16 +274,14 @@ mod tests {
             -((-dividend + divisor / 2) / divisor)
         }
     }
+
     #[test]
     fn div_round_matches_reference() {
-        let mut rng_state = 12345u64;
+        let mut rng = Rng(12345);
         for divisor in 1..600i32 {
             for _ in 0..2000 {
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
                 let dividend =
-                    (rng_state % (2 * 32768 * 32767) as u64).cast_signed() - 32768 * 32767;
+                    (rng.next() % (2 * 32768 * 32767) as u64).cast_signed() - 32768 * 32767;
                 assert_eq!(
                     i64::from(div_round(dividend as i32, divisor)),
                     div_round_ref(dividend, i64::from(divisor)),

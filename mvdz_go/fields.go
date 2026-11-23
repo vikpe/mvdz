@@ -13,7 +13,7 @@ type byteCursor struct {
 	isShort  bool
 }
 
-func (cursor *byteCursor) bytes(count uint32) []byte {
+func (cursor *byteCursor) readBytes(count uint32) []byte {
 	unread := cursor.data[cursor.position:]
 	if cursor.isShort || uint64(count) > uint64(len(unread)) {
 		cursor.isShort = true
@@ -24,35 +24,35 @@ func (cursor *byteCursor) bytes(count uint32) []byte {
 }
 
 func (cursor *byteCursor) skip(count uint32) {
-	cursor.bytes(count)
+	cursor.readBytes(count)
 }
 
-func (cursor *byteCursor) u8() uint8 {
-	field := cursor.bytes(1)
+func (cursor *byteCursor) readUint8() uint8 {
+	field := cursor.readBytes(1)
 	if cursor.isShort {
 		return 0
 	}
 	return field[0]
 }
 
-func (cursor *byteCursor) u16() uint16 {
-	field := cursor.bytes(2)
+func (cursor *byteCursor) readUint16() uint16 {
+	field := cursor.readBytes(2)
 	if cursor.isShort {
 		return 0
 	}
 	return binary.LittleEndian.Uint16(field)
 }
 
-func (cursor *byteCursor) u32() uint32 {
-	field := cursor.bytes(4)
+func (cursor *byteCursor) readUint32() uint32 {
+	field := cursor.readBytes(4)
 	if cursor.isShort {
 		return 0
 	}
 	return binary.LittleEndian.Uint32(field)
 }
 
-// peek16 is the next u16 without reading it, 0 if fewer than 2 bytes are left.
-func (cursor *byteCursor) peek16() uint16 {
+// peekUint16 is 0 if fewer than 2 bytes are left.
+func (cursor *byteCursor) peekUint16() uint16 {
 	unread := cursor.data[cursor.position:]
 	if cursor.isShort || len(unread) < 2 {
 		return 0
@@ -60,64 +60,20 @@ func (cursor *byteCursor) peek16() uint16 {
 	return binary.LittleEndian.Uint16(unread)
 }
 
-// str skips a string and its NUL, and returns the length skipped.
-func (cursor *byteCursor) str() uint32 {
+// skipCString returns the length skipped, the NUL included.
+func (cursor *byteCursor) skipCString() uint32 {
 	if cursor.isShort {
 		return 0
 	}
-	nul := bytes.IndexByte(cursor.data[cursor.position:], 0)
-	if nul < 0 {
+	terminator := bytes.IndexByte(cursor.data[cursor.position:], 0)
+	if terminator < 0 {
 		cursor.isShort = true
 		return 0
 	}
-	cursor.position += nul + 1
-	return uint32(nul) + 1
+	cursor.position += terminator + 1
+	return uint32(terminator) + 1
 }
 
 func (cursor *byteCursor) isAtEnd() bool {
 	return !cursor.isShort && cursor.position == len(cursor.data)
-}
-
-// bitReader reads the mantissa bits of a numeric stream, FORMAT.md 6.4:
-// least significant bit first, zeros past the end.
-type bitReader struct {
-	data     []byte
-	position int
-}
-
-func (reader *bitReader) read(count int) uint32 {
-	var value uint32
-	for index := 0; index < count; index++ {
-		byteIndex := reader.position / 8
-		if byteIndex < len(reader.data) {
-			bit := reader.data[byteIndex] >> (reader.position % 8) & 1
-			value |= uint32(bit) << index
-		}
-		reader.position++
-	}
-	return value
-}
-
-// FORMAT.md 6.5: the bits end within the last byte.
-func (reader *bitReader) isFinished() bool {
-	return (reader.position+7)/8 == len(reader.data)
-}
-
-// bitWriter writes the mantissa bits of a numeric stream, FORMAT.md Appendix
-// A: least significant bit first, the last byte padded with zeros.
-type bitWriter struct {
-	data     []byte
-	bitCount int
-}
-
-// write appends the count low bits of value.
-func (writer *bitWriter) write(value uint32, count int) {
-	for index := range count {
-		if writer.bitCount%8 == 0 {
-			writer.data = append(writer.data, 0)
-		}
-		bit := uint8(value>>index) & 1
-		writer.data[len(writer.data)-1] |= bit << (writer.bitCount % 8)
-		writer.bitCount++
-	}
 }

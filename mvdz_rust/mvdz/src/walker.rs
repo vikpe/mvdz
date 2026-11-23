@@ -8,8 +8,8 @@ use crate::math::{byte_residual_bucket, clamped_bucket, grid_from_f32_bits, grid
 use crate::numeric::{AxisTrack, FloatTrack, time_deltas};
 use crate::protocol::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
-    DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS,
-    ORIGIN_ANGLE_FLAGS, ProtocolState, SND_ATTENUATION, SND_VOLUME, SVC_DAMAGE,
+    DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, ENTITY_ANGLE_BITS, ENTITY_ORIGIN_BITS,
+    FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS, ProtocolState, SND_ATTENUATION, SND_VOLUME, SVC_DAMAGE,
     SVC_DELTA_PACKET_ENTITIES, SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES, SVC_PLAYER_INFO,
     SVC_PRINT, SVC_SERVER_DATA, SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT, SVC_TEMP_ENTITY,
     SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_STAT, SVC_UPDATE_STAT_LONG, TE_BLOOD, TE_GUNSHOT,
@@ -86,10 +86,10 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             self.io.has_error = true;
             return;
         };
-        while !self.io.has_error && self.io.offset < stop {
+        while !self.io.has_error && self.io.position < stop {
             self.frame();
         }
-        if self.io.offset != stop {
+        if self.io.position != stop {
             self.io.has_error = true;
         }
         self.io.copy_blob(TAIL, tail);
@@ -127,7 +127,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
     }
 
     fn length_prefixed(&mut self, frame_type: u8, is_hidden: bool) {
-        let Some(len_offset) = self.io.start_payload() else {
+        let Some(offset) = self.io.start_payload() else {
             return;
         };
         if is_hidden {
@@ -135,7 +135,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
         } else {
             self.payload(frame_type);
         }
-        self.io.end_payload(len_offset);
+        self.io.end_payload(offset);
     }
 
     /// Bytes the walk does not model: for the encoder the rest of the payload.
@@ -228,7 +228,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             SVC_TEMP_ENTITY => self.temp_entity(),
             SVC_NAILS | SVC_NAILS_2 => self.copy_command_body(NAILS, command),
             SVC_SERVER_DATA => {
-                let start = self.io.offset;
+                let start = self.io.position;
                 self.copy_command_body(GENERIC + usize::from(SVC_SERVER_DATA), SVC_SERVER_DATA);
                 if !self.io.has_error {
                     self.protocol
@@ -250,8 +250,9 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             u32::from(player.frame) | u32::from(flags & (DF_DEAD | DF_GIB)),
             player.frame,
         );
+        let has_float_coords = self.protocol.has_float_coords();
         self.io
-            .player_origins_and_angles(player, flags, self.time, self.protocol.has_float_coords);
+            .player_origins_and_angles(player, flags, self.time, has_float_coords);
         if flags & DF_MODEL != 0 {
             self.io.code_blob_byte(PLAYER_MODEL);
         }
@@ -277,7 +278,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             let header = self.io.code_blob_residual(ENTITY_HEADER, self.last_header);
             self.last_header = header;
         }
-        let mut previous_entity: i32 = -1;
+        let mut previous_number: i32 = -1;
         self.packet_number = self.packet_number.wrapping_add(1);
         while !self.io.has_error {
             let source_word = self.io.peek_u16();
@@ -285,29 +286,29 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             let source_gap = if source_word == 0 {
                 0
             } else {
-                ((i32::from(source_word & 511) - previous_entity - 1) & 511) + 1
+                ((i32::from(source_word & 511) - previous_number - 1) & 511) + 1
             };
             let gap = i32::from(self.entity_gap(source_gap.cast_unsigned() as u16));
             if gap == 0 {
                 self.io.write_u16(0);
                 break;
             }
-            let entity = ((previous_entity + gap) & 511).cast_unsigned() as usize;
-            let state = &self.entities[entity];
+            let number = ((previous_number + gap) & 511).cast_unsigned() as usize;
+            let entity = &self.entities[number];
             let bits = self.io.symbol(
                 ENTITY_BITS,
-                u32::from(state.bits) | u32::from(state.model) << 7,
-                (source_word >> 9) as u8 ^ state.bits,
-            ) ^ state.bits;
-            let word = u16::from(bits) << 9 | entity as u16;
+                u32::from(entity.bits) | u32::from(entity.model) << 7,
+                (source_word >> 9) as u8 ^ entity.bits,
+            ) ^ entity.bits;
+            let word = u16::from(bits) << 9 | number as u16;
             if word == 0 {
                 // a word of zero would end the packet; the encoder never emits it
                 self.io.has_error = true;
                 break;
             }
             self.io.write_u16(word);
-            previous_entity = i32::from(word & 511);
-            self.entities[entity].bits = (word >> 9) as u8;
+            previous_number = i32::from(word & 511);
+            self.entities[number].bits = (word >> 9) as u8;
             self.entity_delta(u32::from(word));
         }
     }
@@ -350,17 +351,17 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
         if more & U_FTE_ENTITY_DBL_2 != 0 {
             number += 1024;
         }
-        let state = &mut self.entities[number];
-        let was_in_previous_packet = state.last_packet == self.packet_number.wrapping_sub(1);
-        state.last_packet = self.packet_number;
+        let entity = &mut self.entities[number];
+        let was_in_previous_packet = entity.last_packet == self.packet_number.wrapping_sub(1);
+        entity.last_packet = self.packet_number;
         if bits & U_MODEL != 0 {
-            state.model = self.io.code_blob_byte(ENTITY_MODEL);
+            entity.model = self.io.code_blob_byte(ENTITY_MODEL);
         } else if more & U_FTE_MODEL_DBL != 0 {
             self.io.code_blob_bytes(ENTITY_MODEL, 2);
         }
-        let model = u32::from(state.model);
+        let model = u32::from(entity.model);
         if bits & U_FRAME != 0 {
-            state.frame = self.io.code_blob_residual(ENTITY_FRAME, state.frame);
+            entity.frame = self.io.code_blob_residual(ENTITY_FRAME, entity.frame);
         }
         if bits & U_COLOR_MAP != 0 {
             self.io.code_blob_byte(ENTITY_MISC);
@@ -371,40 +372,31 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
         if bits & U_EFFECTS != 0 {
             self.io.code_blob_byte(ENTITY_MISC);
         }
-        for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {
-            let is_origin_sent = bits & origin_flag != 0;
-            if self.protocol.has_float_coords {
-                let stream = ENTITY_FLOAT_ORIGIN + axis;
-                let track = &mut state.float_origins[axis];
-                self.io.float_origin(stream, axis, is_origin_sent, track);
-            } else {
-                let track = &mut state.origins[axis];
-                if is_origin_sent {
-                    let context = clamped_bucket(track.residual(), 17)
-                        | clamped_bucket(track.velocity(), 17) << 5
-                        | u32::from(was_in_previous_packet) << 10;
-                    let (value, residual) =
-                        self.io
-                            .code_u16(ENTITY_ORIGIN + axis, context, track.predict_linear());
-                    track.push(value, residual);
-                } else {
-                    track.hold();
-                }
-            }
-            if bits & angle_flag != 0 {
-                if self.protocol.has_fte_float_coords {
+        let has_float_coords = self.protocol.has_float_coords();
+        let entity_bits = ENTITY_ORIGIN_BITS.into_iter().zip(ENTITY_ANGLE_BITS);
+        for (axis, (origin_bit, angle_bit)) in entity_bits.enumerate() {
+            let is_origin_sent = bits & origin_bit != 0;
+            self.io.entity_origin(
+                entity,
+                axis,
+                is_origin_sent,
+                was_in_previous_packet,
+                has_float_coords,
+            );
+            if bits & angle_bit != 0 {
+                if self.protocol.has_fte_float_coords() {
                     self.io.code_symbol(ENTITY_ANGLE, 3 | model << 6);
                     self.io.code_symbol(ENTITY_ANGLE, 3 | model << 6 | 1 << 14);
                 } else {
                     let residual_bucket =
-                        u32::from(byte_residual_bucket(state.angle_residuals[axis]).min(15));
+                        u32::from(byte_residual_bucket(entity.angle_residuals[axis]).min(15));
                     let angle = self.io.code_symbol_residual(
                         ENTITY_ANGLE,
                         axis as u32 | residual_bucket << 2 | model << 6,
-                        state.angles[axis],
+                        entity.angles[axis],
                     );
-                    state.angle_residuals[axis] = angle.wrapping_sub(state.angles[axis]);
-                    state.angles[axis] = angle;
+                    entity.angle_residuals[axis] = angle.wrapping_sub(entity.angles[axis]);
+                    entity.angles[axis] = angle;
                 }
             }
         }
@@ -467,18 +459,18 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
                 | u32::from(self.previous_command == SVC_TEMP_ENTITY) << 8,
         );
         self.previous_temp_entity = kind;
-        let coord_width = self.protocol.coord_size();
-        if coord_width != 2 {
+        let coord_size = self.protocol.coord_size();
+        if coord_size != 2 {
             match kind {
                 TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
                     self.io.code_blob_bytes(TEMP_ENTITY_MISC, 2);
-                    self.io.copy_blob(TEMP_ENTITY_FLOAT, 6 * coord_width);
+                    self.io.copy_blob(TEMP_ENTITY_FLOAT, 6 * coord_size);
                 }
                 TE_GUNSHOT | TE_BLOOD => {
                     self.io.code_blob_byte(TEMP_ENTITY_MISC);
-                    self.io.copy_blob(TEMP_ENTITY_FLOAT, 3 * coord_width);
+                    self.io.copy_blob(TEMP_ENTITY_FLOAT, 3 * coord_size);
                 }
-                _ => self.io.copy_blob(TEMP_ENTITY_FLOAT, 3 * coord_width),
+                _ => self.io.copy_blob(TEMP_ENTITY_FLOAT, 3 * coord_size),
             }
             return;
         }
@@ -516,6 +508,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
     /// Tags: 1 block, 2 end, 0 escape (raw bytes).
     fn hidden_payload(&mut self) {
         const MVD_HIDDEN_USERCMD: u32 = 1;
+        const HIDDEN_USERCMD_SIZE: u32 = 23;
         while !self.io.has_error {
             let source_tag = self.io.source_hidden_tag();
             match self.io.blob_byte(HIDDEN_TAG, source_tag) {
@@ -532,7 +525,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             }
             let block_len = self.io.code_blob_bytes(HIDDEN_LENGTH, 4);
             let block_type = self.io.code_blob_bytes(HIDDEN_TYPE, 2);
-            if block_type == MVD_HIDDEN_USERCMD && block_len == 23 {
+            if block_type == MVD_HIDDEN_USERCMD && block_len == HIDDEN_USERCMD_SIZE {
                 self.usercmd();
             } else {
                 self.io.copy_blob(HIDDEN_MISC, block_len as usize);
@@ -600,17 +593,15 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
     }
 }
 
-/// The segment, the cursor over it and the streams: everything the walker's primitives
-/// touch, apart from its state, so a player or an entity can be coded in place. The
-/// direction lives here and in [`Streams`]; the walk has one path. Every `context` fits in
-/// 16 bits, the rANS table key (FORMAT.md 6.2).
+/// What the walker's primitives touch apart from its state, so a player or an entity can be
+/// coded in place. Every `context` fits in 16 bits, the rANS table key (FORMAT.md 6.2).
 #[derive(Debug)]
 pub(crate) struct SegmentIo<'a, const IS_ENCODE: bool> {
     /// Encode: the segment.
     source: &'a [u8],
     /// Decode: the segment as it is written.
     output: &'a mut [u8],
-    offset: usize,
+    position: usize,
     /// Encode: where the payload being walked ends.
     payload_end: usize,
     has_error: bool,
@@ -622,7 +613,7 @@ impl<'a> SegmentIo<'a, true> {
         SegmentIo {
             source,
             output: &mut [],
-            offset: 0,
+            position: 0,
             payload_end: 0,
             has_error: false,
             streams,
@@ -635,7 +626,7 @@ impl<'a> SegmentIo<'a, false> {
         SegmentIo {
             source: &[],
             output,
-            offset: 0,
+            position: 0,
             payload_end: 0,
             has_error: false,
             streams,
@@ -652,7 +643,7 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
     /// The source byte `ahead` of the cursor: 0 past the end, so always 0 for decode.
     #[inline(always)]
     fn peek(&self, ahead: usize) -> u8 {
-        self.source.get(self.offset + ahead).copied().unwrap_or(0)
+        self.source.get(self.position + ahead).copied().unwrap_or(0)
     }
 
     #[inline(always)]
@@ -668,27 +659,27 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
     /// The source from the cursor to the end of the payload; empty for decode.
     fn payload_rest(&self) -> &[u8] {
         self.source
-            .get(self.offset..self.payload_end)
+            .get(self.position..self.payload_end)
             .unwrap_or_default()
     }
 
     fn walked_since(&self, start: usize) -> &[u8] {
-        self.segment().get(start..self.offset).unwrap_or_default()
+        self.segment().get(start..self.position).unwrap_or_default()
     }
 
     /// Encode steps over the source byte, which is `byte`.
     #[inline(always)]
     fn write(&mut self, byte: u8) {
         if IS_ENCODE {
-            self.offset += 1;
+            self.position += 1;
             return;
         }
-        if let Some(out) = self.output.get_mut(self.offset) {
+        if let Some(out) = self.output.get_mut(self.position) {
             *out = byte;
         } else {
             self.has_error = true;
         }
-        self.offset += 1;
+        self.position += 1;
     }
 
     #[inline(always)]
@@ -705,10 +696,10 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
         }
     }
 
-    /// The symbol under `context`; `source` is the one encode proposes.
+    /// The symbol under `context`; `source_symbol` is the one encode proposes.
     #[inline(always)]
-    fn symbol(&mut self, stream: usize, context: u32, source: u8) -> u8 {
-        if let Some(symbol) = self.streams.symbol(stream, context, source) {
+    fn symbol(&mut self, stream: usize, context: u32, source_symbol: u8) -> u8 {
+        if let Some(symbol) = self.streams.symbol(stream, context, source_symbol) {
             symbol
         } else {
             self.has_error = true;
@@ -718,8 +709,8 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
     }
 
     #[inline(always)]
-    fn residual(&mut self, stream: usize, context: u32, source: i32) -> i32 {
-        if let Some(residual) = self.streams.residual(stream, context, source) {
+    fn residual(&mut self, stream: usize, context: u32, source_residual: i32) -> i32 {
+        if let Some(residual) = self.streams.residual(stream, context, source_residual) {
             residual
         } else {
             self.has_error = true;
@@ -727,12 +718,12 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
         }
     }
 
-    /// A byte not in the demo (a tag, a length byte): `source` is the one encode stores.
+    /// A byte not in the demo (a tag, a length byte): `source_byte` is the one encode stores.
     #[inline(always)]
-    fn blob_byte(&mut self, stream: usize, source: u8) -> u8 {
+    fn blob_byte(&mut self, stream: usize, source_byte: u8) -> u8 {
         if IS_ENCODE {
-            self.streams.collect_blob(stream, &[source]);
-            return source;
+            self.streams.collect_blob(stream, &[source_byte]);
+            return source_byte;
         }
         let mut byte = [0];
         if !self.streams.take_blob(stream, &mut byte) {
@@ -786,12 +777,12 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
     }
 
     fn copy_blob(&mut self, stream: usize, len: usize) {
-        let Some(end) = self.offset.checked_add(len) else {
+        let Some(end) = self.position.checked_add(len) else {
             self.has_error = true;
             return;
         };
         let is_copied = if IS_ENCODE {
-            match self.source.get(self.offset..end) {
+            match self.source.get(self.position..end) {
                 Some(bytes) => {
                     self.streams.collect_blob(stream, bytes);
                     true
@@ -799,13 +790,13 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
                 None => false,
             }
         } else {
-            match self.output.get_mut(self.offset..end) {
+            match self.output.get_mut(self.position..end) {
                 Some(out) => self.streams.take_blob(stream, out),
                 None => false,
             }
         };
         if is_copied {
-            self.offset = end;
+            self.position = end;
         } else {
             self.has_error = true;
         }
@@ -846,27 +837,27 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
     /// the offset of the field, `None` when it does not fit.
     fn start_payload(&mut self) -> Option<usize> {
         let source_len = self.peek_u32(0) as usize;
-        let len_offset = self.offset;
-        if self.segment().len().saturating_sub(len_offset) < 4 {
+        let offset = self.position;
+        if self.segment().len().saturating_sub(offset) < 4 {
             self.has_error = true;
             return None;
         }
-        self.offset += 4;
-        self.payload_end = self.offset.saturating_add(source_len);
-        Some(len_offset)
+        self.position += 4;
+        self.payload_end = self.position.saturating_add(source_len);
+        Some(offset)
     }
 
     /// Encode: the walk must end where the source payload does. Decode: writes the length of
     /// the payload walked since `start_payload`.
-    fn end_payload(&mut self, len_offset: usize) {
+    fn end_payload(&mut self, offset: usize) {
         if IS_ENCODE {
-            if self.offset != self.payload_end {
+            if self.position != self.payload_end {
                 self.has_error = true;
             }
             return;
         }
-        let len = (self.offset - len_offset - 4) as u32;
-        if let Some(out) = self.output.get_mut(len_offset..len_offset + 4) {
+        let len = (self.position - offset - 4) as u32;
+        if let Some(out) = self.output.get_mut(offset..offset + 4) {
             out.copy_from_slice(&len.to_le_bytes());
         }
     }
@@ -910,12 +901,12 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
         let source_main = (source_changed & 0x3f) as u8
             | (((source_changed >> 10) & 1) as u8) << 6
             | u8::from(source_rare_bits != 0) << 7;
-        // Bit 15 keeps the main contexts clear of rare_byte's (0x100-0x1ff) and bit15_byte's
-        // (0x200).
+        // bit 15 keeps the main contexts clear of the other two (0x100-0x1ff, 0x200)
         let context = 0x8000 | u32::from(previous & 0x7fff);
         let main_byte = u16::from(self.symbol(PLAYER_FLAGS, context, source_main));
         let mut changed = (main_byte & 0x3f) | ((main_byte >> 6) & 1) << 10;
-        if main_byte & 0x80 != 0 {
+        let has_rare_change = main_byte & 0x80 != 0;
+        if has_rare_change {
             let source_rare =
                 ((source_changed >> 6) & 0xf) as u8 | (((source_changed >> 11) & 0xf) as u8) << 4;
             let rare_byte = u16::from(self.symbol(
@@ -923,9 +914,9 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
                 0x100 | u32::from((previous >> 6) & 0xff),
                 source_rare,
             ));
-            let bit15_byte =
-                u16::from(self.symbol(PLAYER_FLAGS, 0x200, (source_changed >> 15) as u8));
-            changed |= (rare_byte & 0xf) << 6 | (rare_byte >> 4) << 11 | (bit15_byte & 1) << 15;
+            let source_top = (source_changed >> 15) as u8;
+            let top_byte = u16::from(self.symbol(PLAYER_FLAGS, 0x200, source_top));
+            changed |= (rare_byte & 0xf) << 6 | (rare_byte >> 4) << 11 | (top_byte & 1) << 15;
         }
         let flags = changed ^ previous;
         self.write_u16(flags);
@@ -972,6 +963,34 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
         }
     }
 
+    /// FORMAT.md 5.5.
+    #[inline(always)]
+    fn entity_origin(
+        &mut self,
+        entity: &mut EntityState,
+        axis: usize,
+        is_sent: bool,
+        was_in_previous_packet: bool,
+        has_float_coords: bool,
+    ) {
+        if has_float_coords {
+            let stream = ENTITY_FLOAT_ORIGIN + axis;
+            self.float_origin(stream, axis, is_sent, &mut entity.float_origins[axis]);
+            return;
+        }
+        let track = &mut entity.origins[axis];
+        if !is_sent {
+            track.hold();
+            return;
+        }
+        let context = clamped_bucket(track.residual(), 17)
+            | clamped_bucket(track.velocity(), 17) << 5
+            | u32::from(was_in_previous_packet) << 10;
+        let (value, residual) =
+            self.code_u16(ENTITY_ORIGIN + axis, context, track.predict_linear());
+        track.push(value, residual);
+    }
+
     /// FORMAT.md 5.6.
     fn usercmd_grid_angle(&mut self, axis: usize, track: &mut AxisTrack) {
         let context = clamped_bucket(track.residual(), 23)
@@ -989,7 +1008,7 @@ impl<const IS_ENCODE: bool> SegmentIo<'_, IS_ENCODE> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct PlayerState {
     flags: u16,
     frame: u8,
@@ -1001,7 +1020,7 @@ struct PlayerState {
 }
 
 /// The previous usercmd fields of one player (FORMAT.md 4.11).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct UsercmdState {
     drop: u8,
     msec: u8,
@@ -1012,7 +1031,7 @@ struct UsercmdState {
     angles: [AxisTrack; 3], // FORMAT.md 5.6
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct EntityState {
     angles: [u8; 3],
     angle_residuals: [u8; 3],

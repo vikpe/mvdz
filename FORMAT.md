@@ -54,7 +54,7 @@ value.
 * **Precedence** of the expressions quoted in this document:
   `* / %` > `+ -` > `<< >>` > `&` > `^` > `|`. For example `a | b << 8` is
   `a | (b << 8)`.
-* `popcount(x)` = number of set bits. `min`, `max`, `clamp(x, lo, hi)` as
+* `popcount(x)` = number of set bits. `min`, `max`, `clamp(x, low, high)` as
   usual. `bitlen(m)` = number of bits up to and including the highest set
   bit of `m` (0 for 0).
 * **Residual bucket** `residual_bucket(v)` for a 32-bit signed `v`
@@ -65,6 +65,19 @@ value.
   (`math.rs:byte_residual_bucket`).
 * "Symbol" = one byte of a structural stream; "value" = one `i32` of a
   numeric stream.
+* **Words.** This document and the implementations use one word per thing:
+  * `demo`: the original `.mvd` bytes; `file`: the `.mvdz` bytes.
+  * `raw`: a segment's decoded bytes; `coded`: its transform (section 3);
+    `stored`: a segment kept as its raw bytes; `body`: what follows a
+    length field.
+  * `source`: what an encoder reads; `output`: what a decoder writes.
+  * `size`: a number of bytes fixed by the format (and the demo's, in the
+    header); `len`: the number of bytes of one piece of data; `count`: a
+    number of items; `total`: a sum.
+  * `position`: a cursor that moves; `offset`: a distance in bytes from a
+    start; `index`: an element of an array; `number`: a player, entity or
+    sound number of the demo; `id`: a stream id.
+  * `model`, `table`, `context`, own and fallback tables: section 6.
 * **Over-read.** Reading past the end of a stream is an error: a rANS word
   or a mantissa bit past its bytes (6.4), more bytes than a blob stream
   holds. A decoder may report it
@@ -182,7 +195,7 @@ beyond the rules above.
 
 ```
 coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
-         | n x { id u32 | size u32 }
+         | n x { id u32 | len u32 }
          | stream bodies, in id order
 ```
 
@@ -191,15 +204,15 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
 * `n`: `n = 0` is a stored segment (below). Per entry:
   * `id`: a structural, numeric or blob stream id (3.2), the ids strictly
     increasing: so `n` is at most 315;
-  * `size`: for a structural or numeric stream the length of its body;
+  * `len`: for a structural or numeric stream the length of its body;
     for a blob stream the number of its bytes. A blob stream has no body.
 * The stream bodies fill `coded` exactly to its end.
 * **Stream bodies**: one per structural or numeric entry, coded with the
   model of its id from the models block (2.2): `rans_len u32 | rans | extra`
   (section 6.1).
-* **Blob bytes**: the blob streams' sizes sum to `blob_total`, at most
+* **Blob bytes**: the blob streams' `len` fields sum to `blob_total`, at most
   `2 * raw_len`. The blob tokens (section 6.6) give that many bytes; the
-  blob streams take them in id order, `size` bytes each.
+  blob streams take them in id order, `len` bytes each.
 * A structural or numeric stream absent from the table has no symbols:
   reading from it is an error. An absent blob stream is empty: reading 0
   bytes from it succeeds, reading more is an error.
@@ -278,7 +291,7 @@ An id of 315 or above is an error.
 | 58 | `TEMP_ENTITY_FLOAT` | blob | temp-entity origins with float coordinates |
 | 59 + c | `GENERIC` + c | blob | body of every other svc command c (including 11, serverdata) |
 
-### 3.3 Decoding a segment (`decode.rs:decode_segment`, `segment.rs:decode`)
+### 3.3 Decoding a segment (`decode.rs:decode_segment`, `segment.rs:decode_transform`)
 
 1. Parse the segment fields (2.3) and the transform header and stream
    table (3.1).
@@ -309,7 +322,7 @@ bytes are a prefix of the demo.
 ## 4. The walk (`walker.rs`, `protocol.rs`)
 
 The decoder rebuilds the segment (length `raw_len`) into an output buffer
-`dst`, in one pass from its first byte to its last: the walker writes every
+`output`, in one pass from its first byte to its last: the walker writes every
 byte where it stands. The numeric fields are written by the rules of
 section 5. The structure never depends on a numeric value.
 
@@ -326,22 +339,22 @@ Walker primitives (decode direction; `p` = output cursor):
 
 * `symbol(s, ctx)`: the next symbol of structural stream `s` under context
   `ctx`; error if `s` is absent (`segment.rs:Streams::symbol`).
-* `code_symbol(s, ctx)`: `v = symbol(s, ctx)`; write `v` at `dst[p]`;
+* `code_symbol(s, ctx)`: `v = symbol(s, ctx)`; write `v` at `output[p]`;
   `p += 1`; return `v`.
 * `code_symbol_residual(s, ctx, pred)`: `v = (symbol(s, ctx) + pred) mod 256`;
   write and return `v`.
 * `blob_byte(s)`: the next byte of blob stream `s`, not written; error if the
-  stream has no byte left (`SegmentWalker::blob_byte`).
+  stream has no byte left (`SegmentIo::blob_byte`).
 * `code_blob_byte(s)`: `v = blob_byte(s)`; write `v`; return `v`
-  (`SegmentWalker::code_blob_byte`).
+  (`SegmentIo::code_blob_byte`).
 * `code_blob_residual(s, pred)`: `v = (blob_byte(s) + pred) mod 256`; write
-  and return `v` (`SegmentWalker::code_blob_residual`).
+  and return `v` (`SegmentIo::code_blob_residual`).
 * `code_blob_bytes(s, n)`: `n` times `code_blob_byte(s)`; returns the
   little-endian value
-  (`SegmentWalker::code_blob_bytes`).
-* `copy_blob(s, n)`: copy the next `n` bytes of blob stream `s` to `dst[p..]`;
+  (`SegmentIo::code_blob_bytes`).
+* `copy_blob(s, n)`: copy the next `n` bytes of blob stream `s` to `output[p..]`;
   `p += n`. Error if the stream has fewer than `n` bytes left or the output
-  would overflow (`SegmentWalker::copy_blob`).
+  would overflow (`SegmentIo::copy_blob`).
 * `copy_command_body(s, c)`: the body of a command without a layout of its own
   (section 4.2).
 
@@ -432,7 +445,7 @@ Fresh for every segment; zero unless noted:
 ### 4.4 Segment walk and frames (`SegmentWalker::run`, `SegmentWalker::frame`)
 
 ```
-tail = the size of blob stream TAIL (0 if absent)
+tail = the length of blob stream TAIL (0 if absent)
 if tail > raw_len: error
 stop = raw_len - tail
 while no error and p < stop: frame()
@@ -458,9 +471,9 @@ Frame types (`ty & 7`): `DEM_READ` 1, `DEM_SET` 2, `DEM_MULTIPLE` 3,
 `DEM_SINGLE` 4, `DEM_STATS` 5, `DEM_ALL` 6. Both contexts use `last_type`
 before it is updated; TIME's uses the previous frame's time byte.
 
-`length_prefixed(ty, hidden)`: `at = p`; `p += 4`; error (stop) if
+`length_prefixed(ty, hidden)`: `offset = p`; `p += 4`; error (stop) if
 `p > raw_len`; then `hidden ? hidden_payload() : payload(ty)`; then write
-`n = p - at - 4` as u32le at `dst[at..at+4]`.
+`n = p - offset - 4` as u32le at `output[offset..offset+4]`.
 
 ### 4.5 Payload command loop (`SegmentWalker::payload`)
 
@@ -481,7 +494,7 @@ for index = 0, 1, 2, ...:
     c = symbol(COMMAND, ctx)
     if c == 255: return                // end of payload
     if c == 0:   escape()              // raw bytes; the loop goes on
-    else:        write c at dst[p]; p += 1; command(c)
+    else:        write c at output[p]; p += 1; command(c)
     previous_command = c
 ```
 
@@ -547,10 +560,10 @@ for the first), updated after `command()` returns.
 | `SVC_SOUND` | section 4.9 |
 | `SVC_TEMP_ENTITY` | section 4.10 |
 | `SVC_NAILS`, `SVC_NAILS_2` | `copy_command_body(NAILS, c)` |
-| `SVC_SERVER_DATA` | `start = p`; `copy_command_body(GENERIC + 11, SVC_SERVER_DATA)`; if no error: `protocol.observe_server_data(dst[start..p])` |
+| `SVC_SERVER_DATA` | `start = p`; `copy_command_body(GENERIC + 11, SVC_SERVER_DATA)`; if no error: `protocol.observe_server_data(output[start..p])` |
 | any other | `copy_command_body(GENERIC + c, c)` |
 
-### 4.7 playerinfo (`SegmentWalker::player_info`, `SegmentWalker::player_info_flags`)
+### 4.7 playerinfo (`SegmentWalker::player_info`, `SegmentIo::player_info_flags`)
 
 ```
 number = code_blob_byte(PLAYER_NUMBER)
@@ -665,8 +678,8 @@ entities[number] = es
 ### 4.9 sound (`SegmentWalker::sound`)
 
 ```
-lo = code_symbol(SOUND_CHANNEL, previous_command)
-ch = lo | (code_symbol(SOUND_CHANNEL, 0x100 | lo) << 8)
+low = code_symbol(SOUND_CHANNEL, previous_command)
+ch = low | (code_symbol(SOUND_CHANNEL, 0x100 | low) << 8)
 if ch & SND_VOLUME:      code_blob_byte(SOUND_MISC)
 if ch & SND_ATTENUATION: code_blob_byte(SOUND_MISC)
 e = (ch >> 3) & 1023
@@ -743,9 +756,9 @@ usercmd():
         if grid & (1 << a): usercmd_grid_angle(a, s.angles[a])                 // section 5.6
         else: for k in 0..4: code_symbol(USERCMD, (4 << 12) | (a << 2) | k)
     for m in 0..3:
-        lo = code_symbol(USERCMD, (5 << 12) | (m << 8) | (s.moves[m] & 0xff))
-        hi = code_symbol(USERCMD, (6 << 12) | (m << 8) | lo)
-        s.moves[m] = lo | (hi << 8)
+        low = code_symbol(USERCMD, (5 << 12) | (m << 8) | (s.moves[m] & 0xff))
+        high = code_symbol(USERCMD, (6 << 12) | (m << 8) | low)
+        s.moves[m] = low | (high << 8)
     s.buttons = code_symbol(USERCMD, (7 << 12) | s.buttons)
     s.impulse = code_symbol(USERCMD, (8 << 12) | s.impulse)
     usercmds[player] = s
@@ -781,7 +794,7 @@ and updates the state.
 The state of this section is walker state (4.3): fresh for every segment,
 all zero.
 
-### 5.1 Value write rules (`SegmentWalker::code_u16`, `code_u32`)
+### 5.1 Value write rules (`SegmentIo::code_u16`, `code_u32`)
 
 `r` is the next value of `stream` under `numeric_context(stream, f)`
 (section 6.4); an absent stream is an error.
@@ -844,7 +857,7 @@ width in force (`protocol.has_float_coords`, 4.1); the track of the other
 width is not touched, and is found as it was left when a server data brings
 its width back.
 
-### 5.3 Player origins: streams 16-18 and 27-29 (`SegmentWalker::player_origins_and_angles`)
+### 5.3 Player origins: streams 16-18 and 27-29 (`SegmentIo::player_origins_and_angles`)
 
 Called by `player_info` (4.7) with the player's state and the flags of the
 record. `time_deltas` runs for every record of the player, whatever its
@@ -888,7 +901,7 @@ else:
 
 Angles are 16-bit whether the coordinates are float or not.
 
-### 5.5 Entity origins: streams 22-24 and 30-32 (`SegmentWalker::entity_delta`)
+### 5.5 Entity origins: streams 22-24 and 30-32 (`SegmentIo::entity_origin`)
 
 Called by `entity_delta` (4.8) for every axis of every entity word, with
 `es`, the state of the extended entity number (at most 511 + 512 + 1024 =
@@ -911,7 +924,7 @@ Entity origins use no time.
 
 ### 5.6 Usercmd angles (33), sounds (25), temp entities (26)
 
-**Usercmd angles, stream 33** (`SegmentWalker::usercmd_grid_angle`). Called
+**Usercmd angles, stream 33** (`SegmentIo::usercmd_grid_angle`). Called
 by `usercmd` (4.11) for an angle on the grid, with `s =
 usercmds[player].angles[a]`; the track of an angle off the grid is not
 touched.
@@ -1023,44 +1036,44 @@ normalize(w[0..alphabet]) -> f[0..alphabet]   (total 4096):
     if total == 0: return all zeros
     sum = 0
     for s: if w[s] > 0: f[s] = max(floor(w[s] * 4096 / total), 1); sum += f[s]
-    diff = 4096 - sum
-    while diff != 0:
+    difference = 4096 - sum
+    while difference != 0:
         b = index of the largest f (the first on ties: scan from 0 with strict >)
-        if diff > 0: f[b] += diff; diff = 0
+        if difference > 0: f[b] += difference; difference = 0
         else:
-            take = min(-diff, f[b] - 1, (f[b] + 1) / 2)
+            take = min(-difference, f[b] - 1, (f[b] + 1) / 2)
             if take <= 0: break
-            f[b] -= take; diff += take
+            f[b] -= take; difference += take
     return f
 ```
 
 Every value of `normalize` fits 64 bits: `w[s] * 4096` is at most 2^60.
 
-`freq = normalize(quantized_weight(q[s]))`, `cumulative[0] = 0`,
-`cumulative[s + 1] = cumulative[s] + freq[s]`. A table is **empty** if no
-symbol has `freq > 0`. A symbol is present exactly when `q[s] > 0`; the
-only symbol of a table has `freq` 4096.
+`frequency = normalize(quantized_weight(q[s]))`, `cumulative[0] = 0`,
+`cumulative[s + 1] = cumulative[s] + frequency[s]`. A table is **empty** if no
+symbol has `frequency > 0`. A symbol is present exactly when `q[s] > 0`; the
+only symbol of a table has `frequency` 4096.
 
 ### 6.4 Symbol decode (`rans.rs:DecoderModel::decode`, `RansDecoder`)
 
 State: `x` u32 and a word cursor over `rans`.
 
 ```
-init: hi = word(); lo = word(); x = (hi << 16) | lo; error if x < 2^16
-word(): the u16le at pos; pos += 2      // fewer than 2 bytes left: an over-read (section 1)
+init: high = word(); low = word(); x = (high << 16) | low; error if x < 2^16
+word(): the u16le at position; position += 2      // fewer than 2 bytes left: an over-read (section 1)
 
 decode(context):
     table = the table of context (contexts) or the fallback
     if table is empty: error
     slot = x & 4095
     s = the symbol with cumulative[s] <= slot < cumulative[s + 1]
-    x = freq[s] * (x >> 12) + slot - cumulative[s]      // fits u32: freq[s] <= 4096
+    x = frequency[s] * (x >> 12) + slot - cumulative[s]      // fits u32: frequency[s] <= 4096
     if x < 2^16: x = (x << 16) | word()
     return s
 ```
 
 `x` is never below 2^16: the check of `init` and the last step of `decode`
-keep it there. A symbol with `freq` 4096 leaves `x` as it is and reads no
+keep it there. A symbol with `frequency` 4096 leaves `x` as it is and reads no
 word, so a decoder may return it without the step.
 
 **Structural streams** (`StreamDecoder::symbol`): `context = walker_context & 0xFFFF`
@@ -1071,14 +1084,14 @@ f)`; the symbol is the bucket `b`, 0 to 64. Then
 
 ```
 n = (b + 1) / 2                         // bit length of |v|
-m = ((n > 0 ? 1 : 0) << max(n - 1, 0)) | bits.get(max(n - 1, 0))      // u32
+m = ((n > 0 ? 1 : 0) << max(n - 1, 0)) | bits.read(max(n - 1, 0))     // u32
 v = (b is even) ? (m as i32).wrapping_neg() : m as i32                  // b = 0 gives 0
 ```
 
 `bits` reads `extra` as an LSB-first bit stream (bit `k` of the stream is
 bit `k % 8` of byte `k / 8`); a bit past the end is an over-read
-(section 1). `get(n)` reads `n` bits, the first one read being bit 0 of the
-result; `get(0) = 0`. Buckets 63 and 64 (n = 32) give `m` up to 2^32 - 1;
+(section 1). `read(n)` reads `n` bits, the first one read being bit 0 of the
+result; `read(0) = 0`. Buckets 63 and 64 (n = 32) give `m` up to 2^32 - 1;
 `m` is reinterpreted as i32 before the sign, and the negation wraps.
 
 `numeric_context(stream, f)` (built where `walker.rs` codes each field; `lz.rs:bucket_context`
@@ -1087,13 +1100,13 @@ min(v, m)`:
 
 | Stream | Context |
 |---|---|
-| 17-19 | `c(f0, 19) \| c(f1, 19) << 5` |
-| 20-22 | `c(f0, 23) \| c(f1, 23) << 5` |
-| 23-25 | `c(f0, 17) \| c(f1, 17) << 5 \| f2 << 10` |
-| 26, 27 | `f0 \| f1 << 4` |
-| 34 | `c(f0, 23) \| c(f1, 23) << 5 \| c(f2, 15) << 10 \| f3 << 14` |
-| 28-33 | `c(f0, 63) \| f1 << 6` |
-| 35, 36 | `f0` |
+| 16-18 | `c(f0, 19) \| c(f1, 19) << 5` |
+| 19-21 | `c(f0, 23) \| c(f1, 23) << 5` |
+| 22-24 | `c(f0, 17) \| c(f1, 17) << 5 \| f2 << 10` |
+| 25, 26 | `f0 \| f1 << 4` |
+| 27-32 | `c(f0, 63) \| f1 << 6` |
+| 33 | `c(f0, 23) \| c(f1, 23) << 5 \| c(f2, 15) << 10 \| f3 << 14` |
+| 34, 35 | `f0` |
 
 ### 6.5 End of a stream
 
@@ -1102,7 +1115,7 @@ A structural or numeric stream is complete only if the state is back at
 which is therefore even and at least 4). A numeric stream's mantissa bits
 must also end within the last byte of `extra`:
 `ceil(bits_read / 8) == len(extra)`, at most 7 padding bits
-(`StreamDecoder::is_done`, `BitReader::is_finished`).
+(`StreamDecoder::is_done`, `BitReader::is_done`).
 An incomplete stream is an error. No stream stores how many symbols it
 holds: the walk decides how many it reads.
 
@@ -1153,7 +1166,7 @@ A reader refuses a file that breaks any rule of this document:
 * **Content rules**: those of sections 3 to 6, applied when a segment is decoded, and the
   whole-demo check (3.4) after the last segment.
 
-The reference has one reader: whole-file decoding (`decode.rs:decompress`) collects what
+The reference has one reader: whole-file decoding (`decode.rs:decode`) collects what
 in-order streaming (`decode.rs:Decoder`) reads, so both accept and refuse the same files.
 The reference tests this on every vector and on mutated files.
 
@@ -1290,7 +1303,7 @@ its blob parser (rule 10) on its own.
    * While the models block of all models would exceed 2^22 bytes, coded or raw
      (section 7), the model with the longest raw model is dropped (ties: highest stream
      id), never those of streams 15, 34 and 35 (`segment.rs:fit_models_block`).
-5. **Segments** (`encode.rs:segment_body`): a segment is written the first of these
+5. **Segments** (`encode.rs:encode_segment`): a segment is written the first of these
    ways that works:
    * transform-coded (section 3), if its walk succeeds;
    * all tail: no walker stream, every byte in the `TAIL` blob stream;
@@ -1342,12 +1355,12 @@ its blob parser (rule 10) on its own.
 
     The tokens are coded as section 6.6 reads them. `vectors/lz-tokens.tsv` holds inputs
     with their tokens.
-11. **Frames** (`protocol.rs:frame_len`): `frame_len(src, p)` is the length of the frame
-    at `p`, header included, or `None`. With fewer than 2 bytes left: `None`. By
-    `src[p+1] & 7`: `DEM_SET`: 10 bytes; `DEM_MULTIPLE`: `10 + le32(src[p+6..])`;
-    `DEM_READ`, `DEM_SINGLE`, `DEM_STATS`, `DEM_ALL`: `6 + le32(src[p+2..])`; anything
+11. **Frames** (`protocol.rs:frame_len`): `frame_len(source, p)` is the length of the
+    frame at `p`, header included, or `None`. With fewer than 2 bytes left: `None`. By
+    `source[p+1] & 7`: `DEM_SET`: 10 bytes; `DEM_MULTIPLE`: `10 + le32(source[p+6..])`;
+    `DEM_READ`, `DEM_SINGLE`, `DEM_STATS`, `DEM_ALL`: `6 + le32(source[p+2..])`; anything
     else (0, 7): `None`. A frame longer than 2^20 bytes, or one that runs past the end of
-    `src`, is `None`. The walk of a
+    `source`, is `None`. The walk of a
     segment takes frames while `frame_len` is `Some`; the rest of the segment is its
     tail. Rules 2 and 9 cut the demo and sum `duration_ms` with it.
 12. **Walk** (`walker.rs`): the encoder runs the walk of sections 4 and 5 over the source
@@ -1502,11 +1515,12 @@ order (u16le each), the fallback table and the own tables in the order of their 
 one byte per symbol: its quantized count.
 
 **rANS encoder** (`rans.rs:rans_encode`): state `x = 2^16`. Encode the symbols in
-reverse order: with `freq`, `cum` of the symbol in its table: if
-`x >= ((2^16 >> 12) << 16) * freq` (compared in 64 bits: the product is 2^32 for `freq`
-4096), emit the word `x & 0xFFFF` and `x >>= 16`; then
-`x = ((x / freq) << 12) + x % freq + cum`. Finally emit `x & 0xFFFF` then `x >> 16`;
-reverse the emitted word list and write it as u16le words. A symbol with `freq` 4096
+reverse order: with `frequency`, `cumulative` of the symbol in its table: if
+`x >= ((2^16 >> 12) << 16) * frequency` (compared in 64 bits: the product is 2^32 for
+`frequency` 4096), emit the word `x & 0xFFFF` and `x >>= 16`; then
+`x = ((x / frequency) << 12) + x % frequency + cumulative`. Finally emit `x & 0xFFFF` then
+`x >> 16`; reverse the emitted word list and write it as u16le words. A symbol with
+`frequency` 4096
 leaves `x` as it is and may be skipped; with no other symbol the body is the 4 bytes of
 the state 2^16.
 

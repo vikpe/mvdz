@@ -4,5 +4,5 @@ pub fn check_demo(demo: &[u8]) -> crate::Result<()> {
 
 /// Skips `check_demo`.
 pub fn encode_any(demo: &[u8], threads: usize) -> crate::Result<Vec<u8>> {
-    crate::encode::compress(demo, threads)
+    crate::encode::encode_any(demo, threads)
 }

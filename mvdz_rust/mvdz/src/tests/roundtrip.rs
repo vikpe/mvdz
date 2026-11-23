@@ -1,15 +1,18 @@
 use super::common::*;
-use crate::format::{SEGMENT_FIELDS_LEN, parse_segment_header};
+use crate::format::{SEGMENT_FIELDS_SIZE, parse_segment_header};
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use std::assert_matches;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
-    for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
-        let one = compress_unchecked(&src)?;
+fn check_all_ways(source: &[u8], what: &str) -> anyhow::Result<()> {
+    for (how, source) in [
+        ("as is", source.to_vec()),
+        ("repeated", several_segments(source)),
+    ] {
+        let one = compress_unchecked(&source)?;
         let back = readers_agree(&one, what).with_context(|| format!("{what} {how}: refused"))?;
-        assert!(back == src, "{what} {how}");
+        assert!(back == source, "{what} {how}");
     }
     Ok(())
 }
@@ -43,8 +46,8 @@ fn synthetic_demos() -> anyhow::Result<()> {
 
 #[test]
 fn sample_demos() -> anyhow::Result<()> {
-    for (index, src) in samples(3).iter().enumerate() {
-        check_all_ways(src, &format!("sample {index}"))?;
+    for (index, source) in samples(3).iter().enumerate() {
+        check_all_ways(source, &format!("sample {index}"))?;
     }
     Ok(())
 }
@@ -55,11 +58,11 @@ fn read_until_error(file: &[u8], max_threads: u8) -> (Vec<u8>, Option<crate::Err
         Ok(reader) => reader.max_threads(max_threads),
         Err(error) => return (out, Some(error)),
     };
-    let mut buf = [0u8; 4096];
+    let mut buffer = [0u8; 4096];
     loop {
-        match reader.read_demo(&mut buf) {
+        match reader.read_demo(&mut buffer) {
             Ok(0) => return (out, None),
-            Ok(len) => out.extend_from_slice(&buf[..len]),
+            Ok(len) => out.extend_from_slice(&buffer[..len]),
             Err(error) => return (out, Some(error)),
         }
     }
@@ -155,10 +158,10 @@ fn empty_and_tiny_inputs() -> anyhow::Result<()> {
         &random,
         &text,
     ];
-    for src in inputs {
-        let refusal = compress(src).err();
+    for source in inputs {
+        let refusal = compress(source).err();
         assert_matches!(refusal, Some(crate::Error::NotMvd(_)), "{refusal:?}");
-        check_all_ways(src, &format!("{src:?}"))?;
+        check_all_ways(source, &format!("{source:?}"))?;
     }
     Ok(())
 }
@@ -177,18 +180,18 @@ fn non_mvd_input_streams() -> anyhow::Result<()> {
         first_frame_cut_short.extend_from_slice(&duel[first_frame_len..200_000]);
         inputs.push(first_frame_cut_short);
     }
-    for (index, src) in inputs.iter().enumerate() {
-        if crate::encode::check_demo(src).is_err() {
-            let refusal = compress(src);
+    for (index, source) in inputs.iter().enumerate() {
+        if crate::encode::check_demo(source).is_err() {
+            let refusal = compress(source);
             assert_matches!(refusal, Err(crate::Error::NotMvd(_)), "input {index}");
             continue;
         }
-        for src in [src.clone(), several_segments(src)] {
-            let file = compress(&src)?;
+        for source in [source.clone(), several_segments(source)] {
+            let file = compress(&source)?;
             assert!(
-                readers_agree(&file, "non-mvd").context("every reader refuses")? == src,
+                readers_agree(&file, "non-mvd").context("every reader refuses")? == source,
                 "input {index}, {} bytes",
-                src.len()
+                source.len()
             );
         }
     }
@@ -202,22 +205,22 @@ fn framed_demo_as_all_tail_round_trips() -> anyhow::Result<()> {
         ("usercmd", usercmd_demo()),
     ];
     for (what, demo) in demos {
-        for (how, src) in [
+        for (how, source) in [
             ("as is", demo.clone()),
             ("repeated", several_segments(&demo)),
         ] {
-            let file = all_tail(&src)?;
+            let file = all_tail(&source)?;
             assert_eq!(
                 unstructured_len(&file)?,
-                src.len(),
+                source.len(),
                 "{what} {how}: every byte in the tail"
             );
             let back =
                 readers_agree(&file, what).with_context(|| format!("{what} {how}: refused"))?;
-            assert!(back == src, "{what} {how}");
-            let stored = readers_agree(&all_stored(&src), what)
+            assert!(back == source, "{what} {how}");
+            let stored = readers_agree(&all_stored(&source), what)
                 .with_context(|| format!("{what} {how}: stored, refused"))?;
-            assert!(stored == src, "{what} {how}: stored");
+            assert!(stored == source, "{what} {how}: stored");
         }
     }
     Ok(())
@@ -230,38 +233,38 @@ fn nop_flood_round_trips() -> anyhow::Result<()> {
     for _ in 0..400 {
         demo.frame(0, 1, &[1u8; 10_000]);
     }
-    let src = demo.0;
-    let file = compress(&src)?;
+    let source = demo.0;
+    let file = compress(&source)?;
     assert!(parts(&file)?.segments.len() > 1);
-    assert!(readers_agree(&file, "nop").context("every reader refuses")? == src);
+    assert!(readers_agree(&file, "nop").context("every reader refuses")? == source);
     Ok(())
 }
 
 #[test]
 fn segments_are_capped() -> anyhow::Result<()> {
-    let max_segment = crate::format::MAX_SEGMENT_RAW as usize;
+    let max_segment = crate::format::MAX_RAW_LEN as usize;
     let mut rng = Rng(0x00ca_99ed);
     let unframed: Vec<u8> = Vec::from_fn(3 * max_segment, |_| rng.next() as u8);
     let mut oversized = Demo(synthetic(&[], false));
     oversized.frame(0, 1, &vec![1u8; max_segment + max_segment / 2]);
     oversized.0.extend_from_slice(&synthetic(&[], false));
-    for (what, src, segments) in [
+    for (what, source, segments) in [
         ("unframed", unframed, 3),
         ("oversized frame", oversized.0, 2),
     ] {
-        let file = compress_unchecked(&src)?;
+        let file = compress_unchecked(&source)?;
         let file_segments = parts(&file)?.segments;
         let count = file_segments.len();
         assert!(count >= segments, "{what}: {count} segments");
         for segment in &file_segments {
-            let header = parse_segment_header(&segment[..SEGMENT_FIELDS_LEN])?;
+            let header = parse_segment_header(&segment[..SEGMENT_FIELDS_SIZE])?;
             assert!(
                 header.raw_len as usize <= max_segment,
                 "{what}: a segment over the largest length"
             );
         }
         assert!(
-            readers_agree(&file, what).context("every reader refuses")? == src,
+            readers_agree(&file, what).context("every reader refuses")? == source,
             "{what}"
         );
     }
@@ -325,8 +328,8 @@ fn constructed_demos() -> anyhow::Result<()> {
         .collect();
     files.sort();
     for path in files {
-        let src = std::fs::read(&path)?;
-        if src.len() > 20 << 20 {
+        let source = std::fs::read(&path)?;
+        if source.len() > 20 << 20 {
             continue;
         }
         let name = path
@@ -334,15 +337,15 @@ fn constructed_demos() -> anyhow::Result<()> {
             .context("a file name")?
             .to_string_lossy()
             .to_string();
-        if crate::encode::check_demo(&src).is_err() {
-            assert_matches!(compress(&src), Err(crate::Error::NotMvd(_)));
-            let file = compress_unchecked(&src)?;
-            assert!(decompress(&file, 2)? == src, "{name}");
+        if crate::encode::check_demo(&source).is_err() {
+            assert_matches!(compress(&source), Err(crate::Error::NotMvd(_)));
+            let file = compress_unchecked(&source)?;
+            assert!(decompress(&file, 2)? == source, "{name}");
             continue;
         }
-        let file = compress(&src)?;
-        assert!(decompress(&file, 2)? == src, "{name}");
-        assert!(decompress(&file, 1)? == src, "{name}, 1 thread");
+        let file = compress(&source)?;
+        assert!(decompress(&file, 2)? == source, "{name}");
+        assert!(decompress(&file, 1)? == source, "{name}, 1 thread");
     }
     Ok(())
 }
@@ -354,9 +357,9 @@ struct SlowInput<'a> {
 }
 
 impl Read for SlowInput<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let len = buf.len().min(self.read_len);
-        self.demo.read(&mut buf[..len])
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let len = buffer.len().min(self.read_len);
+        self.demo.read(&mut buffer[..len])
     }
 }
 
@@ -370,9 +373,9 @@ impl Seek for SlowInput<'_> {
 fn deterministic_output() -> anyhow::Result<()> {
     const LEAST_MEMORY: u64 = 0;
     let small = synthetic(&[(0, "{}")], false);
-    let src = duel().unwrap_or_else(|| several_segments(&small));
-    for src in [small, src] {
-        let one_thread = crate::encode(&src, 1)?;
+    let source = duel().unwrap_or_else(|| several_segments(&small));
+    for source in [small, source] {
+        let one_thread = crate::encode(&source, 1)?;
         for (max_threads, read_len) in [(3, 1), (1, 7), (4, 65536)] {
             for encoder in [
                 crate::Encoder::new().max_threads(max_threads),
@@ -381,7 +384,7 @@ fn deterministic_output() -> anyhow::Result<()> {
                     .max_memory(LEAST_MEMORY),
             ] {
                 let input = SlowInput {
-                    demo: Cursor::new(&src),
+                    demo: Cursor::new(&source),
                     read_len,
                 };
                 let mut file = Vec::new();
@@ -389,7 +392,7 @@ fn deterministic_output() -> anyhow::Result<()> {
                 assert!(
                     file == one_thread,
                     "{} bytes, {max_threads} threads, {read_len} bytes a read: another output",
-                    src.len()
+                    source.len()
                 );
             }
         }
@@ -405,8 +408,8 @@ fn input_that_changes_between_the_passes_is_refused() {
         pass: usize,
     }
     impl Read for ChangingInput {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.passes[self.pass].read(buf)
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.passes[self.pass].read(buffer)
         }
     }
     impl Seek for ChangingInput {
@@ -433,7 +436,7 @@ fn input_that_changes_between_the_passes_is_refused() {
 #[test]
 fn protocol_change_mid_demo() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{}")], false);
-    let copies = 3 * crate::segment::SEGMENT_TARGET_RAW / (2 * small.len());
+    let copies = 3 * crate::segment::SEGMENT_TARGET_LEN / (2 * small.len());
     let mut demo = Demo(small.repeat(copies));
     let server_data = message(
         crate::protocol::SVC_SERVER_DATA,
@@ -461,16 +464,16 @@ fn protocol_change_mid_demo() -> anyhow::Result<()> {
 
 #[test]
 fn models_block() -> anyhow::Result<()> {
-    let src = usercmd_demo();
+    let source = usercmd_demo();
     let has_models = |file: &[u8]| anyhow::Ok(!parts(file)?.models.is_empty());
-    let segmented = compress(&several_segments(&src))?;
+    let segmented = compress(&several_segments(&source))?;
     assert!(parts(&segmented)?.segments.len() > 2);
     assert!(has_models(&segmented)?, "models");
     assert!(
         readers_agree(&segmented, "tables").context("every reader refuses")?
-            == several_segments(&src)
+            == several_segments(&source)
     );
-    let one = compress(&src)?;
+    let one = compress(&source)?;
     assert_eq!(parts(&one)?.segments.len(), 1);
     assert!(
         has_models(&one)?,

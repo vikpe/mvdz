@@ -30,12 +30,12 @@ func TestVectors(test *testing.T) {
 			decoded, decodeErr := Decode(vector.file)
 			streamed, streamErr := decodeInSmallReads(vector.file)
 			if !vector.isValid {
-				expected := errorCategory(vector.errorMessage)
-				if !errors.Is(decodeErr, expected) {
-					test.Errorf("Decode: got %v, want %v (%s)", decodeErr, expected, vector.errorMessage)
-				}
-				if !errors.Is(streamErr, expected) {
-					test.Errorf("Reader: got %v, want %v (%s)", streamErr, expected, vector.errorMessage)
+				expected := "mvdz: " + vector.errorMessage
+				category := errorCategory(vector.errorMessage)
+				for decoder, err := range map[string]error{"Decode": decodeErr, "Reader": streamErr} {
+					if err == nil || err.Error() != expected || !errors.Is(err, category) {
+						test.Errorf("%s: got %v, want %s", decoder, err, expected)
+					}
 				}
 				return
 			}
@@ -100,27 +100,28 @@ func TestHeader(test *testing.T) {
 		test.Fatal(err)
 	}
 	header := reader.Header()
-	const expectedSha256 = "987a33fe15b8a28516d14d408bb65e93c2560929d6324187be4a13aeadd2cdcf"
-	if header.Size != 8435 || hex.EncodeToString(header.Sha256[:]) != expectedSha256 {
-		test.Errorf("got size %d and SHA-256 %x", header.Size, header.Sha256)
+	const expectedSHA256 = "987a33fe15b8a28516d14d408bb65e93c2560929d6324187be4a13aeadd2cdcf"
+	if header.Size != 8435 || hex.EncodeToString(header.SHA256[:]) != expectedSHA256 {
+		test.Errorf("got size %d and SHA-256 %x", header.Size, header.SHA256)
 	}
 }
 
-func TestNotMvdz(test *testing.T) {
+func TestNotMVDZ(test *testing.T) {
 	for _, file := range []string{"", "MVD", "MVDX\x02\x00\x00\x00", "\x1f\x8b\x08\x00"} {
-		if _, err := Decode([]byte(file)); !errors.Is(err, ErrNotMvdz) {
-			test.Errorf("%q: got %v, want %v", file, err, ErrNotMvdz)
+		if _, err := Decode([]byte(file)); !errors.Is(err, ErrNotMVDZ) {
+			test.Errorf("%q: got %v, want %v", file, err, ErrNotMVDZ)
 		}
 	}
 }
 
 func readVectors(test testing.TB) []testVector {
+	test.Helper()
 	manifest, err := os.ReadFile(filepath.Join(vectorsDirectory, "MANIFEST.tsv"))
 	if err != nil {
 		test.Fatal(err)
 	}
 	var vectors []testVector
-	for _, line := range strings.Split(strings.TrimSpace(string(manifest)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(manifest)), "\n") {
 		if strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -153,7 +154,7 @@ func errorCategory(manifestMessage string) error {
 	case strings.HasPrefix(manifestMessage, "unsupported MVDZ version"):
 		return ErrUnsupportedVersion
 	case strings.HasPrefix(manifestMessage, "not an MVDZ"):
-		return ErrNotMvdz
+		return ErrNotMVDZ
 	}
 	return nil
 }

@@ -1,8 +1,8 @@
 //! `svc_*` body sizes as mvdsv `sv_ents.c` and ezquake `cl_parse.c` write them. A mis-sized
 //! command stays lossless: both directions size it alike.
 
-use crate::fields::{read_u8, read_u16, read_u32, read_usize, skip, skip_cstr};
-use crate::format::MAX_SEGMENT_RAW;
+use crate::fields::{read_u8, read_u16, read_u32, read_usize, skip, skip_c_str};
+use crate::format::MAX_RAW_LEN;
 
 pub(crate) const PROTOCOL_VERSION: u32 = 28;
 
@@ -55,11 +55,8 @@ const U_ORIGIN_2: u32 = 1 << 10;
 const U_ORIGIN_3: u32 = 1 << 11;
 pub(crate) const U_SKIN: u32 = 1 << 4;
 /// By axis.
-pub(crate) const ORIGIN_ANGLE_FLAGS: [(u32, u32); 3] = [
-    (U_ORIGIN_1, U_ANGLE_1),
-    (U_ORIGIN_2, U_ANGLE_2),
-    (U_ORIGIN_3, U_ANGLE_3),
-];
+pub(crate) const ENTITY_ORIGIN_BITS: [u32; 3] = [U_ORIGIN_1, U_ORIGIN_2, U_ORIGIN_3];
+pub(crate) const ENTITY_ANGLE_BITS: [u32; 3] = [U_ANGLE_1, U_ANGLE_2, U_ANGLE_3];
 
 pub(crate) const U_FTE_COLOR_MOD: u32 = 1 << 10;
 pub(crate) const U_FTE_ENTITY_DBL: u32 = 1 << 5;
@@ -84,8 +81,8 @@ pub(crate) struct ProtocolState {
     pub(crate) fte: u32,
     pub(crate) fte2: u32,
     pub(crate) mvd1: u32,
-    pub(crate) has_float_coords: bool,
-    pub(crate) has_fte_float_coords: bool,
+    has_float_coords: bool,
+    has_fte_float_coords: bool,
 }
 
 impl ProtocolState {
@@ -99,24 +96,20 @@ impl ProtocolState {
         protocol.derive();
         protocol
     }
-    pub(crate) fn derive(&mut self) {
-        const FTE_PEXT_FLOAT_COORDS: u32 = 1 << 15;
-        const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
-        self.has_float_coords =
-            self.fte & FTE_PEXT_FLOAT_COORDS != 0 || self.mvd1 & MVD_PEXT_1_FLOAT_COORDS != 0;
-        self.has_fte_float_coords = self.fte & FTE_PEXT_FLOAT_COORDS != 0;
+
+    #[inline]
+    pub(crate) fn has_float_coords(&self) -> bool {
+        self.has_float_coords
     }
+
+    #[inline]
+    pub(crate) fn has_fte_float_coords(&self) -> bool {
+        self.has_fte_float_coords
+    }
+
     #[inline]
     pub(crate) fn coord_size(&self) -> usize {
         if self.has_float_coords { 4 } else { 2 }
-    }
-    #[inline]
-    pub(crate) fn wide_coord_size(&self) -> usize {
-        if self.has_fte_float_coords { 4 } else { 2 }
-    }
-    #[inline]
-    pub(crate) fn angle_size(&self) -> usize {
-        if self.has_fte_float_coords { 2 } else { 1 }
     }
 
     /// A server data starts a match: an extension it does not announce is off.
@@ -197,7 +190,7 @@ impl ProtocolState {
 
         match command {
             SVC_NOP | SVC_KILLED_MONSTER | SVC_FOUND_SECRET | SVC_SMALL_KICK | SVC_BIG_KICK => {}
-            SVC_DISCONNECT | SVC_STUFF_TEXT | SVC_CENTER_PRINT | SVC_FINALE => skip_cstr(rest)?,
+            SVC_DISCONNECT | SVC_STUFF_TEXT | SVC_CENTER_PRINT | SVC_FINALE => skip_c_str(rest)?,
             SVC_UPDATE_STAT => skip(rest, 2)?,
             SVC_SOUND => {
                 let channel = read_u16(rest)?;
@@ -211,7 +204,7 @@ impl ProtocolState {
             }
             SVC_PRINT => {
                 skip(rest, 1)?;
-                skip_cstr(rest)?;
+                skip_c_str(rest)?;
             }
             SVC_SET_ANGLE => skip(rest, 1 + 3 * self.angle_size())?,
             SVC_SERVER_DATA => {
@@ -222,14 +215,14 @@ impl ProtocolState {
                     skip(rest, 4)?;
                 }
                 skip(rest, 4)?;
-                skip_cstr(rest)?;
+                skip_c_str(rest)?;
                 skip(rest, 4)?;
-                skip_cstr(rest)?;
+                skip_c_str(rest)?;
                 skip(rest, 40)?;
             }
             SVC_LIGHT_STYLE => {
                 skip(rest, 1)?;
-                skip_cstr(rest)?;
+                skip_c_str(rest)?;
             }
             SVC_UPDATE_FRAGS => skip(rest, 3)?,
             SVC_DAMAGE => skip(rest, 2 + 3 * self.coord_size())?,
@@ -258,7 +251,7 @@ impl ProtocolState {
             SVC_MUZZLE_FLASH | SVC_UPDATE_PL => skip(rest, 2)?,
             SVC_UPDATE_USER_INFO => {
                 skip(rest, 5)?;
-                skip_cstr(rest)?;
+                skip_c_str(rest)?;
             }
             SVC_DOWNLOAD => {
                 let size = read_u16(rest)?.cast_signed();
@@ -299,7 +292,7 @@ impl ProtocolState {
                 skip(rest, 1)?;
                 loop {
                     let before = rest.len();
-                    skip_cstr(rest)?;
+                    skip_c_str(rest)?;
                     if before - rest.len() == 1 {
                         break;
                     }
@@ -321,16 +314,34 @@ impl ProtocolState {
             SVC_MAX_SPEED | SVC_ENT_GRAVITY => skip(rest, 4)?,
             SVC_SET_INFO => {
                 skip(rest, 1)?;
-                skip_cstr(rest)?;
-                skip_cstr(rest)?;
+                skip_c_str(rest)?;
+                skip_c_str(rest)?;
             }
             SVC_SERVER_INFO => {
-                skip_cstr(rest)?;
-                skip_cstr(rest)?;
+                skip_c_str(rest)?;
+                skip_c_str(rest)?;
             }
             _ => return None,
         }
         Some(())
+    }
+
+    fn derive(&mut self) {
+        const FTE_PEXT_FLOAT_COORDS: u32 = 1 << 15;
+        const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
+        self.has_float_coords =
+            self.fte & FTE_PEXT_FLOAT_COORDS != 0 || self.mvd1 & MVD_PEXT_1_FLOAT_COORDS != 0;
+        self.has_fte_float_coords = self.fte & FTE_PEXT_FLOAT_COORDS != 0;
+    }
+
+    #[inline]
+    fn wide_coord_size(&self) -> usize {
+        if self.has_fte_float_coords { 4 } else { 2 }
+    }
+
+    #[inline]
+    fn angle_size(&self) -> usize {
+        if self.has_fte_float_coords { 2 } else { 1 }
     }
 
     fn skip_entity_delta(&self, rest: &mut &[u8], word: u32) -> Option<()> {
@@ -355,11 +366,11 @@ impl ProtocolState {
                 skip(rest, 1)?;
             }
         }
-        for (origin_flag, angle_flag) in ORIGIN_ANGLE_FLAGS {
-            if bits & origin_flag != 0 {
+        for (origin_bit, angle_bit) in ENTITY_ORIGIN_BITS.into_iter().zip(ENTITY_ANGLE_BITS) {
+            if bits & origin_bit != 0 {
                 skip(rest, self.coord_size())?;
             }
-            if bits & angle_flag != 0 {
+            if bits & angle_bit != 0 {
                 skip(rest, self.angle_size())?;
             }
         }
@@ -380,20 +391,20 @@ impl ProtocolState {
 }
 
 /// Includes the frame header.
-pub(crate) fn frame_len(src: &[u8], start: usize) -> Option<usize> {
-    match frame_at(src, start) {
+pub(crate) fn frame_len(source: &[u8], start: usize) -> Option<usize> {
+    match frame_at(source, start) {
         FrameAt::Whole(len) => Some(len),
         FrameAt::Incomplete | FrameAt::Invalid => None,
     }
 }
 
 /// Tells frames from bytes that frame by chance.
-pub(crate) fn frame_run(src: &[u8], start: usize) -> FrameRun {
+pub(crate) fn frame_run(source: &[u8], start: usize) -> FrameRun {
     const FRAME_RUN_LEN: usize = 16;
-    let mut offset = start;
+    let mut position = start;
     for _ in 0..FRAME_RUN_LEN {
-        match frame_at(src, offset) {
-            FrameAt::Whole(len) => offset += len,
+        match frame_at(source, position) {
+            FrameAt::Whole(len) => position += len,
             FrameAt::Incomplete => return FrameRun::Incomplete,
             FrameAt::Invalid => return FrameRun::No,
         }
@@ -410,28 +421,28 @@ pub(crate) enum FrameRun {
 }
 
 /// A frame is at most a segment long.
-pub(crate) fn frame_at(src: &[u8], start: usize) -> FrameAt {
-    let rest = src.get(start..).unwrap_or_default();
+pub(crate) fn frame_at(source: &[u8], start: usize) -> FrameAt {
+    let rest = source.get(start..).unwrap_or_default();
     let Some(&frame_type) = rest.get(1) else {
         return FrameAt::Incomplete;
     };
-    let (header_len, payload_len_offset) = match frame_type & 7 {
+    let (header_size, payload_len_offset) = match frame_type & 7 {
         DEM_SET => (10, None),
         DEM_MULTIPLE => (10, Some(6)),
         DEM_READ | DEM_SINGLE | DEM_STATS | DEM_ALL => (6, Some(2)),
         _ => return FrameAt::Invalid,
     };
-    let Some(header) = rest.get(..header_len) else {
+    let Some(header) = rest.get(..header_size) else {
         return FrameAt::Incomplete;
     };
     let payload_len = match payload_len_offset {
         Some(offset) => read_usize(&mut &header[offset..]).unwrap_or(usize::MAX),
         None => 0,
     };
-    if payload_len > MAX_SEGMENT_RAW as usize - header_len {
+    if payload_len > MAX_RAW_LEN as usize - header_size {
         return FrameAt::Invalid;
     }
-    let len = header_len + payload_len;
+    let len = header_size + payload_len;
     if rest.len() < len {
         FrameAt::Incomplete
     } else {
@@ -454,7 +465,7 @@ mod tests {
 
     #[test]
     fn frame_at_tells_whole_from_incomplete_from_invalid() {
-        let max_len = MAX_SEGMENT_RAW as usize;
+        let max_len = MAX_RAW_LEN as usize;
         let frame = |frame_type: u8, payload_len: usize| {
             let payload_len = (payload_len as u32).to_le_bytes();
             match frame_type {

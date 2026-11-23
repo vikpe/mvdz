@@ -18,7 +18,7 @@ const (
 	streamSoundNumber       = 12
 	streamTempEntityType    = 13
 	streamUsercmd           = 14
-	streamLzLiteral         = 15 // literal bytes of the blob tokens
+	streamLZLiteral         = 15 // literal bytes of the blob tokens
 
 	// Numeric streams: rANS values, decoded by the walk and the blob tokens.
 	// Origins and angles have one stream per axis: the id below plus the axis.
@@ -30,8 +30,8 @@ const (
 	streamPlayerFloatOrigin = 27
 	streamEntityFloatOrigin = 30
 	streamUsercmdAngle      = 33
-	streamLzLength          = 34 // match lengths of the blob tokens, 0 for a literal
-	streamLzDistance        = 35 // match distances of the blob tokens
+	streamLZLength          = 34 // match lengths of the blob tokens, 0 for a literal
+	streamLZDistance        = 35 // match distances of the blob tokens
 
 	// Blob streams: plain bytes from the blob tokens, consumed by the walker.
 	streamMask            = 36

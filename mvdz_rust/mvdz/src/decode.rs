@@ -1,12 +1,12 @@
 //! Decoding: the container reader, segment by segment, and the checks over the demo.
 
-use crate::error::{Error, Result, bad};
+use crate::error::{Error, Result, corrupt};
 use crate::format::{
-    HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_LEN, SegmentHeader,
-    check_coded_len, parse_segment_header,
+    HEADER_SIZE, Header, LEN_FIELD_SIZE, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_SIZE,
+    SegmentHeader, check_coded_len, parse_segment_header,
 };
 use crate::memory::{DEFAULT_MAX_MEMORY, segments_in_flight, try_zeroed};
-use crate::parallel::{par_map, thread_count};
+use crate::parallel::{parallel_map, thread_count};
 use crate::rans::{Models, read_models_block};
 use crate::segment;
 use std::collections::VecDeque;
@@ -19,8 +19,8 @@ use std::io::{self, Read};
 /// [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for another file type or version,
 /// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] for a demo of more than 1 GiB:
 /// read that one with [`Decoder`].
-pub fn decode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
-    decompress(bytes, max_threads, DEFAULT_MAX_MEMORY)
+pub fn decode(file: &[u8], max_threads: u8) -> Result<Vec<u8>> {
+    decode_with_max_memory(file, max_threads, DEFAULT_MAX_MEMORY)
 }
 
 /// Each segment's CRC-32 is checked before its bytes are read; the first error is sticky.
@@ -30,7 +30,7 @@ pub struct Decoder<R: Read> {
     layout: Layout,
     current: Option<Vec<u8>>,
     /// Into `current`.
-    at: usize,
+    position: usize,
     ready: VecDeque<Vec<u8>>,
     /// Met after the segments in `ready`; reported once they are read.
     deferred_error: Option<Error>,
@@ -49,14 +49,14 @@ impl<R: Read> Decoder<R> {
     /// [`Error::Io`] when reading fails, [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for
     /// another file type or version, [`Error::Corrupt`] for a truncated header.
     pub fn new(mut input: R) -> Result<Self> {
-        let mut header = [0u8; HEADER_LEN];
+        let mut header = [0u8; HEADER_SIZE];
         let filled = read_up_to(&mut input, &mut header)?;
         let layout = Layout::new(&header[..filled])?;
         Ok(Self {
             input,
             layout,
             current: None,
-            at: 0,
+            position: 0,
             ready: VecDeque::new(),
             deferred_error: None,
             is_done: false,
@@ -84,18 +84,18 @@ impl<R: Read> Decoder<R> {
     }
 
     pub fn header(&self) -> &Header {
-        &self.layout.header
+        self.layout.header()
     }
 
-    pub(crate) fn read_demo(&mut self, buf: &mut [u8]) -> Result<usize> {
-        if self.at == self.current_bytes().len() {
+    pub(crate) fn read_demo(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        if self.position == self.current_bytes().len() {
             self.current = self.next_segment()?;
-            self.at = 0;
+            self.position = 0;
         }
-        let unread = &self.current_bytes()[self.at..];
-        let len = buf.len().min(unread.len());
-        buf[..len].copy_from_slice(&unread[..len]);
-        self.at += len;
+        let unread = &self.current_bytes()[self.position..];
+        let len = buffer.len().min(unread.len());
+        buffer[..len].copy_from_slice(&unread[..len]);
+        self.position += len;
         Ok(len)
     }
 
@@ -139,10 +139,10 @@ impl<R: Read> Decoder<R> {
 
     fn read_models(&mut self) -> Result<()> {
         let Some(len) = self.read_len()? else {
-            return bad("incomplete file");
+            return corrupt("incomplete file");
         };
         if len > MAX_MODELS_LEN {
-            return bad("models too large");
+            return corrupt("models too large");
         }
         let models = if len > 0 {
             let body = self.read_body(len)?;
@@ -156,13 +156,13 @@ impl<R: Read> Decoder<R> {
     }
 
     fn finish(&mut self) -> Result<()> {
-        let mut one = [0u8; 1];
-        if read_up_to(&mut self.input, &mut one)? != 0 {
-            return bad("trailing bytes");
+        let mut trailing = [0u8; 1];
+        if read_up_to(&mut self.input, &mut trailing)? != 0 {
+            return corrupt("trailing bytes");
         }
         self.layout.finish()?;
-        if self.demo_crc32.clone().finalize() != self.layout.header.crc32 {
-            return bad("checksum mismatch");
+        if self.demo_crc32.clone().finalize() != self.layout.header().crc32 {
+            return corrupt("checksum mismatch");
         }
         self.is_done = true;
         Ok(())
@@ -170,11 +170,11 @@ impl<R: Read> Decoder<R> {
 
     /// `None` at the end of the input.
     fn read_len(&mut self) -> Result<Option<u64>> {
-        let mut field = [0u8; LEN_FIELD_LEN];
+        let mut field = [0u8; LEN_FIELD_SIZE];
         match read_up_to(&mut self.input, &mut field)? {
             0 => Ok(None),
-            LEN_FIELD_LEN => Ok(Some(u64::from(u32::from_le_bytes(field)))),
-            _ => bad("incomplete file"),
+            LEN_FIELD_SIZE => Ok(Some(u64::from(u32::from_le_bytes(field)))),
+            _ => corrupt("incomplete file"),
         }
     }
 
@@ -184,7 +184,7 @@ impl<R: Read> Decoder<R> {
         let mut body = Vec::new();
         (&mut self.input).take(len).read_to_end(&mut body)?;
         if body.len() as u64 != len {
-            return bad("incomplete file");
+            return corrupt("incomplete file");
         }
         Ok(body)
     }
@@ -192,12 +192,12 @@ impl<R: Read> Decoder<R> {
     fn read_segment(&mut self) -> Result<(SegmentHeader, Vec<u8>)> {
         // the stream may end here, short of the demo: `decode_batch` delivers the
         // complete segments before it first
-        let Some(coded) = self.read_len()? else {
-            return bad("incomplete file");
+        let Some(coded_len) = self.read_len()? else {
+            return corrupt("incomplete file");
         };
-        check_coded_len(coded)?;
-        let body = self.read_body(coded + SEGMENT_FIELDS_LEN as u64)?;
-        let header = parse_segment_header(&body[..SEGMENT_FIELDS_LEN])?;
+        check_coded_len(coded_len)?;
+        let body = self.read_body(coded_len + SEGMENT_FIELDS_SIZE as u64)?;
+        let header = parse_segment_header(&body[..SEGMENT_FIELDS_SIZE])?;
         self.layout.add_segment(header)?;
         Ok((header, body))
     }
@@ -222,8 +222,8 @@ impl<R: Read> Decoder<R> {
                 Err(error) => return Err(error),
             }
         }
-        let models = self.layout.models.as_ref();
-        let decoded = par_map(self.threads, &segments, |(header, body)| {
+        let models = self.layout.models();
+        let decoded = parallel_map(self.threads, &segments, |(header, body)| {
             let mut bytes = try_zeroed(header.raw_len as usize)?;
             decode_segment(models, body, *header, &mut bytes)?;
             Ok(bytes)
@@ -251,23 +251,23 @@ impl<R: Read> Decoder<R> {
     }
 }
 
-// ponytail: measured on sample demos, not a bound; count the buffers if it must hold
-const BASE_MEMORY: u64 = 12 << 20;
-const SEGMENT_MEMORY: u64 = 2 << 20;
-
 impl<R: Read> Read for Decoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         Ok(self.read_demo(buf)?)
     }
 }
 
-/// Fills `buf` until it is full or the input ends; returns the count.
-fn read_up_to(input: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+// ponytail: measured on sample demos, not a bound; count the buffers if it must hold
+const BASE_MEMORY: u64 = 12 << 20;
+const SEGMENT_MEMORY: u64 = 2 << 20;
+
+/// Fills `buffer` until it is full or the input ends; returns the count.
+fn read_up_to(input: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
-    while filled < buf.len() {
-        match input.read(&mut buf[filled..]) {
+    while filled < buffer.len() {
+        match input.read(&mut buffer[filled..]) {
             Ok(0) => break,
-            Ok(read) => filled += read.min(buf.len() - filled),
+            Ok(read) => filled += read.min(buffer.len() - filled),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
@@ -279,23 +279,27 @@ pub(crate) fn decode_segment(
     models: Option<&Models>,
     body: &[u8],
     header: SegmentHeader,
-    dst: &mut [u8],
+    destination: &mut [u8],
 ) -> Result<()> {
-    if dst.len() as u64 != u64::from(header.raw_len) {
-        return bad("segment length");
+    if destination.len() as u64 != u64::from(header.raw_len) {
+        return corrupt("segment length");
     }
     let coded = body
-        .get(SEGMENT_FIELDS_LEN..)
+        .get(SEGMENT_FIELDS_SIZE..)
         .ok_or(Error::Corrupt("segment header"))?;
-    let transform_header = segment::parse_transform_header(coded, dst.len())?;
-    segment::decode(coded, &transform_header, dst, models)?;
-    if crc32fast::hash(dst) != header.crc32 {
-        return bad("segment checksum");
+    let transform_header = segment::parse_transform_header(coded, destination.len())?;
+    segment::decode_transform(coded, &transform_header, destination, models)?;
+    if crc32fast::hash(destination) != header.crc32 {
+        return corrupt("segment checksum");
     }
     Ok(())
 }
 
-pub(crate) fn decompress(file: &[u8], max_threads: u8, max_memory: u64) -> Result<Vec<u8>> {
+pub(crate) fn decode_with_max_memory(
+    file: &[u8],
+    max_threads: u8,
+    max_memory: u64,
+) -> Result<Vec<u8>> {
     let mut decoder = Decoder::new(file)?
         .max_threads(max_threads)
         .max_memory(max_memory);

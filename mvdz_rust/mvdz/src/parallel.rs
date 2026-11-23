@@ -1,6 +1,8 @@
 use std::num::NonZeroUsize;
 use std::sync::{Mutex, PoisonError};
 
+pub(crate) const HAS_THREADS: bool = !cfg!(target_family = "wasm");
+
 pub(crate) fn thread_count(max_threads: u8) -> usize {
     let available = if HAS_THREADS {
         std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
@@ -13,10 +15,8 @@ pub(crate) fn thread_count(max_threads: u8) -> usize {
     }
 }
 
-pub(crate) const HAS_THREADS: bool = !cfg!(target_family = "wasm");
-
 /// Results in item order.
-pub(crate) fn par_map<I, T, F>(threads: usize, items: I, job: F) -> Vec<T>
+pub(crate) fn parallel_map<I, T, F>(threads: usize, items: I, job: F) -> Vec<T>
 where
     I: IntoIterator,
     I::IntoIter: ExactSizeIterator + Send,
@@ -71,8 +71,8 @@ mod tests {
     }
 
     #[test]
-    fn par_map_order() {
-        let doubled = super::par_map(3, 0..100, |index| index * 2);
+    fn parallel_map_order() {
+        let doubled = super::parallel_map(3, 0..100, |index| index * 2);
         assert_eq!(doubled, (0..100).map(|index| index * 2).collect::<Vec<_>>());
     }
 }

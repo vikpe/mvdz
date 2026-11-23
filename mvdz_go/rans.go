@@ -2,85 +2,104 @@ package mvdz
 
 import (
 	"encoding/binary"
+	"fmt"
 	"maps"
 	"math/bits"
 	"slices"
 )
 
 const (
-	structuralAlphabet = 256
-	numericAlphabet    = 65
-	maxOwnTables       = 1 << 16
-	frequencyBits      = 12
-	frequencyTotal     = 1 << frequencyBits
-	ransLowerBound     = 1 << 16
+	structuralAlphabetSize = 256
+	numericAlphabetSize    = 65
+	ownCountSize           = 4
+	maxOwnCount            = 1 << 16
+	scaleBits              = 12
+	frequencyTotal         = 1 << scaleBits
+	ransLowerBound         = 1 << 16
 )
 
 // streamModel is the model of one stream, FORMAT.md 6.2.
 type streamModel struct {
-	raw      []byte           // the raw model
-	contexts []uint16         // strictly increasing
-	tables   []frequencyTable // the fallback, then one per context
+	raw         []byte
+	ownContexts []uint16    // strictly increasing
+	tables      []ransTable // the fallback, then one per own context
 }
 
-// frequencyTable holds the present symbols in ascending order; symbol index
+// fileModels is by stream id; nil where the models block has none.
+type fileModels [firstBlobStream]*streamModel
+
+// ransTable holds the present symbols in ascending order; symbol index
 // owns the slots cumulative[index] to cumulative[index+1].
-type frequencyTable struct {
+type ransTable struct {
 	symbols    []uint8
 	cumulative []uint16
 }
 
-// rawModelLen is the length of a raw model, FORMAT.md 6.2.
-func rawModelLen(ownCount int, alphabet int) int {
-	return 4 + 2*ownCount + (ownCount+1)*alphabet
+// find is false if the table does not hold the symbol.
+func (table *ransTable) find(symbol uint8) (start uint32, frequency uint32, isPresent bool) {
+	index, isPresent := slices.BinarySearch(table.symbols, symbol)
+	if !isPresent {
+		return 0, 0, false
+	}
+	start = uint32(table.cumulative[index])
+	return start, uint32(table.cumulative[index+1]) - start, true
 }
 
-// newStreamModel builds a model from its raw bytes: the own count, the own
-// contexts, the fallback table and the own tables.
-func newStreamModel(raw []byte, alphabet int) (*streamModel, error) {
-	if len(raw) < 4 {
+// FORMAT.md 6.2
+func rawModelLen(ownCount, alphabetSize int) int {
+	return ownCountSize + 2*ownCount + (ownCount+1)*alphabetSize
+}
+
+// newStreamModel reads a raw model: the own count, the own contexts, the
+// fallback table and the own tables.
+func newStreamModel(raw []byte, alphabetSize int) (*streamModel, error) {
+	if len(raw) < ownCountSize {
 		return nil, corrupt("model")
 	}
 	declaredOwnCount := binary.LittleEndian.Uint32(raw)
-	if declaredOwnCount > maxOwnTables || len(raw) != rawModelLen(int(declaredOwnCount), alphabet) {
+	if declaredOwnCount > maxOwnCount || len(raw) != rawModelLen(int(declaredOwnCount), alphabetSize) {
 		return nil, corrupt("model")
 	}
 	ownCount := int(declaredOwnCount)
-	contexts := make([]uint16, ownCount)
-	for index := range contexts {
-		contexts[index] = binary.LittleEndian.Uint16(raw[4+2*index:])
-		if index > 0 && contexts[index] <= contexts[index-1] {
+	ownContexts := make([]uint16, ownCount)
+	for index := range ownContexts {
+		ownContexts[index] = binary.LittleEndian.Uint16(raw[ownCountSize+2*index:])
+		if index > 0 && ownContexts[index] <= ownContexts[index-1] {
 			return nil, corrupt("model")
 		}
 	}
-	quantizedTables := raw[4+2*ownCount:]
+	quantizedTables := raw[ownCountSize+2*ownCount:]
 	for _, quantized := range quantizedTables {
 		if quantized > maxQuantized {
 			return nil, corrupt("model")
 		}
 	}
-	tables := make([]frequencyTable, ownCount+1)
-	for index := range tables {
-		tables[index] = newFrequencyTable(quantizedTables[index*alphabet:][:alphabet])
-	}
-	return &streamModel{raw, contexts, tables}, nil
+	return &streamModel{raw, ownContexts, newRansTables(quantizedTables, alphabetSize)}, nil
 }
 
-func (model *streamModel) table(context uint16) *frequencyTable {
-	index, isOwn := slices.BinarySearch(model.contexts, context)
+func (model *streamModel) table(context uint16) *ransTable {
+	index, isOwn := slices.BinarySearch(model.ownContexts, context)
 	if !isOwn {
 		return &model.tables[0]
 	}
 	return &model.tables[index+1]
 }
 
+func newRansTables(quantizedTables []byte, alphabetSize int) []ransTable {
+	tables := make([]ransTable, len(quantizedTables)/alphabetSize)
+	for index := range tables {
+		tables[index] = newRansTable(quantizedTables[index*alphabetSize:][:alphabetSize])
+	}
+	return tables
+}
+
 // FORMAT.md 6.3
-func newFrequencyTable(quantized []byte) frequencyTable {
+func newRansTable(quantized []byte) ransTable {
 	weights := make([]uint64, len(quantized))
 	for symbol, count := range quantized {
 		weights[symbol] = quantizedWeight(uint32(count))
 	}
-	table := frequencyTable{cumulative: []uint16{0}}
+	table := ransTable{cumulative: []uint16{0}}
 	start := 0
 	for symbol, frequency := range normalize(weights, frequencyTotal) {
 		if frequency == 0 {
@@ -93,8 +112,7 @@ func newFrequencyTable(quantized []byte) frequencyTable {
 	return table
 }
 
-// previousBytes is the context of each byte of a raw model under the meta
-// model: the byte before it, 0 before the first.
+// previousBytes is each byte of a raw model under its context: the byte before it.
 func previousBytes(raw []byte) []codedValue {
 	values := make([]codedValue, len(raw))
 	previous := uint8(0)
@@ -111,45 +129,46 @@ type listedModel struct {
 	raw    []byte
 }
 
-// writeModelsBlock lays out the body of the models block, FORMAT.md
-// 2.2: the meta model as it is, then every raw model coded under it. It also
-// returns the raw length the format limits.
-func writeModelsBlock(models []listedModel) (body []byte, rawLen int) {
+// writeModelsBlock is the meta model as it is, then every raw model coded
+// under it, FORMAT.md 2.2; rawLen is what the format limits.
+func writeModelsBlock(models []listedModel) (body []byte, rawLen int, err error) {
 	metaTally := streamTally{}
 	for _, listed := range models {
-		metaTally.add(previousBytes(listed.raw), structuralAlphabet, false)
+		metaTally.add(previousBytes(listed.raw), structuralAlphabetSize, false)
 	}
-	metaRaw := metaTally.rawModel(structuralAlphabet, metaTableCost)
-	meta, _ := newStreamModel(metaRaw, structuralAlphabet) // built here: valid
-	body = append(body, metaRaw...)
-	rawLen = len(metaRaw)
+	meta := metaTally.model(structuralAlphabetSize, metaTableCost)
+	body = append(body, meta.raw...)
+	rawLen = len(meta.raw)
 	body = binary.LittleEndian.AppendUint32(body, uint32(len(models)))
 	for _, listed := range models {
-		coded, _ := encodeStream(meta, previousBytes(listed.raw), false) // the meta model is built from these bytes
+		coded, isCoded := encodeStream(meta, previousBytes(listed.raw), false)
+		if !isCoded {
+			return nil, 0, fmt.Errorf("%w: the meta model does not code a model", ErrInternal)
+		}
 		body = binary.LittleEndian.AppendUint32(body, uint32(listed.stream))
 		body = binary.LittleEndian.AppendUint32(body, uint32(len(listed.raw)))
 		body = binary.LittleEndian.AppendUint32(body, uint32(len(coded)))
 		body = append(body, coded...)
 		rawLen += len(listed.raw)
 	}
-	return body, rawLen
+	return body, rawLen, nil
 }
 
-// readModelsBlock reads the body of the models block, FORMAT.md 2.2.
+// FORMAT.md 2.2
 func readModelsBlock(body []byte) (*fileModels, error) {
-	if len(body) < 4 {
+	if len(body) < ownCountSize {
 		return nil, corrupt("tables")
 	}
 	metaOwnCount := binary.LittleEndian.Uint32(body)
-	if metaOwnCount > maxOwnTables {
+	if metaOwnCount > maxOwnCount {
 		return nil, corrupt("tables")
 	}
 	fields := byteCursor{data: body}
-	metaRaw := fields.bytes(uint32(rawModelLen(int(metaOwnCount), structuralAlphabet)))
+	metaRaw := fields.readBytes(uint32(rawModelLen(int(metaOwnCount), structuralAlphabetSize)))
 	if fields.isShort {
 		return nil, corrupt("tables")
 	}
-	meta, err := newStreamModel(metaRaw, structuralAlphabet)
+	meta, err := newStreamModel(metaRaw, structuralAlphabetSize)
 	if err != nil {
 		return nil, err
 	}
@@ -158,22 +177,22 @@ func readModelsBlock(body []byte) (*fileModels, error) {
 		id, rawLen uint32
 		coded      []byte
 	}
-	entryCount := fields.u32()
+	entryCount := fields.readUint32()
 	if fields.isShort || entryCount == 0 || entryCount > firstBlobStream {
 		return nil, corrupt("tables")
 	}
 	entries := make([]modelEntry, entryCount)
-	nextId := uint32(0)
+	nextID := uint32(0)
 	rawTotal := uint64(len(metaRaw))
 	for index := range entries {
 		entry := &entries[index]
-		entry.id = fields.u32()
-		entry.rawLen = fields.u32()
-		entry.coded = fields.bytes(fields.u32())
-		if fields.isShort || entry.id < nextId || entry.id >= firstBlobStream {
+		entry.id = fields.readUint32()
+		entry.rawLen = fields.readUint32()
+		entry.coded = fields.readBytes(fields.readUint32())
+		if fields.isShort || entry.id < nextID || entry.id >= firstBlobStream {
 			return nil, corrupt("tables")
 		}
-		nextId = entry.id + 1
+		nextID = entry.id + 1
 		rawTotal += uint64(entry.rawLen)
 	}
 	if !fields.isAtEnd() {
@@ -190,7 +209,7 @@ func readModelsBlock(body []byte) (*fileModels, error) {
 		if err != nil {
 			return nil, err
 		}
-		models[entry.id], err = newStreamModel(raw, streamAlphabet(int(entry.id)))
+		models[entry.id], err = newStreamModel(raw, streamAlphabetSize(int(entry.id)))
 		if err != nil {
 			return nil, err
 		}
@@ -203,9 +222,6 @@ func decodeRawModel(coded []byte, rawLen uint32, meta *streamModel) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	if !decoder.mantissas.isFinished() {
-		return nil, corrupt("rans stream")
-	}
 	raw := make([]byte, rawLen)
 	previous := uint8(0)
 	for index := range raw {
@@ -216,7 +232,7 @@ func decodeRawModel(coded []byte, rawLen uint32, meta *streamModel) ([]byte, err
 		raw[index] = symbol
 		previous = symbol
 	}
-	if !decoder.isComplete() {
+	if !decoder.isDone() {
 		return nil, corrupt("model")
 	}
 	return raw, nil
@@ -226,13 +242,12 @@ func decodeRawModel(coded []byte, rawLen uint32, meta *streamModel) ([]byte, err
 // segments of a demo.
 type streamTally map[uint16][]uint32
 
-// add counts values: the symbols of a structural stream, the buckets of a
-// numeric one.
-func (tally streamTally) add(values []codedValue, alphabet int, isNumeric bool) {
+// add counts the symbols of a structural stream, the buckets of a numeric one.
+func (tally streamTally) add(values []codedValue, alphabetSize int, isNumeric bool) {
 	for _, coded := range values {
 		counts := tally[coded.context]
 		if counts == nil {
-			counts = make([]uint32, alphabet)
+			counts = make([]uint32, alphabetSize)
 			tally[coded.context] = counts
 		}
 		symbol := uint16(coded.value)
@@ -243,8 +258,7 @@ func (tally streamTally) add(values []codedValue, alphabet int, isNumeric bool) 
 	}
 }
 
-// tableCost is what an own table costs in the models block, in bits,
-// FORMAT.md 8.
+// tableCost is of an own table in the models block, in bits, FORMAT.md 8.
 type tableCost struct {
 	base      uint64
 	perSymbol uint64
@@ -257,19 +271,18 @@ var (
 	metaTableCost = tableCost{base: 16 + 8*256, perSymbol: 0}
 )
 
-// rawModel builds the raw model of a stream from its counts, FORMAT.md
-// 8 rule 4.
-func (tally streamTally) rawModel(alphabet int, cost tableCost) []byte {
+// FORMAT.md 8 rule 4
+func (tally streamTally) model(alphabetSize int, cost tableCost) *streamModel {
 	contexts := slices.Sorted(maps.Keys(tally))
-	ownContexts := tally.ownContexts(contexts, alphabet, cost)
+	ownContexts := tally.ownContexts(contexts, alphabetSize, cost)
 
-	fallback := make([]uint32, alphabet)
+	fallback := make([]uint32, alphabetSize)
 	for _, context := range contexts {
 		if _, isOwn := slices.BinarySearch(ownContexts, context); !isOwn {
 			addCounts(fallback, tally[context])
 		}
 	}
-	raw := make([]byte, 0, rawModelLen(len(ownContexts), alphabet))
+	raw := make([]byte, 0, rawModelLen(len(ownContexts), alphabetSize))
 	raw = binary.LittleEndian.AppendUint32(raw, uint32(len(ownContexts)))
 	for _, context := range ownContexts {
 		raw = binary.LittleEndian.AppendUint16(raw, context)
@@ -278,22 +291,20 @@ func (tally streamTally) rawModel(alphabet int, cost tableCost) []byte {
 	for _, context := range ownContexts {
 		raw = appendQuantized(raw, tally[context])
 	}
-	return raw
+	quantizedTables := raw[ownCountSize+2*len(ownContexts):]
+	return &streamModel{raw, ownContexts, newRansTables(quantizedTables, alphabetSize)}
 }
 
-// ownContexts chooses the contexts that get a table of their own, FORMAT.md
-// 8 rule 4: those that cost fewer bits coded with their own table,
-// the table included, than with the fallback table, and those the fallback
-// table cannot code. The first pass measures against all contexts together,
-// the second against the contexts the first left to the fallback.
-func (tally streamTally) ownContexts(contexts []uint16, alphabet int, cost tableCost) []uint16 {
-	fallback := make([]uint32, alphabet)
+// ownContexts are those cheaper with a table of their own, or that the
+// fallback table cannot code, FORMAT.md 8 rule 4.
+func (tally streamTally) ownContexts(contexts []uint16, alphabetSize int, cost tableCost) []uint16 {
+	fallback := make([]uint32, alphabetSize)
 	for _, context := range contexts {
 		addCounts(fallback, tally[context])
 	}
 	var ownContexts []uint16
 	for range 2 {
-		rebuiltFallback := make([]uint32, alphabet)
+		rebuiltFallback := make([]uint32, alphabetSize)
 		ownContexts = nil
 		for _, context := range contexts {
 			counts := tally[context]
@@ -303,9 +314,10 @@ func (tally streamTally) ownContexts(contexts []uint16, alphabet int, cost table
 					presentCount++
 				}
 			}
-			ownBits := entropyBits(counts) + (cost.base+cost.perSymbol*presentCount)<<16
-			fallbackBits, isCodable := crossBits(counts, fallback)
-			if !isCodable || ownBits < fallbackBits {
+			ownCost := entropyBits(counts) + (cost.base+cost.perSymbol*presentCount)<<16
+			fallbackCost, isCodable := crossBits(counts, fallback)
+			isCheaperAsOwn := !isCodable || ownCost < fallbackCost
+			if isCheaperAsOwn {
 				ownContexts = append(ownContexts, context)
 			} else {
 				addCounts(rebuiltFallback, counts)
@@ -319,8 +331,8 @@ func (tally streamTally) ownContexts(contexts []uint16, alphabet int, cost table
 // entropyBits is the size of the counted symbols coded with their own
 // frequencies, in bits with 16 fraction bits as log2Fixed.
 func entropyBits(counts []uint32) uint64 {
-	bits, _ := crossBits(counts, counts)
-	return bits
+	size, _ := crossBits(counts, counts)
+	return size
 }
 
 // crossBits is the size of the counted symbols coded with a table built from
@@ -331,7 +343,7 @@ func crossBits(counts []uint32, reference []uint32) (uint64, bool) {
 		total += uint64(count)
 	}
 	logTotal := log2Fixed(max(total, 1))
-	bits := uint64(0)
+	size := uint64(0)
 	for symbol, count := range counts {
 		if count == 0 {
 			continue
@@ -339,9 +351,9 @@ func crossBits(counts []uint32, reference []uint32) (uint64, bool) {
 		if reference[symbol] == 0 {
 			return 0, false
 		}
-		bits += uint64(count) * (logTotal - log2Fixed(uint64(reference[symbol])))
+		size += uint64(count) * (logTotal - log2Fixed(uint64(reference[symbol])))
 	}
-	return bits, true
+	return size, true
 }
 
 func appendQuantized(table []byte, counts []uint32) []byte {
@@ -357,11 +369,54 @@ func addCounts(sum []uint32, counts []uint32) {
 	}
 }
 
-func streamAlphabet(stream int) int {
+func streamAlphabetSize(stream int) int {
 	if stream >= firstNumericStream {
-		return numericAlphabet
+		return numericAlphabetSize
 	}
-	return structuralAlphabet
+	return structuralAlphabetSize
+}
+
+// bitWriter writes mantissa bits, FORMAT.md Appendix A: least significant
+// bit first, the last byte padded with zeros.
+type bitWriter struct {
+	data     []byte
+	bitCount int
+}
+
+func (writer *bitWriter) write(value uint32, count int) {
+	for index := range count {
+		if writer.bitCount%8 == 0 {
+			writer.data = append(writer.data, 0)
+		}
+		bit := uint8(value>>index) & 1
+		writer.data[len(writer.data)-1] |= bit << (writer.bitCount % 8)
+		writer.bitCount++
+	}
+}
+
+// bitReader reads mantissa bits, FORMAT.md 6.4: least significant bit
+// first, zeros past the end.
+type bitReader struct {
+	data     []byte
+	position int
+}
+
+func (reader *bitReader) read(count int) uint32 {
+	var value uint32
+	for index := range count {
+		byteIndex := reader.position / 8
+		if byteIndex < len(reader.data) {
+			bit := reader.data[byteIndex] >> (reader.position % 8) & 1
+			value |= uint32(bit) << index
+		}
+		reader.position++
+	}
+	return value
+}
+
+// FORMAT.md 6.5: the bits end within the last byte.
+func (reader *bitReader) isDone() bool {
+	return (reader.position+7)/8 == len(reader.data)
 }
 
 // streamDecoder decodes one structural or numeric stream of a segment,
@@ -376,9 +431,9 @@ type streamDecoder struct {
 
 func newStreamDecoder(model *streamModel, body []byte) (*streamDecoder, error) {
 	fields := byteCursor{data: body}
-	rans := fields.bytes(fields.u32())
+	rans := fields.readBytes(fields.readUint32())
 	if fields.isShort {
-		return nil, corrupt("stream body")
+		return nil, corrupt("rans stream")
 	}
 	decoder := &streamDecoder{
 		model:     model,
@@ -388,12 +443,12 @@ func newStreamDecoder(model *streamModel, body []byte) (*streamDecoder, error) {
 	high := decoder.word()
 	decoder.state = high<<16 | decoder.word()
 	if decoder.state < ransLowerBound {
-		return nil, corrupt("stream body")
+		return nil, corrupt("rans stream")
 	}
 	return decoder, nil
 }
 
-// symbol decodes the next symbol; false if the context's table is empty.
+// symbol is false if the context's table is empty.
 func (decoder *streamDecoder) symbol(context uint16) (uint8, bool) {
 	table := decoder.model.table(context)
 	if len(table.symbols) == 0 {
@@ -406,25 +461,14 @@ func (decoder *streamDecoder) symbol(context uint16) (uint8, bool) {
 	}
 	start := uint32(table.cumulative[index])
 	frequency := uint32(table.cumulative[index+1]) - start
-	decoder.state = frequency*(decoder.state>>frequencyBits) + uint32(slot) - start
+	decoder.state = frequency*(decoder.state>>scaleBits) + uint32(slot) - start
 	if decoder.state < ransLowerBound {
 		decoder.state = decoder.state<<16 | decoder.word()
 	}
 	return table.symbols[index], true
 }
 
-// find returns the first slot and the frequency of a symbol; false if the
-// table does not hold it.
-func (table *frequencyTable) find(symbol uint8) (start uint32, frequency uint32, isPresent bool) {
-	index, isPresent := slices.BinarySearch(table.symbols, symbol)
-	if !isPresent {
-		return 0, 0, false
-	}
-	start = uint32(table.cumulative[index])
-	return start, uint32(table.cumulative[index+1]) - start, true
-}
-
-// value decodes the next residual of a numeric stream: a bucket symbol, then
+// value is the next residual of a numeric stream: a bucket symbol, then
 // the mantissa bits below the leading one.
 func (decoder *streamDecoder) value(context uint16) (int32, bool) {
 	bucket, isDecoded := decoder.symbol(context)
@@ -442,10 +486,10 @@ func (decoder *streamDecoder) value(context uint16) (int32, bool) {
 	return int32(magnitude), true
 }
 
-func (decoder *streamDecoder) isComplete() bool {
+func (decoder *streamDecoder) isDone() bool {
 	return decoder.state == ransLowerBound &&
 		decoder.wordPosition == len(decoder.rans) &&
-		decoder.mantissas.isFinished()
+		decoder.mantissas.isDone()
 }
 
 func (decoder *streamDecoder) word() uint32 {
@@ -457,11 +501,9 @@ func (decoder *streamDecoder) word() uint32 {
 	return uint32(word)
 }
 
-// encodeStream codes the symbols or residuals of one stream to a stream
-// body, FORMAT.md 6.1 and Appendix A; false if the model does not
-// hold a symbol.
+// encodeStream is false if the model does not hold a symbol, FORMAT.md 6.1
+// and Appendix A.
 func encodeStream(model *streamModel, values []codedValue, isNumeric bool) ([]byte, bool) {
-	var mantissas bitWriter
 	state := uint32(ransLowerBound)
 	var reversedWords []uint16
 	for index := len(values) - 1; index >= 0; index-- {
@@ -478,10 +520,11 @@ func encodeStream(model *streamModel, values []codedValue, isNumeric bool) ([]by
 			reversedWords = append(reversedWords, uint16(state))
 			state >>= 16
 		}
-		state = (state/frequency)<<frequencyBits + state%frequency + start
+		state = (state/frequency)<<scaleBits + state%frequency + start
 	}
 	reversedWords = append(reversedWords, uint16(state), uint16(state>>16))
 
+	var mantissas bitWriter
 	if isNumeric {
 		for _, coded := range values {
 			magnitude := uint32(coded.value)
