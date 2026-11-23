@@ -2,6 +2,7 @@
 //! command stays lossless: both directions size it alike.
 
 use crate::fields::{read_u8, read_u16, read_u32, read_usize, skip, skip_cstr};
+use crate::format::MAX_SEGMENT_RAW;
 
 pub(crate) const PROTOCOL_VERSION: u32 = 28;
 
@@ -378,33 +379,119 @@ impl ProtocolState {
     }
 }
 
+/// Includes the frame header.
+pub(crate) fn frame_len(src: &[u8], start: usize) -> Option<usize> {
+    match frame_at(src, start) {
+        FrameAt::Whole(len) => Some(len),
+        FrameAt::Incomplete | FrameAt::Invalid => None,
+    }
+}
+
 /// Tells frames from bytes that frame by chance.
-pub(crate) fn has_frame_run(src: &[u8], start: usize) -> bool {
+pub(crate) fn frame_run(src: &[u8], start: usize) -> FrameRun {
     const FRAME_RUN_LEN: usize = 16;
     let mut offset = start;
     for _ in 0..FRAME_RUN_LEN {
-        match frame_len(src, offset) {
-            Some(len) => offset += len,
-            None => return false,
+        match frame_at(src, offset) {
+            FrameAt::Whole(len) => offset += len,
+            FrameAt::Incomplete => return FrameRun::Incomplete,
+            FrameAt::Invalid => return FrameRun::No,
         }
     }
-    true
+    FrameRun::Yes
 }
 
-/// Includes the frame header.
-pub(crate) fn frame_len(src: &[u8], start: usize) -> Option<usize> {
-    let remaining = src.len().checked_sub(start)?;
-    let payload_len_at = |offset: usize| read_usize(&mut src.get(start + offset..)?);
-    match src.get(start + 1)? & 7 {
-        DEM_SET => (remaining >= 10).then_some(10),
-        DEM_MULTIPLE => {
-            let len = payload_len_at(6)?;
-            (len <= remaining - 10).then_some(10 + len)
-        }
-        DEM_READ | DEM_SINGLE | DEM_STATS | DEM_ALL => {
-            let len = payload_len_at(2)?;
-            (len <= remaining - 6).then_some(6 + len)
-        }
-        _ => None,
+/// `Incomplete`: more bytes could make it `Yes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameRun {
+    Incomplete,
+    No,
+    Yes,
+}
+
+/// A frame is at most a segment long.
+pub(crate) fn frame_at(src: &[u8], start: usize) -> FrameAt {
+    let rest = src.get(start..).unwrap_or_default();
+    let Some(&frame_type) = rest.get(1) else {
+        return FrameAt::Incomplete;
+    };
+    let (header_len, payload_len_offset) = match frame_type & 7 {
+        DEM_SET => (10, None),
+        DEM_MULTIPLE => (10, Some(6)),
+        DEM_READ | DEM_SINGLE | DEM_STATS | DEM_ALL => (6, Some(2)),
+        _ => return FrameAt::Invalid,
+    };
+    let Some(header) = rest.get(..header_len) else {
+        return FrameAt::Incomplete;
+    };
+    let payload_len = match payload_len_offset {
+        Some(offset) => read_usize(&mut &header[offset..]).unwrap_or(usize::MAX),
+        None => 0,
+    };
+    if payload_len > MAX_SEGMENT_RAW as usize - header_len {
+        return FrameAt::Invalid;
+    }
+    let len = header_len + payload_len;
+    if rest.len() < len {
+        FrameAt::Incomplete
+    } else {
+        FrameAt::Whole(len)
+    }
+}
+
+/// `Incomplete`: more bytes could make it `Whole`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameAt {
+    Incomplete,
+    Invalid,
+    Whole(usize),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn frame_at_tells_whole_from_incomplete_from_invalid() {
+        let max_len = MAX_SEGMENT_RAW as usize;
+        let frame = |frame_type: u8, payload_len: usize| {
+            let payload_len = (payload_len as u32).to_le_bytes();
+            match frame_type {
+                DEM_SET => vec![0; 10],
+                DEM_MULTIPLE => [&[0, frame_type, 0, 0, 0, 0][..], &payload_len].concat(),
+                _ => [&[0, frame_type][..], &payload_len].concat(),
+            }
+        };
+        assert_eq!(frame_at(&[], 0), FrameAt::Incomplete);
+        assert_eq!(frame_at(&[0], 0), FrameAt::Incomplete);
+        assert_eq!(frame_at(&[0, 0], 0), FrameAt::Invalid);
+        assert_eq!(frame_at(&[0, 7], 0), FrameAt::Invalid);
+        assert_eq!(frame_at(&[0, DEM_SET], 0), FrameAt::Incomplete);
+        assert_eq!(
+            frame_at(&[0, DEM_SET, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            FrameAt::Whole(10)
+        );
+        assert_eq!(frame_at(&frame(DEM_MULTIPLE, 0), 0), FrameAt::Whole(10));
+        assert_eq!(frame_at(&frame(DEM_ALL, 0), 0), FrameAt::Whole(6));
+        assert_eq!(frame_at(&frame(DEM_ALL, 1), 0), FrameAt::Incomplete);
+        assert_eq!(
+            frame_at(&frame(DEM_ALL, max_len - 6), 0),
+            FrameAt::Incomplete
+        );
+        assert_eq!(frame_at(&frame(DEM_ALL, max_len - 5), 0), FrameAt::Invalid);
+        assert_eq!(
+            frame_at(&frame(DEM_MULTIPLE, max_len - 9), 0),
+            FrameAt::Invalid
+        );
+        let two = [frame(DEM_ALL, 0), frame(DEM_READ, 0)].concat();
+        assert_eq!(frame_at(&two, 6), FrameAt::Whole(6));
+        assert_eq!(frame_at(&two, 13), FrameAt::Incomplete);
+        assert_eq!(frame_run(&two, 0), FrameRun::Incomplete);
+        assert_eq!(frame_run(&two.repeat(8), 0), FrameRun::Yes);
+        assert_eq!(
+            frame_run(&[two.repeat(7), vec![0, 0]].concat(), 0),
+            FrameRun::No
+        );
     }
 }

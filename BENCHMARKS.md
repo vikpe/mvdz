@@ -124,13 +124,32 @@ this version:
 
 | demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
 |---|---|---|---|---|
-| 14.2 MB (sample40) | 93 -> **33** MiB | 102 -> **42** MiB | 23 -> **6.7** MiB | 24 -> **8.7** MiB |
-| 6.2 MB (sample8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.4** MiB | 15 -> **7.5** MiB |
-| 2.0 MB (sample8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.5** MiB | 8.8 -> **6.5** MiB |
+| 14.2 MB (sample40) | 93 -> **16** MiB | 102 -> **21** MiB | 23 -> **6.9** MiB | 24 -> **9.2** MiB |
+| 6.2 MB (sample8) | 49 -> **14** MiB | 57 -> **19** MiB | 13 -> **5.7** MiB | 15 -> **7.5** MiB |
+| 2.0 MB (sample8) | 23 -> **9.8** MiB | 29 -> **14** MiB | 7.8 -> **4.7** MiB | 8.8 -> **6.5** MiB |
 
-Decompression streams: its memory is a few segments (at most 1 MiB raw each) however
-large the demo; rc.4's grows with the demo. Compression holds the demo and its walked
-segments: about 2.3 times the demo for a large one, 1.9 to 2.8 times less than rc.4.
+Neither direction holds the demo: compression reads the file twice (counts, then codes)
+and writes each segment as it is coded; decompression streams. The memory is the models
+plus the segments worked on at once, so it follows the models a demo needs, not its
+length. One 14.2 MB demo repeated, this version:
+
+| demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
+|---|---|---|---|---|
+| 14 MB | 16 MiB | 21 MiB | 6.9 MiB | 9.3 MiB |
+| 57 MB (4 times) | 22 MiB | 29 MiB | 9.9 MiB | 13 MiB |
+| 227 MB (16 times) | 27 MiB | 36 MiB | 12 MiB | 14 MiB |
+| 567 MB (40 times) | 29 MiB | 38 MiB | 12 MiB | 15 MiB |
+
+A longer demo earns more tables (FORMAT.md 8 rule 4), up to the contexts it has: the
+figures level off. 50 different 4on4 demos joined (575 MB), the most models seen: 41 and
+53 MiB to compress, 20 and 23 MiB to decompress. The encoder that held the demo took 836
+MiB for it. rc.4's memory grows with the demo in both directions.
+
+`-M` (`Encoder::max_memory`, `Decoder::max_memory`) lowers the segments worked on at
+once to stay within a figure, approximately; the least is one segment (32 MiB to
+compress, 14 MiB to decompress). The 36 MB usercmd demo at `-j 8`: 18, 25 and 30 MiB to
+compress with `-M` 32, 48 and none; 7.7, 11 and 13 MiB to decompress with `-M` 14, 24
+and none. Compression from standard input holds the demo, since it is read twice.
 
 ## Correctness
 

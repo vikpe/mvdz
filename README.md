@@ -108,8 +108,8 @@ input.
 ## Command line
 
 ```
-mvdz compress   [-j threads] [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
-mvdz decompress [-j threads] [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
+mvdz compress   [-j threads] [-M mebibytes] [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
+mvdz decompress [-j threads] [-M mebibytes] [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
 mvdz info       file.mvdz...                 header as JSON
 ```
 
@@ -123,8 +123,12 @@ on, and the exit status is 1 if any failed; one file uses `-j` threads.
 Two names where the second is an output (for `compress` a `*.mvdz` or `-`,
 for `decompress` anything but `*.mvdz`) are an input and its output, and
 `-o` names the output of a single input. `-` is standard input or output
-(`mvdz decompress game.mvdz - | ...`). Compression has no settings, and it
-decodes its own output and compares before writing anything. `info` prints
+(`mvdz decompress game.mvdz - | ...`). `-M` is the memory to stay within for
+each file, approximately: fewer segments are worked on at once, never fewer
+than one (32 MiB for `compress`, 14 MiB for `decompress`). Neither holds the
+demo, so memory does not grow with it; `compress` from standard input does,
+since it reads the demo twice. Compression has no settings that change the
+file, and it decodes each segment and compares before writing it. `info` prints
 the header as one JSON object per file: `size_bytes`, `duration_ms`,
 `crc32` and `sha256`; the checksums are what the file claims, not verified.
 
@@ -180,6 +184,12 @@ user builds no command-line code. Not on crates.io yet: depend on it by git
 // whole buffers; `max_threads` (u8) is capped at the logical cores, 0: one per core
 let file = mvdz::encode(&demo, 0)?;
 let demo2 = mvdz::decode(&file, 4)?;
+
+// file to file without holding the demo: the input is read twice
+mvdz::Encoder::new()
+    .max_threads(4)
+    .max_memory(64 << 20)                                  // approximate, optional
+    .encode(std::fs::File::open("game.mvd")?, std::fs::File::create("game.mvdz")?)?;
 
 // in order from any io::Read, up to `max_threads` segments decoded at once
 let mut decoder = mvdz::Decoder::new(std::fs::File::open("game.mvdz")?)?;

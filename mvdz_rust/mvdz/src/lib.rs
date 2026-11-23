@@ -29,7 +29,7 @@ mod walker;
 mod tests;
 
 pub use decode::{Decoder, decode};
-pub use encode::encode;
+pub use encode::{Encoder, encode};
 pub use error::{Error, Result};
 pub use format::Header;
 

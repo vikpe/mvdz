@@ -5,9 +5,9 @@ use crate::format::{
     HEADER_LEN, Header, LEN_FIELD_LEN, Layout, MAX_MODELS_LEN, SEGMENT_FIELDS_LEN, SegmentHeader,
     check_coded_len, parse_segment_header,
 };
-use crate::memory::{DEFAULT_MAX_MEMORY, try_zeroed};
+use crate::memory::{DEFAULT_MAX_MEMORY, segments_in_flight, try_zeroed};
 use crate::parallel::{par_map, thread_count};
-use crate::rans::read_models_block;
+use crate::rans::{Models, read_models_block};
 use crate::segment;
 use std::collections::VecDeque;
 use std::io::{self, Read};
@@ -56,6 +56,15 @@ impl<R: Read> Decoder<R> {
     #[must_use]
     pub fn max_threads(mut self, max_threads: u8) -> Self {
         self.threads = thread_count(max_threads);
+        self
+    }
+
+    /// In bytes, approximate: fewer segments are decoded at once to stay within it, never
+    /// fewer than one (14 MiB). A file whose models need more is refused
+    /// ([`Error::MemoryLimit`]).
+    #[must_use]
+    pub fn max_memory(mut self, max_memory: u64) -> Self {
+        self.max_memory = max_memory.max(BASE_MEMORY + SEGMENT_MEMORY);
         self
     }
 
@@ -199,8 +208,14 @@ impl<R: Read> Decoder<R> {
     /// ponytail: reading and decoding take turns and a batch waits for its
     /// slowest segment; a rolling window would overlap them.
     fn decode_batch(&mut self) -> Result<()> {
+        let batch_len = segments_in_flight(
+            Some(self.max_memory),
+            self.threads,
+            BASE_MEMORY,
+            SEGMENT_MEMORY,
+        );
         let mut segments = Vec::new();
-        while segments.len() < self.threads && !self.layout.is_complete() {
+        while segments.len() < batch_len && !self.layout.is_complete() {
             match self.read_segment() {
                 Ok(segment) => segments.push(segment),
                 Err(error) if !segments.is_empty() => {
@@ -210,10 +225,10 @@ impl<R: Read> Decoder<R> {
                 Err(error) => return Err(error),
             }
         }
-        let layout = &self.layout;
+        let models = self.layout.models.as_ref();
         let decoded = par_map(self.threads, &segments, |(header, body)| {
             let mut bytes = try_zeroed(header.raw_len as usize)?;
-            decode_segment(layout, body, *header, &mut bytes)?;
+            decode_segment(models, body, *header, &mut bytes)?;
             Ok(bytes)
         });
         for ((header, _), result) in segments.iter().zip(decoded) {
@@ -239,6 +254,10 @@ impl<R: Read> Decoder<R> {
     }
 }
 
+// ponytail: measured on sample demos, not a bound; count the buffers if it must hold
+const BASE_MEMORY: u64 = 12 << 20;
+const SEGMENT_MEMORY: u64 = 2 << 20;
+
 impl<R: Read> Read for Decoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         Ok(self.read_demo(buf)?)
@@ -259,8 +278,8 @@ fn read_up_to(input: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     Ok(filled)
 }
 
-fn decode_segment(
-    layout: &Layout,
+pub(crate) fn decode_segment(
+    models: Option<&Models>,
     body: &[u8],
     header: SegmentHeader,
     dst: &mut [u8],
@@ -272,7 +291,7 @@ fn decode_segment(
         .get(SEGMENT_FIELDS_LEN..)
         .ok_or(Error::Corrupt("segment header"))?;
     let transform_header = segment::parse_transform_header(coded, dst.len())?;
-    segment::decode(coded, &transform_header, dst, layout.models.as_ref())?;
+    segment::decode(coded, &transform_header, dst, models)?;
     if crc32fast::hash(dst) != header.crc32 {
         return bad("segment checksum");
     }

@@ -6,13 +6,14 @@ use crate::fields::{put_usize, read_bytes, read_u32, read_usize};
 use crate::format::{MAX_MODELS_LEN, MAX_MODELS_RAW_LEN, MAX_SEGMENT_RAW};
 use crate::lz;
 use crate::parallel::par_map;
-use crate::protocol::{ProtocolState, frame_len, has_frame_run};
+use crate::protocol::{FrameAt, FrameRun, ProtocolState, frame_at, frame_len, frame_run};
 use crate::rans;
 use crate::streams::{
     FIRST_BLOB_STREAM, LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL, RAW, STREAM_COUNT, TAIL, is_blob,
     is_structural,
 };
 use crate::walker::{SegmentIo, SegmentWalker};
+use std::io::{self, Read};
 
 #[cfg(feature = "stats")]
 pub mod stats;
@@ -370,46 +371,101 @@ pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
     out
 }
 
-/// FORMAT.md 8 rule 2.
-pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
-    let max_segment = MAX_SEGMENT_RAW as usize;
-    let mut cuts = vec![0];
-    let mut segment_start = 0;
-    let mut frame_start = 0;
-    while frame_start < src.len() {
-        let frame_end = frame_len(src, frame_start).map(|len| frame_start + len);
-        let walkable_frame_end = frame_end.filter(|&end| end - segment_start <= max_segment);
-        let Some(frame_end) = walkable_frame_end else {
-            let resume_offset =
-                frame_end.unwrap_or_else(|| next_frame_run(src, frame_start, segment_start));
-            while resume_offset - segment_start > max_segment {
-                segment_start += max_segment;
-                cuts.push(segment_start);
-            }
-            if resume_offset < src.len() {
-                cuts.push(resume_offset);
-            }
-            segment_start = resume_offset;
-            frame_start = resume_offset;
-            continue;
-        };
-        let is_segment_full = frame_end - segment_start >= SEGMENT_TARGET_RAW;
-        if is_segment_full && frame_end < src.len() {
-            segment_start = frame_end;
-            cuts.push(segment_start);
-        }
-        frame_start = frame_end;
-    }
-    cuts.push(src.len());
-    cuts
+/// The segments of a demo, cut as it is read (FORMAT.md 8 rule 2).
+#[derive(Debug)]
+pub(crate) struct SegmentReader<R> {
+    input: R,
+    is_input_done: bool,
+    /// Read, not yet in a segment.
+    unread: Vec<u8>,
+    /// The whole frames at the start of `unread`.
+    framed_len: usize,
+    /// `Some` while the bytes after them do not frame.
+    frame_run_search_offset: Option<usize>,
 }
 
-fn next_frame_run(src: &[u8], unframed_start: usize, segment_start: usize) -> usize {
-    // not before the target length: a break in the frames makes no segment short
-    let search_start = (unframed_start + 1).max(segment_start + SEGMENT_TARGET_RAW);
-    (search_start..src.len())
-        .find(|&offset| has_frame_run(src, offset))
-        .unwrap_or(src.len())
+impl<R: Read> SegmentReader<R> {
+    pub(crate) fn new(input: R) -> Self {
+        Self {
+            input,
+            is_input_done: false,
+            unread: Vec::new(),
+            framed_len: 0,
+            frame_run_search_offset: None,
+        }
+    }
+
+    /// `None` at the end of the demo.
+    pub(crate) fn next_segment(&mut self) -> io::Result<Option<Vec<u8>>> {
+        const READ_LEN: u64 = 64 * 1024;
+        loop {
+            if let Some(len) = self.next_segment_len() {
+                self.framed_len = 0;
+                return Ok(Some(self.unread.drain(..len).collect()));
+            }
+            if self.is_input_done {
+                return Ok(None);
+            }
+            let read_len = (&mut self.input)
+                .take(READ_LEN)
+                .read_to_end(&mut self.unread)?;
+            self.is_input_done = read_len == 0;
+        }
+    }
+
+    /// `None`: the next cut needs more of the input, or nothing is left.
+    fn next_segment_len(&mut self) -> Option<usize> {
+        const MAX_LEN: usize = MAX_SEGMENT_RAW as usize;
+        loop {
+            let Some(search) = self.frame_run_search_offset else {
+                match frame_at(&self.unread, self.framed_len) {
+                    FrameAt::Whole(len) if self.framed_len + len <= MAX_LEN => {
+                        self.framed_len += len;
+                        if self.framed_len >= SEGMENT_TARGET_RAW {
+                            return Some(self.framed_len);
+                        }
+                    }
+                    FrameAt::Incomplete if !self.is_input_done => return None,
+                    _ if self.unread.is_empty() => return None,
+                    // not before the target length: a break in the frames makes no
+                    // segment short
+                    _ => self.frame_run_search_offset = Some(SEGMENT_TARGET_RAW),
+                }
+                continue;
+            };
+            if search >= MAX_LEN {
+                self.frame_run_search_offset = Some(search - MAX_LEN);
+                return Some(MAX_LEN);
+            }
+            if search >= self.unread.len() {
+                let is_last_segment = self.is_input_done && !self.unread.is_empty();
+                return is_last_segment.then_some(self.unread.len());
+            }
+            match frame_run(&self.unread, search) {
+                FrameRun::Yes => {
+                    self.frame_run_search_offset = None;
+                    if search > 0 {
+                        return Some(search);
+                    }
+                }
+                FrameRun::Incomplete if !self.is_input_done => return None,
+                FrameRun::Incomplete | FrameRun::No => {
+                    self.frame_run_search_offset = Some(search + 1);
+                }
+            }
+        }
+    }
+}
+
+/// The segment bounds of a demo held whole, from 0 to its length.
+#[cfg(any(test, feature = "fuzz", feature = "stats"))]
+pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
+    let mut segments = SegmentReader::new(src);
+    let mut cuts = vec![0];
+    while let Ok(Some(segment)) = segments.next_segment() {
+        cuts.push(cuts[cuts.len() - 1] + segment.len());
+    }
+    cuts
 }
 
 /// The time bytes of the whole frames `segment` starts with, summed.
@@ -603,6 +659,29 @@ mod tests {
             demo.extend_from_slice(&payload);
         }
         demo
+    }
+
+    #[test]
+    fn cuts_follow_the_frames_and_the_segment_cap() {
+        let max_len = MAX_SEGMENT_RAW as usize;
+        let frame = [&[1, 6][..], &100u32.to_le_bytes(), &[1; 100]].concat();
+        let frames_per_segment = SEGMENT_TARGET_RAW.div_ceil(frame.len());
+        let framed = frame.repeat(frames_per_segment + 20);
+        let cut_inside_a_frame = &framed[..framed.len() - 1];
+        let no_frames = vec![0u8; max_len];
+        let frames_after_the_cap = [&no_frames[..], &frame.repeat(16)].concat();
+        let first_cut = frames_per_segment * frame.len();
+        assert_eq!(cut_points(&[]), [0]);
+        assert_eq!(cut_points(&framed), [0, first_cut, framed.len()]);
+        assert_eq!(
+            cut_points(cut_inside_a_frame),
+            [0, first_cut, cut_inside_a_frame.len()]
+        );
+        assert_eq!(
+            cut_points(&frames_after_the_cap),
+            [0, max_len, frames_after_the_cap.len()]
+        );
+        assert_eq!(cut_points(&no_frames.repeat(2)), [0, max_len, 2 * max_len]);
     }
 
     #[test]

@@ -361,6 +361,8 @@ fn read_model(
 ) -> Result<DecoderModel> {
     /// Estimated symbols coded with a table from which its slot LUT pays off.
     const LUT_MIN_USE: u64 = 1 << 14;
+    /// Of a model, beside its wide tables: the memory does not grow with the demo.
+    const HOT_LUT_MAX: usize = 16;
     let (keys, quantized_tables) = read_model_header(header, alphabet_size)?;
     // present (frequency >= 1) exactly when the quantized count is non-zero (`normalize`):
     // the layout is known before any table is built
@@ -373,8 +375,15 @@ fn read_model(
             .map(|&count| quantized_weight(u32::from(count)));
         weights.sum::<u64>() >> 16
     };
+    let mut uses: Vec<u64> = (quantized_tables.chunks(alphabet_size))
+        .map(estimated_use)
+        .collect();
+    uses.sort_unstable_by(|a, b| b.cmp(a));
+    let hot_min_use = uses
+        .get(HOT_LUT_MAX)
+        .map_or(LUT_MIN_USE, |&next_use| LUT_MIN_USE.max(next_use + 1));
     let is_lut = |quantized: &[u8]| {
-        present(quantized) > SEARCH_MAX || estimated_use(quantized) >= LUT_MIN_USE
+        present(quantized) > SEARCH_MAX || estimated_use(quantized) >= hot_min_use
     };
     // one chunk count for every search table: a fixed trip count avoids mispredicted exits
     let chunks = quantized_tables

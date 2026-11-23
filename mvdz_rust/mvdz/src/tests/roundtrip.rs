@@ -3,7 +3,7 @@ use crate::format::{SEGMENT_FIELDS_LEN, parse_segment_header};
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use std::assert_matches;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     for (how, src) in [("as is", src.to_vec()), ("repeated", several_segments(src))] {
@@ -349,24 +349,89 @@ fn constructed_demos() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Hands out `read_len` bytes a call.
+struct SlowInput<'a> {
+    demo: Cursor<&'a [u8]>,
+    read_len: usize,
+}
+
+impl Read for SlowInput<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let len = buf.len().min(self.read_len);
+        self.demo.read(&mut buf[..len])
+    }
+}
+
+impl Seek for SlowInput<'_> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.demo.seek(position)
+    }
+}
+
 #[test]
 fn deterministic_output() -> anyhow::Result<()> {
+    const LEAST_MEMORY: u64 = 0;
     let small = synthetic(&[(0, "{}")], false);
     let src = duel().unwrap_or_else(|| several_segments(&small));
     for src in [small, src] {
         let one_thread = crate::encode(&src, 1)?;
-        let three_threads = crate::encode(&src, 3)?;
-        assert!(
-            one_thread == three_threads,
-            "{} bytes: threads change the output",
-            src.len()
-        );
+        for (max_threads, read_len) in [(3, 1), (1, 7), (4, 65536)] {
+            for encoder in [
+                crate::Encoder::new().max_threads(max_threads),
+                crate::Encoder::new()
+                    .max_threads(max_threads)
+                    .max_memory(LEAST_MEMORY),
+            ] {
+                let input = SlowInput {
+                    demo: Cursor::new(&src),
+                    read_len,
+                };
+                let mut file = Vec::new();
+                encoder.encode(input, &mut file)?;
+                assert!(
+                    file == one_thread,
+                    "{} bytes, {max_threads} threads, {read_len} bytes a read: another output",
+                    src.len()
+                );
+            }
+        }
     }
     Ok(())
 }
 
+/// Pass 2 reads other bytes than pass 1 counted.
+#[test]
+fn input_that_changes_between_the_passes_is_refused() {
+    struct ChangingInput {
+        passes: [Cursor<Vec<u8>>; 2],
+        pass: usize,
+    }
+    impl Read for ChangingInput {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.passes[self.pass].read(buf)
+        }
+    }
+    impl Seek for ChangingInput {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            self.pass = 1;
+            Ok(0)
+        }
+    }
+    let demo = synthetic(&[], false);
+    let mut changed = demo.clone();
+    changed[demo.len() / 2] ^= 1;
+    let input = ChangingInput {
+        passes: [Cursor::new(demo), Cursor::new(changed)],
+        pass: 0,
+    };
+    assert_eq!(
+        crate::Encoder::new().encode(input, std::io::sink()),
+        Err(crate::Error::Io(std::io::ErrorKind::InvalidData))
+    );
+}
+
 /// A server data message in the second segment changes the protocol, so the segments after
-/// it, walked in parallel from the protocol before, are walked again (`encode::run_first_pass`).
+/// it, walked in parallel from the protocol before, are walked again (`Encoder::count`).
 #[test]
 fn protocol_change_mid_demo() -> anyhow::Result<()> {
     let small = synthetic(&[(0, "{}")], false);

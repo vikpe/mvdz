@@ -161,7 +161,7 @@ its start is in its transform header (3.1). A reader does not check where
 a demo is cut: a segment may start or end inside a frame, and the bytes
 after its last whole frame are its tail (4.4).
 
-**Cut points written by the reference encoder** (`segment/mod.rs:cut_points`):
+**Cut points written by the reference encoder** (`segment/mod.rs:SegmentReader`):
 a segment ends at the first frame boundary at or after 256 KiB of its
 start. A frame that runs past 1 MiB from the segment start, and data that
 does not frame, are cut every 1 MiB up to where the frames go on, and each
@@ -1255,27 +1255,28 @@ reference for the same demo, in any language. The test vectors are that contract
 encoder is checked by reproducing them byte for byte, and `vectors/lz-tokens.tsv` checks
 its blob parser (rule 10) on its own.
 
-1. **Input** (`encode.rs:check_demo`): an encoder refuses input that does not start like
-   an MVD demo (`NotMvd`): empty input, a gzip stream (bytes `1f 8b`), or a first frame
-   that is not a whole frame of type 1, 3, 4, 5 or 6 carrying more than its header,
-   unless that frame walks without an escape (section 4) or 16 more whole frames of type 1 to 6
-   follow it (`has_frame_run`, rule 2). A damaged demo with an intact start is encoded.
+1. **Input** (`encode.rs:check_first_segment`): an encoder refuses input that does not
+   start like an MVD demo (`NotMvd`): empty input, a gzip stream (bytes `1f 8b`), or a
+   first frame that is not a whole frame of type 1, 3, 4, 5 or 6 carrying more than its
+   header, unless that frame walks without an escape (section 4) or 16 more whole frames
+   of type 1 to 6 follow it (`frame_run`, rule 2). The check reads the first segment
+   (rule 2) only. A damaged demo with an intact start is encoded.
    The unchecked entry point (the fuzz targets' `encode_any`) writes any bytes.
-2. **Cut points** (`segment/mod.rs:cut_points`): an empty demo has no segment. Otherwise walk
-   the frames from the start (`frame_len`, rule 11) and cut after a frame whenever
-   at least 2^18 bytes have accumulated since the last cut and bytes remain. Where a
-   frame would take the segment past 2^20 bytes, or the bytes do not frame, find where
-   the frames go on:
-   * after a frame too long: at its end;
-   * after bytes that do not frame: at the first offset from which 16 whole frames
-     follow each other (`protocol.rs:has_frame_run`), searched from the later of the byte
-     after the first one that does not frame and 2^18 bytes after the last cut; the end
-     of the demo if there is none.
+2. **Cut points** (`segment/mod.rs:SegmentReader`): an empty demo has no segment.
+   Otherwise walk the frames from the start (`frame_len`, rule 11) and cut after a frame
+   whenever at least 2^18 bytes have accumulated since the last cut and bytes remain.
+   Where a frame would take the segment past 2^20 bytes, or the bytes do not frame, find
+   where the frames go on: at the first offset from which 16 whole frames follow each
+   other (`protocol.rs:frame_run`), searched from 2^18 bytes after the last cut; the end
+   of the demo if there is none.
 
    Cut every 2^20 bytes from the last cut while more than 2^20 bytes remain up to that
    offset, then at the offset itself unless it is the end of the demo, and walk the
    frames on from there. At most 65536 segments (`DemoTooLarge`): about 16 GiB of demo.
-3. **Protocol state**: the first pass walks the segments in order (section 4). Segment k's
+
+   The cuts need no more of the demo than 16 frames past a cut, so an encoder cuts while
+   it reads.
+3. **Protocol state**: pass 1 walks the segments in order (section 4). Segment k's
    `fte`, `fte2`, `mvd1` are the state at the end of the last segment before it whose
    walk succeeded (0 for the first).
 4. **Models** (`segment/mod.rs:ModelBuilder`, `rans.rs:Tally::file_model`): every
@@ -1325,7 +1326,7 @@ its blob parser (rule 10) on its own.
    * While the models block of all models would exceed 2^22 bytes, coded or raw
      (section 7), the model with the longest raw model is dropped (ties: highest stream
      id), never those of streams 15, 34 and 35 (`segment/mod.rs:fit_models_block`).
-5. **Segments** (`encode.rs:code_segments`): a segment is written the first of these
+5. **Segments** (`encode.rs:segment_body`): a segment is written the first of these
    ways that works:
    * transform-coded (section 3), if its walk succeeds;
    * all tail: no walker stream, every byte in the `TAIL` blob stream;
@@ -1336,15 +1337,18 @@ its blob parser (rule 10) on its own.
    of section 7, and the coded length is at most 2^21. The protocol
    fields are the segment's start state in all three. Streams are written in id order,
    empty streams omitted; the blob bytes are the non-empty blob streams in id order.
-6. **Models block** (`rans.rs:write_models_block`): lists only the models some
-   segment uses, in id order; length 0 when none is used. The meta model is built as in
-   rule 4 from the bytes of the listed raw models, each byte counted under the byte
-   before it in its model (0 for the first), with 16 + 8 x 256 bits as the cost of an
-   own table whatever its symbols.
-7. **Self-check** (`encode.rs:decodes_to`), always on: the encoder decodes its output,
-   each segment against its input, then the whole-demo checks. A file that fails is
-   `Internal`: a bug in the encoder.
-8. **Determinism**: the output depends only on the input, not on the thread count.
+6. **Models block** (`rans.rs:write_models_block`): lists every model of rule 4, in id
+   order, also one no segment uses in the end (rule 5); length 0 when there is none. It is
+   known after pass 1, before any segment is coded. The meta model is built as in rule 4
+   from the bytes of the listed raw models, each byte counted under the byte before it in
+   its model (0 for the first), with 16 + 8 x 256 bits as the cost of an own table
+   whatever its symbols.
+7. **Self-check** (`encode.rs:decodes_to`), always on: the encoder decodes each segment
+   it has coded and compares it with its input before writing it. A segment that fails is
+   `Internal`: a bug in the encoder. The header's size, CRC-32 and SHA-256 are those of
+   the bytes pass 1 read; pass 2 refuses a segment whose CRC-32 is another (`Io`).
+8. **Determinism**: the output depends only on the input: not on the thread count, the
+   memory limit or how the input is read.
 9. **Duration** (`segment/mod.rs:duration_ms`): a segment's `duration_ms` is the sum of the
    time bytes of the whole frames it starts with (`frame_len`, rule 11),
    stopping at the first bytes that do not frame. The header's `duration_ms` is the sum
@@ -1378,7 +1382,8 @@ its blob parser (rule 10) on its own.
     at `p`, header included, or `None`. With fewer than 2 bytes left: `None`. By
     `src[p+1] & 7`: `DEM_SET`: 10 bytes; `DEM_MULTIPLE`: `10 + le32(src[p+6..])`;
     `DEM_READ`, `DEM_SINGLE`, `DEM_STATS`, `DEM_ALL`: `6 + le32(src[p+2..])`; anything
-    else (0, 7): `None`. A frame that runs past the end of `src` is `None`. The walk of a
+    else (0, 7): `None`. A frame longer than 2^20 bytes, or one that runs past the end of
+    `src`, is `None`. The walk of a
     segment takes frames while `frame_len` is `Some`; the rest of the segment is its
     tail. Rules 2 and 9 cut the demo and sum `duration_ms` with it.
 12. **Walk** (`walker.rs`): the encoder runs the walk of sections 4 and 5 over the source

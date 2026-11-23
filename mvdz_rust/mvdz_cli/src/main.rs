@@ -26,10 +26,10 @@ fn run() -> Result<(), ExitCode> {
 fn usage() -> ExitCode {
     eprintln!(
         "usage:
-  mvdz compress   [-j threads]
+  mvdz compress   [-j threads] [-M mebibytes]
                   [-f] [--rm] files... | in out.mvdz | -o out.mvdz in
                   game.mvd -> game.mvdz beside it
-  mvdz decompress [-j threads]
+  mvdz decompress [-j threads] [-M mebibytes]
                   [-f] [--rm] files... | in.mvdz out | -o out in.mvdz
                   game.mvdz -> game.mvd beside it
   mvdz info       file.mvdz...                     header as JSON
@@ -42,8 +42,11 @@ output, as is -o. compress takes a raw demo: input that is not an MVD demo
 is refused, and a .mvd.gz is to be decompressed first
 (gzip -dc game.mvd.gz | mvdz compress - game.mvdz). Compression has no
 settings: the demo is cut into independently decodable segments of 256 KiB.
-decompress decodes up to -j segments at once. -j is 0 to 255, at most the
-logical cores; 0 (the default) is all of them."
+Both work on up to -j segments at once. -j is 0 to 255, at most the logical
+cores; 0 (the default) is all of them. -M is the memory to stay within for
+each file, approximately: fewer segments are worked on at once, never fewer
+than one. The memory does not grow with the demo, except for compress from
+standard input, which holds the demo."
     );
     ExitCode::from(2)
 }
@@ -51,6 +54,7 @@ logical cores; 0 (the default) is all of them."
 #[derive(Debug)]
 struct Args {
     max_threads: u8,
+    max_memory_mebibytes: Option<u64>,
     files: Vec<String>,
     output: Option<String>,
     should_overwrite: bool,
@@ -60,6 +64,7 @@ struct Args {
 fn parse(arguments: &[String]) -> Result<Args, ExitCode> {
     let mut args = Args {
         max_threads: 0,
+        max_memory_mebibytes: None,
         files: Vec::new(),
         output: None,
         should_overwrite: false,
@@ -75,6 +80,9 @@ fn parse(arguments: &[String]) -> Result<Args, ExitCode> {
             "-j" | "--threads" => {
                 args.max_threads = value()?.parse().map_err(|_| usage())?;
             }
+            "-M" | "--memory" => {
+                args.max_memory_mebibytes = Some(value()?.parse().map_err(|_| usage())?);
+            }
             "-o" | "--output" => args.output = Some(value()?),
             "-f" | "--force" => args.should_overwrite = true,
             "--rm" => args.should_remove_inputs = true,
@@ -87,19 +95,6 @@ fn parse(arguments: &[String]) -> Result<Args, ExitCode> {
     Ok(args)
 }
 
-fn try_read_input(path: &str) -> Result<Vec<u8>, String> {
-    if path == "-" {
-        let mut buf = Vec::new();
-        std::io::stdin()
-            .lock()
-            .read_to_end(&mut buf)
-            .map_err(|error| error.to_string())?;
-        Ok(buf)
-    } else {
-        std::fs::read(path).map_err(|error| error.to_string())
-    }
-}
-
 fn open_input(path: &str) -> Result<Box<dyn Read>, String> {
     if path == "-" {
         Ok(Box::new(std::io::stdin().lock()))
@@ -107,13 +102,6 @@ fn open_input(path: &str) -> Result<Box<dyn Read>, String> {
         let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
         Ok(Box::new(std::io::BufReader::new(file)))
     }
-}
-
-fn try_write_output(path: &str, bytes: &[u8]) -> Result<(), String> {
-    try_write_with(path, |writer| {
-        writer.write_all(bytes)?;
-        writer.flush()
-    })
 }
 
 /// A regular file is removed again when `write_output` fails, as gzip and zstd do.
@@ -252,10 +240,11 @@ fn run_job(
     if is_existing_file && !args.should_overwrite {
         return Err(format!("{output} exists (-f overwrites)"));
     }
+    let max_memory = args.max_memory_mebibytes.map(|mebibytes| mebibytes << 20);
     if should_compress {
-        compress_one(input, output, max_threads)
+        compress_one(input, output, max_threads, max_memory)
     } else {
-        decompress_one(input, output, max_threads)
+        decompress_one(input, output, max_threads, max_memory)
     }?;
     if args.should_remove_inputs && input != "-" && output != "-" {
         std::fs::remove_file(input).map_err(|error| format!("--rm: {error}"))?;
@@ -272,17 +261,42 @@ fn thread_count(max_threads: u8) -> usize {
     }
 }
 
-fn compress_one(input: &str, output: &str, max_threads: u8) -> Result<(), String> {
-    let src = try_read_input(input)?;
-    let file = mvdz::encode(&src, max_threads).map_err(|error| error.to_string())?;
-    try_write_output(output, &file).map_err(|error| format!("{output}: {error}"))
+fn compress_one(
+    input: &str,
+    output: &str,
+    max_threads: u8,
+    max_memory: Option<u64>,
+) -> Result<(), String> {
+    let mut encoder = mvdz::Encoder::new().max_threads(max_threads);
+    if let Some(max_memory) = max_memory {
+        encoder = encoder.max_memory(max_memory);
+    }
+    try_write_with(output, |writer| {
+        if input == "-" {
+            // read twice: a pipe is held whole
+            let mut demo = Vec::new();
+            std::io::stdin().lock().read_to_end(&mut demo)?;
+            encoder.encode(std::io::Cursor::new(demo), writer)?;
+        } else {
+            encoder.encode(std::fs::File::open(input)?, writer)?;
+        }
+        Ok(())
+    })
 }
 
-fn decompress_one(input: &str, output: &str, max_threads: u8) -> Result<(), String> {
+fn decompress_one(
+    input: &str,
+    output: &str,
+    max_threads: u8,
+    max_memory: Option<u64>,
+) -> Result<(), String> {
     // segment by segment: neither the file nor the demo is held whole
     let reader = open_input(input)?;
     try_write_with(output, |writer| {
         let mut decoder = mvdz::Decoder::new(reader)?.max_threads(max_threads);
+        if let Some(max_memory) = max_memory {
+            decoder = decoder.max_memory(max_memory);
+        }
         std::io::copy(&mut decoder, writer)?;
         writer.flush()
     })
