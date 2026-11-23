@@ -264,7 +264,7 @@ fn raw_model_len(own_count: usize, alphabet_size: usize) -> Option<usize> {
         .then_some(OWN_COUNT_LEN + 2 * own_count + (own_count + 1) * alphabet_size)
 }
 
-/// Wider tables decode with a slot LUT instead of a search.
+/// Wider tables, and hot ones (`read_model`), decode with a slot LUT instead of a search.
 const SEARCH_MAX: usize = 64;
 
 // Context-map entry: a `pool` offset (search table), or with a flag a LUT offset or empty.
@@ -282,8 +282,8 @@ pub(crate) struct DecoderModel {
     luts: Vec<u32>,
 }
 
-/// ponytail: about 6 % slower decode than the SSE2 search it replaced, which needs
-/// `unsafe`; `std::simd` once stable.
+/// The cold tables only; about 6 % slower than the SSE2 search it replaced, which needs
+/// `unsafe`. ponytail: `std::simd` once stable.
 #[inline(always)]
 fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
     let slot = slot as u16;
@@ -359,24 +359,37 @@ fn read_model(
     alphabet_size: usize,
     table_memory: &TableMemory,
 ) -> Result<DecoderModel> {
+    /// Estimated symbols coded with a table from which its slot LUT pays off.
+    const LUT_MIN_USE: u64 = 1 << 14;
     let (keys, quantized_tables) = read_model_header(header, alphabet_size)?;
     // present (frequency >= 1) exactly when the quantized count is non-zero (`normalize`):
     // the layout is known before any table is built
     let present = |quantized: &[u8]| quantized.iter().filter(|&&count| count > 0).count();
+    // the quantized counts are within a sqrt(2) step of the real ones: their weights sum
+    // to about the symbols the table codes in the file
+    let estimated_use = |quantized: &[u8]| {
+        let weights = quantized
+            .iter()
+            .map(|&count| quantized_weight(u32::from(count)));
+        weights.sum::<u64>() >> 16
+    };
+    let is_lut = |quantized: &[u8]| {
+        present(quantized) > SEARCH_MAX || estimated_use(quantized) >= LUT_MIN_USE
+    };
     // one chunk count for every search table: a fixed trip count avoids mispredicted exits
     let chunks = quantized_tables
         .chunks(alphabet_size)
+        .filter(|quantized| !is_lut(quantized))
         .map(present)
-        .filter(|&present_count| present_count > 0 && present_count <= SEARCH_MAX)
+        .filter(|&present_count| present_count > 0)
         .max()
         .unwrap_or(1)
         .div_ceil(16);
     let (mut pool_len, mut lut_len) = (0usize, 0usize);
     for quantized in quantized_tables.chunks(alphabet_size) {
-        let present_count = present(quantized);
-        if present_count > SEARCH_MAX {
+        if is_lut(quantized) {
             lut_len += FREQ_TOTAL as usize;
-        } else if present_count > 0 {
+        } else if present(quantized) > 0 {
             pool_len += 2 * 16 * chunks + 1;
         }
     }
@@ -398,10 +411,10 @@ fn read_model(
             .collect();
         let entry = if present.is_empty() {
             ENTRY_EMPTY
-        } else if present.len() <= SEARCH_MAX {
-            model.push_search_table(&table, &present)
-        } else {
+        } else if is_lut(quantized) {
             model.push_lut(&table, &present)
+        } else {
+            model.push_search_table(&table, &present)
         };
         entries.push(entry);
     }
@@ -425,7 +438,7 @@ static EMPTY_MODEL: DecoderModel = DecoderModel {
 };
 
 impl DecoderModel {
-    /// The entry of a table with at most [`SEARCH_MAX`] symbols: its offset in `pool`.
+    /// The entry of a cold table with at most [`SEARCH_MAX`] symbols: its offset in `pool`.
     fn push_search_table(&mut self, table: &Table, present: &[usize]) -> u32 {
         let width = 16 * self.chunks;
         let offset = self.pool.len() as u32;
@@ -440,8 +453,9 @@ impl DecoderModel {
         self.pool.resize(offset as usize + 1 + 2 * width, 0);
         offset
     }
-    /// The entry of a wider table: `ENTRY_LUT` and its offset in `luts`. Each slot holds
-    /// the symbol, its frequency and the slot's offset into it.
+    /// The entry of a wider or hot table: `ENTRY_LUT` and its offset in `luts`. Each slot holds
+    /// the symbol, its frequency less one (a lone symbol's 4096 needs the 13th bit) and
+    /// the slot's offset into it.
     fn push_lut(&mut self, table: &Table, present: &[usize]) -> u32 {
         let offset = self.luts.len();
         self.luts.resize(offset + FREQ_TOTAL as usize, 0);
@@ -449,7 +463,7 @@ impl DecoderModel {
         for &symbol in present {
             for slot in table.cumulative[symbol]..table.cumulative[symbol + 1] {
                 lut[slot as usize] = symbol as u32
-                    | table.freq[symbol] << 8
+                    | (table.freq[symbol] - 1) << 8
                     | (slot - table.cumulative[symbol]) << 20;
             }
         }
@@ -487,7 +501,7 @@ impl DecoderModel {
             let lut_entry = self.luts[(entry & !ENTRY_LUT) as usize + slot as usize];
             (
                 lut_entry & 0xff,
-                ((lut_entry >> 8) & 0xfff) * (state >> SCALE) + (lut_entry >> 20),
+                (((lut_entry >> 8) & 0xfff) + 1) * (state >> SCALE) + (lut_entry >> 20),
             )
         };
         if state < STATE_MIN {
@@ -1022,6 +1036,54 @@ mod tests {
         assert!(read_model(&model_of(MAX_QUANTIZED as u8), 256, &table_memory).is_ok());
         assert!(read_model(&model_of(MAX_QUANTIZED as u8 + 1), 256, &table_memory).is_err());
         assert_eq!(quantize(u32::MAX), MAX_QUANTIZED);
+    }
+
+    #[test]
+    fn hot_tables_take_a_lut_within_the_reservation() -> anyhow::Result<()> {
+        let no_own_contexts = 0u32.to_le_bytes();
+        let mut quantized = [0u8; NUMERIC_ALPHABET];
+        quantized[3] = 1;
+        quantized[4] = 1;
+        let cold = [&no_own_contexts[..], &quantized].concat();
+        let model = read_model(&cold, NUMERIC_ALPHABET, &TableMemory::new(u64::MAX))?;
+        assert_eq!((model.pool.len(), model.luts.len()), (2 * 16 + 1, 0));
+
+        quantized[3] = MAX_QUANTIZED as u8;
+        let hot = [&no_own_contexts[..], &quantized].concat();
+        let model = read_model(&hot, NUMERIC_ALPHABET, &TableMemory::new(u64::MAX))?;
+        assert_eq!(
+            (model.pool.len(), model.luts.len()),
+            (0, FREQ_TOTAL as usize)
+        );
+        let reserved = (model.pool.len() * 2 + model.luts.len() * 4 + model.map.len() * 4) as u64;
+        assert!(read_model(&hot, NUMERIC_ALPHABET, &TableMemory::new(reserved)).is_ok());
+        assert_eq!(
+            read_model(&hot, NUMERIC_ALPHABET, &TableMemory::new(reserved - 1)).err(),
+            Some(Error::MemoryLimit("models"))
+        );
+        Ok(())
+    }
+
+    /// Context 0 always codes one value: a lone symbol of frequency 4096 in a hot table.
+    #[test]
+    fn hot_narrow_and_lone_symbol_tables_round_trip() -> anyhow::Result<()> {
+        let values: Vec<(u32, i32)> = (0..40_000i32)
+            .map(|index| ((index % 2).cast_unsigned(), (index % 2) * (index % 3 - 1)))
+            .collect();
+        let mut writer = StreamWriter::default();
+        for (context, value) in &values {
+            writer.push_value(*context, *value);
+        }
+        let stream = writer.finish();
+        let (file_model, model) = models(&stream.symbols, &stream.contexts, NUMERIC_ALPHABET)?;
+        assert_eq!(model.luts.len(), 2 * FREQ_TOTAL as usize);
+        let body = encode_stream(&stream, &file_model).context("every symbol has a code")?;
+        let mut decoder = StreamDecoder::new(&body, &model)?;
+        for &(context, value) in &values {
+            assert_eq!(decoder.value(context), Some(value));
+        }
+        assert!(decoder.is_done());
+        Ok(())
     }
 
     #[test]

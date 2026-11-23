@@ -94,6 +94,35 @@ func TestEncodeDemos(test *testing.T) {
 	}
 }
 
+// Decode speed over the MVDZ_TEST_DEMOS demos, in bytes of demo per second:
+//
+//	MVDZ_TEST_DEMOS=../demos/sample8 go test -run - -bench Decode -benchtime 3x
+func BenchmarkDecode(bench *testing.B) {
+	var files [][]byte
+	rawBytes := 0
+	for _, path := range testDemos(bench) {
+		demo, err := os.ReadFile(path)
+		if err != nil {
+			bench.Fatal(err)
+		}
+		file, err := Encode(demo)
+		if err != nil {
+			bench.Fatal(err)
+		}
+		files = append(files, file)
+		rawBytes += len(demo)
+	}
+	bench.SetBytes(int64(rawBytes))
+	bench.ResetTimer()
+	for range bench.N {
+		for _, file := range files {
+			if _, err := Decode(file); err != nil {
+				bench.Fatal(err)
+			}
+		}
+	}
+}
+
 // With MVDZ_REFERENCE_CLI=<path>, the reference tool and this package read
 // each other's files, and write the same file for the same demo.
 func TestEncodeAgainstReference(test *testing.T) {
@@ -163,10 +192,10 @@ func TestEncodeAgainstReference(test *testing.T) {
 	}
 }
 
-func testDemos(test *testing.T) []string {
+func testDemos(test testing.TB) []string {
 	directory := os.Getenv("MVDZ_TEST_DEMOS")
 	if directory == "" {
-		if test.Name() == "TestEncodeDemos" {
+		if test.Name() == "TestEncodeDemos" || test.Name() == "BenchmarkDecode" {
 			test.Skip("MVDZ_TEST_DEMOS is not set")
 		}
 		return nil

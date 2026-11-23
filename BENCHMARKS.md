@@ -124,9 +124,9 @@ this version:
 
 | demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
 |---|---|---|---|---|
-| 14.2 MB (sample40) | 93 -> **33** MiB | 102 -> **42** MiB | 23 -> **5.5** MiB | 24 -> **7.9** MiB |
-| 6.2 MB (sample8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.1** MiB | 15 -> **7.3** MiB |
-| 2.0 MB (sample8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.4** MiB | 8.8 -> **5.8** MiB |
+| 14.2 MB (sample40) | 93 -> **33** MiB | 102 -> **42** MiB | 23 -> **6.7** MiB | 24 -> **8.7** MiB |
+| 6.2 MB (sample8) | 49 -> **21** MiB | 57 -> **25** MiB | 13 -> **5.4** MiB | 15 -> **7.5** MiB |
+| 2.0 MB (sample8) | 23 -> **12** MiB | 29 -> **14** MiB | 7.8 -> **4.5** MiB | 8.8 -> **6.5** MiB |
 
 Decompression streams: its memory is a few segments (at most 1 MiB raw each) however
 large the demo; rc.4's grows with the demo. Compression holds the demo and its walked
