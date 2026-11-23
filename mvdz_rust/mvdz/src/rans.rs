@@ -20,7 +20,6 @@ struct Table {
     quantized: Vec<u32>,
     freq: Vec<u32>,
     cumulative: Vec<u32>,
-    single_symbol: Option<u16>,
 }
 
 impl Table {
@@ -34,17 +33,10 @@ impl Table {
         for symbol in 0..freq.len() {
             cumulative[symbol + 1] = cumulative[symbol] + freq[symbol];
         }
-        let present: Vec<usize> = (0..freq.len()).filter(|&symbol| freq[symbol] > 0).collect();
-        let single_symbol = if present.len() == 1 {
-            Some(present[0] as u16)
-        } else {
-            None
-        };
         Self {
             quantized,
             freq,
             cumulative,
-            single_symbol,
         }
     }
 }
@@ -276,11 +268,9 @@ fn raw_model_len(own_count: usize, alphabet_size: usize) -> Option<usize> {
 /// Wider tables decode with a slot LUT instead of a search.
 const SEARCH_MAX: usize = 64;
 
-// Context-map entry: a `pool` offset (search table), or with these flags a LUT offset, a
-// single symbol, or empty.
-const ENTRY_SINGLE: u32 = 1 << 31;
+// Context-map entry: a `pool` offset (search table), or with a flag a LUT offset or empty.
+const ENTRY_EMPTY: u32 = 1 << 31;
 const ENTRY_LUT: u32 = 1 << 30;
-const ENTRY_EMPTY: u32 = ENTRY_SINGLE | ENTRY_LUT;
 
 /// A search table in `pool` is `[0, c1, .., cn = FREQ_TOTAL, pad..]` (16*chunks + 1
 /// entries), then its 16*chunks symbols: one or two cache lines.
@@ -374,7 +364,7 @@ fn read_model(
     let chunks = quantized_tables
         .chunks(alphabet_size)
         .map(present)
-        .filter(|&present_count| present_count > 1 && present_count <= SEARCH_MAX)
+        .filter(|&present_count| present_count > 0 && present_count <= SEARCH_MAX)
         .max()
         .unwrap_or(1)
         .div_ceil(16);
@@ -383,7 +373,7 @@ fn read_model(
         let present_count = present(quantized);
         if present_count > SEARCH_MAX {
             lut_len += FREQ_TOTAL as usize;
-        } else if present_count > 1 {
+        } else if present_count > 0 {
             pool_len += 2 * 16 * chunks + 1;
         }
     }
@@ -405,8 +395,6 @@ fn read_model(
             .collect();
         let entry = if present.is_empty() {
             ENTRY_EMPTY
-        } else if let Some(symbol) = table.single_symbol {
-            ENTRY_SINGLE | u32::from(symbol)
         } else if present.len() <= SEARCH_MAX {
             model.push_search_table(&table, &present)
         } else {
@@ -476,12 +464,8 @@ impl DecoderModel {
     /// `None` for an empty table.
     #[inline(always)]
     fn decode(&self, decoder: &mut RansDecoder, entry: u32) -> Option<u32> {
-        if entry & ENTRY_SINGLE != 0 {
-            return if entry & ENTRY_LUT != 0 {
-                None
-            } else {
-                Some(entry & 0xffff)
-            };
+        if entry == ENTRY_EMPTY {
+            return None;
         }
         let state = decoder.state;
         let slot = state & (FREQ_TOTAL - 1);
@@ -527,8 +511,8 @@ impl RansEncoder {
     #[inline]
     fn put(&mut self, freq: u32, cumulative: u32) {
         let mut state = self.state;
-        let state_max = ((STATE_MIN >> SCALE) << 16) * freq;
-        if state >= state_max {
+        let state_max = u64::from(freq) << (16 + 16 - SCALE);
+        if u64::from(state) >= state_max {
             self.words.push(state as u16);
             state >>= 16;
         }
@@ -598,9 +582,7 @@ fn rans_encode(model: &Model, symbols: &[u8], contexts: &[u16]) -> Option<Vec<u8
         if freq == 0 {
             return None;
         }
-        if table.single_symbol.is_none() {
-            encoder.put(freq, table.cumulative[symbol as usize]);
-        }
+        encoder.put(freq, table.cumulative[symbol as usize]);
     }
     Some(encoder.finish())
 }
