@@ -78,9 +78,9 @@ pub(crate) const DF_WEAPON_FRAME: u16 = 1 << 10;
 /// Derived only from bytes already seen, so both directions agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct ProtocolState {
-    pub(crate) fte: u32,
-    pub(crate) fte2: u32,
-    pub(crate) mvd1: u32,
+    fte: u32,
+    fte2: u32,
+    mvd1: u32,
     has_float_coords: bool,
     has_fte_float_coords: bool,
 }
@@ -95,6 +95,21 @@ impl ProtocolState {
         };
         protocol.derive();
         protocol
+    }
+
+    #[inline]
+    pub(crate) fn fte(&self) -> u32 {
+        self.fte
+    }
+
+    #[inline]
+    pub(crate) fn fte2(&self) -> u32 {
+        self.fte2
+    }
+
+    #[inline]
+    pub(crate) fn mvd1(&self) -> u32 {
+        self.mvd1
     }
 
     #[inline]

@@ -642,7 +642,13 @@ fn unpack(body: &[u8]) -> Result<Unpacked<'_>> {
 #[derive(Debug)]
 pub(crate) struct FileModel {
     model: Model,
-    pub(crate) raw: Vec<u8>,
+    raw: Vec<u8>,
+}
+
+impl FileModel {
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.raw
+    }
 }
 
 /// By stream id.

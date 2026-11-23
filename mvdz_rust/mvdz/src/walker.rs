@@ -339,7 +339,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
                     .code_symbol(ENTITY_MORE, (bits >> 9) | previous_model << 8),
             );
         }
-        if bits & U_FTE_EVEN_MORE != 0 && self.protocol.fte != 0 {
+        if bits & U_FTE_EVEN_MORE != 0 && self.protocol.fte() != 0 {
             more = u32::from(self.io.code_symbol(ENTITY_MORE, 0x8000));
             if more & U_FTE_YET_MORE != 0 {
                 more |= u32::from(self.io.code_symbol(ENTITY_MORE, 0x8001)) << 8;
@@ -400,7 +400,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
                 }
             }
         }
-        if more & U_FTE_TRANS != 0 && self.protocol.fte & FTE_PEXT_TRANS != 0 {
+        if more & U_FTE_TRANS != 0 && self.protocol.fte() & FTE_PEXT_TRANS != 0 {
             self.io.code_blob_byte(ENTITY_MISC);
         }
         if more & U_FTE_SCALE != 0 {
@@ -409,7 +409,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
         if more & U_FTE_FATNESS != 0 {
             self.io.code_blob_byte(ENTITY_MISC);
         }
-        if more & U_FTE_COLOR_MOD != 0 && self.protocol.fte & FTE_PEXT_COLOR_MOD != 0 {
+        if more & U_FTE_COLOR_MOD != 0 && self.protocol.fte() & FTE_PEXT_COLOR_MOD != 0 {
             self.io.code_blob_bytes(ENTITY_MISC, 3);
         }
     }

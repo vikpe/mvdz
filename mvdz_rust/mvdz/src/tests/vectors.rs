@@ -635,12 +635,20 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
     // slot whatever its count, so only the limit refuses the file
     let literals = b"abc";
     let tokens = crate::lz::tokens(literals);
-    let (mut literal_models, body) = token_models(&[], &[(TAIL, literals.len())], &tokens)?;
-    let lengths = (literal_models[LZ_LENGTH].as_mut()).context("a model of the lengths")?;
+    let (literal_models, body) = token_models(&[], &[(TAIL, literals.len())], &tokens)?;
+    let mut raw_models: Vec<(usize, Vec<u8>)> = (literal_models.iter().enumerate())
+        .filter_map(|(stream, model)| Some((stream, model.as_ref()?.raw().to_vec())))
+        .collect();
+    let (_, lengths) = (raw_models.iter_mut())
+        .find(|(stream, _)| *stream == LZ_LENGTH)
+        .context("a model of the lengths")?;
     let no_own_contexts = 0u32.to_le_bytes();
-    assert!(lengths.raw.starts_with(&no_own_contexts) && lengths.raw[4] > 0);
-    lengths.raw[4] = crate::math::MAX_QUANTIZED as u8 + 1;
-    let models_body = crate::segment::models_body(&literal_models)?;
+    assert!(lengths.starts_with(&no_own_contexts) && lengths[4] > 0);
+    lengths[4] = crate::math::MAX_QUANTIZED as u8 + 1;
+    let listed: Vec<(usize, &[u8])> = (raw_models.iter())
+        .map(|(stream, raw)| (*stream, &raw[..]))
+        .collect();
+    let models_body = crate::rans::write_models_block(&listed)?.body;
     add(
         "tables-quantized",
         one_segment(literals, &(models_body, body))?,

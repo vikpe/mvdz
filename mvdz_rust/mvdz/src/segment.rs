@@ -227,7 +227,7 @@ pub(crate) fn models_body(models: &[Option<rans::FileModel>]) -> Result<Vec<u8>>
 
 fn models_block(models: &[Option<rans::FileModel>]) -> Result<Option<rans::ModelsBlock>> {
     let listed: Vec<(usize, &[u8])> = (models.iter().enumerate())
-        .filter_map(|(stream, model)| Some((stream, &model.as_ref()?.raw[..])))
+        .filter_map(|(stream, model)| Some((stream, model.as_ref()?.raw())))
         .collect();
     if listed.is_empty() {
         return Ok(None);
@@ -253,7 +253,7 @@ fn fit_models_block(
             |stream: usize| [LZ_LITERAL, LZ_LENGTH, LZ_DISTANCE].contains(&stream);
         let largest = (models.iter().enumerate())
             .filter(|&(stream, _)| !is_blob_token_model(stream))
-            .filter_map(|(stream, model)| Some((model.as_ref()?.raw.len(), stream)))
+            .filter_map(|(stream, model)| Some((model.as_ref()?.raw().len(), stream)))
             .max();
         let Some((_, largest)) = largest else {
             return Ok(());
@@ -321,7 +321,7 @@ pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
 }
 
 fn write_transform_fields(out: &mut Vec<u8>, protocol: ProtocolState, entry_count: usize) {
-    for extensions in [protocol.fte, protocol.fte2, protocol.mvd1] {
+    for extensions in [protocol.fte(), protocol.fte2(), protocol.mvd1()] {
         out.extend_from_slice(&extensions.to_le_bytes());
     }
     write_usize(out, entry_count);
@@ -842,7 +842,7 @@ mod tests {
         let is_blob_token_model =
             |stream: usize| [LZ_LITERAL, LZ_LENGTH, LZ_DISTANCE].contains(&stream);
         let raw_model_len =
-            |stream: usize| models[stream].as_ref().map_or(0, |model| model.raw.len());
+            |stream: usize| models[stream].as_ref().map_or(0, |model| model.raw().len());
         let largest = *all
             .iter()
             .filter(|&&stream| !is_blob_token_model(stream))
