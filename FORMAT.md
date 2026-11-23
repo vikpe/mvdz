@@ -1457,16 +1457,23 @@ its blob parser (rule 10) on its own.
    differences (`numeric.rs:time_deltas`), time-scaled predictions
    (`AxisTrack::predict_time_scaled`) and residuals. Use wrapping 32-bit and 16-bit
    arithmetic (in Go: compute in `int32`/`uint16` and let it wrap before any clamp).
-2. **A server data takes effect within its payload**: later commands of the same payload
+2. **Integer widths**: for valid input every value a decoder computes fits 32 bits, with
+   two exceptions that take 64: the header's `size` and the running sum of `raw_len`
+   compared to it (2.3), and the weights of `normalize` (6.3). The sizes a file declares
+   can sum past 32 bits in an invalid file (a stream table, 3.1): compare such a sum to
+   its limit without wrapping. An encoder also takes 64 bits for the model costs
+   (`log2_fixed`, `entropy`, `cross`) and the renormalization test of the rANS encoder
+   (Appendix A), and 128 for the one comparison of `quantize` (section 8, rule 4).
+3. **A server data takes effect within its payload**: later commands of the same payload
    use the new coordinate width. A match with the other width leaves the tracks of this
    one as they were (section 5.2), and a sound or beam is predicted from the latest
    16-bit origin whatever happened since.
-3. **Time is segment-relative**: every walker and predictor state starts fresh in each
+4. **Time is segment-relative**: every walker and predictor state starts fresh in each
    segment, time at 0. A player's second record in a segment measures its previous
    time delta from 0.
-4. **Per-player timing**: a player's origins and angles share the last two frame times
+5. **Per-player timing**: a player's origins and angles share the last two frame times
    of the player, advanced on every record, sent or not. Entity origins use no time.
-5. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
+6. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
    CRC-32s and lengths (zlib's `crc32_combine`), as the reference does
    (`decode.rs:Decoder::decode_batch`). Hashing the output again gives the same value.
 
