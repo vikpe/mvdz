@@ -34,15 +34,11 @@ type segmentWalker struct {
 	statPreviousResidual   uint8
 	lastHeader             uint8
 	previousTempEntity     uint8
-	previousEntityGap      uint8
 	players                [256]playerState
 	usercmdPreviousPlayers [2]uint8
 	usercmds               [256]usercmdState
 	entities               [2048]entityState
 	stats                  [32][256]uint8
-	previousPacket         []uint16
-	currentPacket          []uint16
-	previousPacketIndex    int
 	packetNumber           uint32
 
 	// FORMAT.md section 5
@@ -310,24 +306,19 @@ func (walker *segmentWalker) packetEntities(command uint8) {
 	if command == svcDeltaPacketEntities {
 		walker.lastHeader = walker.codeBlobResidual(streamEntityHeader, walker.lastHeader)
 	}
-	walker.previousEntityGap = 0
-	walker.previousPacketIndex = 0
-	walker.currentPacket = walker.currentPacket[:0]
 	walker.packetNumber++
 
 	previous := -1
 	for walker.err == nil {
-		predictedGap := walker.predictEntity(previous) - previous
-		gapContext := uint16(min(predictedGap, 255)) | uint16(min(walker.previousEntityGap, 15))<<8
 		sourceWord := walker.peek16()
 		sourceGap := 0 // a word of 0 ends the packet
 		if sourceWord != 0 {
 			sourceGap = (int(sourceWord&511)-previous-1)&511 + 1
 		}
-		gap := int(walker.symbol(streamEntityGap, gapContext, uint8(min(sourceGap, 255))))
+		gap := int(walker.blobByte(streamEntityGap, uint8(min(sourceGap, 255))))
 		if gap == 255 {
-			low := walker.symbol(streamEntityGap, 1<<12, uint8(sourceGap))
-			high := walker.symbol(streamEntityGap, 2<<12, uint8(sourceGap>>8))
+			low := walker.blobByte(streamEntityGap, uint8(sourceGap))
+			high := walker.blobByte(streamEntityGap, uint8(sourceGap>>8))
 			gap = int(low) | int(high)<<8
 		}
 		if gap == 0 {
@@ -344,25 +335,10 @@ func (walker *segmentWalker) packetEntities(command uint8) {
 			break
 		}
 		walker.write16(word)
-		walker.previousEntityGap = uint8(min(max(number-previous, 0), 255))
 		previous = number
-		walker.currentPacket = append(walker.currentPacket, uint16(number))
 		entity.bits = uint8(word >> 9)
 		walker.entityDelta(word)
 	}
-	walker.previousPacket, walker.currentPacket = walker.currentPacket, walker.previousPacket
-}
-
-// predictEntity is the next entity of the previous packet after previous.
-func (walker *segmentWalker) predictEntity(previous int) int {
-	for walker.previousPacketIndex < len(walker.previousPacket) {
-		candidate := int(walker.previousPacket[walker.previousPacketIndex])
-		if candidate > previous {
-			return candidate
-		}
-		walker.previousPacketIndex++
-	}
-	return previous + 1
 }
 
 func (walker *segmentWalker) entityDelta(word uint16) {

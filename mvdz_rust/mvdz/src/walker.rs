@@ -35,12 +35,10 @@ pub(crate) trait SymbolIo {
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);
     fn take_blob(&mut self, stream: usize, len: usize) -> Option<&[u8]>;
     fn blob_rest(&self, stream: usize) -> &[u8];
-    /// A measurement (`segment/stats.rs`): the command without its layout.
     #[cfg(feature = "stats")]
     fn is_generic(&self, _command: u8) -> bool {
         false
     }
-    /// A measurement (`segment/stats.rs`): the hidden block type without its layout.
     #[cfg(feature = "stats")]
     fn is_hidden_misc(&self, _block_type: u32) -> bool {
         false
@@ -105,9 +103,6 @@ pub(crate) struct SegmentWalker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     target: u8,
     last_type: u8,
     previous_command: u8,
-    previous_packet: Vec<u16>,
-    current_packet: Vec<u16>,
-    previous_packet_index: usize,
     packet_number: u32,
     last_time_byte: u8,
     first_command_by_type: [u8; 8],
@@ -115,7 +110,6 @@ pub(crate) struct SegmentWalker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     stat_previous_residual: u8,
     last_header: u8,
     previous_temp_entity: u8,
-    previous_entity_gap: u8,
     usercmd_previous_players: [u8; 2],
     usercmds: Box<[UsercmdState; 256]>,
 }
@@ -158,9 +152,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             target: 0,
             last_type: 0,
             previous_command: 0,
-            previous_packet: Vec::new(),
-            current_packet: Vec::new(),
-            previous_packet_index: 0,
             packet_number: 1,
             last_time_byte: 0,
             first_command_by_type: [0; 8],
@@ -168,7 +159,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             stat_previous_residual: 0,
             last_header: 0,
             previous_temp_entity: 0,
-            previous_entity_gap: 0,
             usercmd_previous_players: [0; 2],
             usercmds: Box::new([UsercmdState::default(); 256]),
         }
@@ -729,36 +719,17 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         self.player_tracks[player] = tracks;
     }
 
-    fn predict_entity(&mut self, previous: i32) -> i32 {
-        while self.previous_packet_index < self.previous_packet.len()
-            && i32::from(self.previous_packet[self.previous_packet_index]) <= previous
-        {
-            self.previous_packet_index += 1;
-        }
-        if self.previous_packet_index < self.previous_packet.len() {
-            i32::from(self.previous_packet[self.previous_packet_index])
-        } else {
-            previous + 1
-        }
-    }
-
     fn packet_entities(&mut self, is_delta: bool) {
         if is_delta {
             let header = self.code_blob_residual(ENTITY_HEADER, self.last_header);
             self.last_header = header;
         }
-        self.previous_entity_gap = 0;
         let mut previous_entity: i32 = -1;
-        self.previous_packet_index = 0;
-        self.current_packet.clear();
         self.packet_number = self.packet_number.wrapping_add(1);
         loop {
             if self.has_error {
                 break;
             }
-            let predicted = self.predict_entity(previous_entity);
-            let entity_context = (predicted - previous_entity).min(255).cast_unsigned()
-                | u32::from(self.previous_entity_gap.min(15)) << 8;
             let word: u16;
             let entity: usize;
             if IS_ENCODE {
@@ -768,19 +739,16 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 };
                 word = read_word;
                 self.offset += 2;
+                let gap = if word == 0 {
+                    0
+                } else {
+                    ((i32::from(word & 511) - previous_entity - 1) & 511) + 1
+                };
+                self.entity_gap(gap.cast_unsigned() as u16);
                 if word == 0 {
-                    self.symbol(ENTITY_GAP, entity_context, 0);
                     break;
                 }
                 entity = (word & 511) as usize;
-                let gap = ((i32::from(word & 511) - previous_entity - 1) & 511) + 1;
-                if gap < 255 {
-                    self.symbol(ENTITY_GAP, entity_context, gap.cast_unsigned() as u8);
-                } else {
-                    self.symbol(ENTITY_GAP, entity_context, 255);
-                    self.symbol(ENTITY_GAP, 1 << 12, gap.cast_unsigned() as u8);
-                    self.symbol(ENTITY_GAP, 2 << 12, (gap >> 8).cast_unsigned() as u8);
-                }
                 let state = self.entities[entity];
                 self.symbol(
                     ENTITY_BITS,
@@ -788,11 +756,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                     (word >> 9) as u8 ^ state.bits,
                 );
             } else {
-                let mut gap = i32::from(self.symbol(ENTITY_GAP, entity_context, 0));
-                if gap == 255 {
-                    gap = i32::from(self.symbol(ENTITY_GAP, 1 << 12, 0));
-                    gap |= i32::from(self.symbol(ENTITY_GAP, 2 << 12, 0)) << 8;
-                }
+                let gap = i32::from(self.entity_gap(0));
                 if gap == 0 {
                     self.write_u16(0);
                     break;
@@ -812,16 +776,23 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 }
                 self.write_u16(word);
             }
-            let entity_number = i32::from(word & 511);
-            self.previous_entity_gap = (entity_number - previous_entity)
-                .clamp(0, 255)
-                .cast_unsigned() as u8;
-            previous_entity = entity_number;
-            self.current_packet.push(entity as u16);
+            previous_entity = i32::from(word & 511);
             self.entities[entity].bits = (word >> 9) as u8;
             self.entity_delta(u32::from(word));
         }
-        std::mem::swap(&mut self.previous_packet, &mut self.current_packet);
+    }
+
+    fn entity_gap(&mut self, gap: u16) -> u16 {
+        let is_escaped = gap >= 255;
+        let first = self.blob_byte(ENTITY_GAP, if is_escaped { 255 } else { gap as u8 });
+        if first != 255 {
+            return u16::from(first);
+        }
+        let [low, high] = gap.to_le_bytes();
+        u16::from_le_bytes([
+            self.blob_byte(ENTITY_GAP, low),
+            self.blob_byte(ENTITY_GAP, high),
+        ])
     }
 
     fn entity_delta(&mut self, word: u32) {

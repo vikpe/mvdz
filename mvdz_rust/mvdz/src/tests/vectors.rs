@@ -1226,7 +1226,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         "entity-words.normal.mvdz",
         encode(&entity_words)?,
         &entity_words,
-        "synthetic demo with a packet of 120000 entity words, 3 ENTITY_GAP symbols per 2 bytes",
+        "synthetic demo with a packet of 120000 entity words, three ENTITY_GAP blob bytes per word",
     );
     hostile(&mut vectors)?;
     Ok(Some(vectors))

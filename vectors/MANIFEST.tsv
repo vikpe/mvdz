@@ -18,7 +18,7 @@ two-matches.normal.mvdz	13b22b4630615a5f9893899613062b93db1bab7334ac60cb46839444
 width-switch.normal.mvdz	f4d7f944fb660be9854b2d65821eceb44e2d4191cad3db1df57d5fe6dfca9c61	2569	synthetic demo of three matches in one segment: 16-bit coordinates, float (MVD1), 16-bit again, then a sound before the player's next origin
 truncated-match.normal.mvdz	00fd501572f7ae55e030f93c7f548bb0630d69f1597999128ba9c6a819f06438	1058109	synthetic demo of a match cut off inside its last frame, then whole matches: the frames are walked again after the break (rule 2)
 oversized-frame.normal.mvdz	1b288c91b2bcc9b890c8054158b344709b0c3b4e78e02ac85ae382cd1bf9c143	1583826	synthetic demo with a 1.5 MiB frame of nops: it is cut every 2^20 bytes and the frames go on after it (rule 2)
-entity-words.normal.mvdz	43588cc355d1a081c754764a230937f62dd647e19cdfbe02c99fa478a83d9cd4	250965	synthetic demo with a packet of 120000 entity words, 3 ENTITY_GAP symbols per 2 bytes
+entity-words.normal.mvdz	43588cc355d1a081c754764a230937f62dd647e19cdfbe02c99fa478a83d9cd4	250965	synthetic demo with a packet of 120000 entity words, three ENTITY_GAP blob bytes per word
 hostile-base-cut.mvdz	error: corrupt: incomplete file	-	the base file (a synthetic demo repeated to several segments) without its last 10 bytes
 hostile-trailing-byte.mvdz	error: corrupt: trailing bytes	-	one byte after the last segment
 hostile-header-size.mvdz	error: corrupt: incomplete file	-	the header's size + 1

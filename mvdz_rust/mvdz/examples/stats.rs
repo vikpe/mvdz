@@ -1,12 +1,11 @@
-//! Bytes per command, coded bytes per stream and ablations over the demos (`*.mvd`,
-//! `*.mvd.gz`) under a directory:
+//! Bytes per command, coded bytes per stream and ablations over the `*.mvd` and `*.mvd.gz`
+//! files under a directory:
 //!
 //! ```text
 //! cargo run --release --example stats -- DIR [--limit N] [--ablate N] [-j N] > stats.tsv
 //! ```
 //!
-//! `--limit`: only the first N files in path order. `--ablate`: the first N of them are also
-//! coded once per ablation. `.gz` files go through `gzip -dc`.
+//! `--limit`: the first N files in path order; `--ablate`: the first N of them get every ablation.
 
 use mvdz::stats::Stats;
 use std::path::{Path, PathBuf};
@@ -75,7 +74,7 @@ fn main() {
         paths.len(),
         started.elapsed().as_secs()
     );
-    print!("{}", total.report());
+    print!("{}", total.report_tsv());
 }
 
 fn collect_demos(dir: &Path, paths: &mut Vec<PathBuf>) {

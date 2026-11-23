@@ -1,7 +1,5 @@
-//! Measurements for deciding which commands earn a layout of their own.
-//!
-//! Bytes per command, coded bytes per stream, and the file size with a layout or a model
-//! taken away. Not part of the codec: an ablated walk does not decode.
+//! Which commands earn a layout of their own: bytes per command, coded bytes per stream, file
+//! growth with a layout or model taken away. Not part of the codec: an ablated walk does not decode.
 
 #![expect(
     clippy::cast_precision_loss,
@@ -30,7 +28,6 @@ use crate::streams::{
 use crate::walker::{SegmentWalker, SymbolIo};
 use std::fmt::Write;
 
-/// Sums over demos; one per thread, merged at the end.
 #[derive(Debug, Clone)]
 pub struct Stats {
     demos: u64,
@@ -38,13 +35,11 @@ pub struct Stats {
     coded_bytes: u64,
     census: Vec<CensusRow>,
     streams: Vec<StreamRow>,
-    /// The file overhead no stream owns: header, length fields, segment fields.
     container_bytes: f64,
     ablated_demos: u64,
     ablated_raw_bytes: u64,
     ablated_coded_bytes: u64,
-    /// By variant: the bytes its files grow by.
-    growth: Vec<i64>,
+    growth_by_variant: Vec<i64>,
 }
 
 impl Default for Stats {
@@ -59,14 +54,12 @@ impl Default for Stats {
             ablated_demos: 0,
             ablated_raw_bytes: 0,
             ablated_coded_bytes: 0,
-            growth: vec![0; VARIANTS.len()],
+            growth_by_variant: vec![0; VARIANTS.len()],
         }
     }
 }
 
 impl Stats {
-    /// `should_ablate`: also code the demo once per variant (about 40 times the work).
-    ///
     /// # Errors
     ///
     /// [`crate::Error::NotMvd`] for bytes the encoder refuses.
@@ -88,17 +81,17 @@ impl Stats {
         let coded = code(&segments);
         self.demos += 1;
         self.raw_bytes += demo.len() as u64;
-        self.coded_bytes += coded.len;
+        self.coded_bytes += coded.file_len;
         self.attribute(&segments, &coded);
         if !should_ablate {
             return;
         }
         self.ablated_demos += 1;
         self.ablated_raw_bytes += demo.len() as u64;
-        self.ablated_coded_bytes += coded.len;
-        for (growth, &(_, ablation)) in self.growth.iter_mut().zip(VARIANTS) {
+        self.ablated_coded_bytes += coded.file_len;
+        for (growth, &(_, ablation)) in self.growth_by_variant.iter_mut().zip(VARIANTS) {
             let ablated = code(&walk_demo(demo, ablation, None));
-            *growth += ablated.len.cast_signed() - coded.len.cast_signed();
+            *growth += ablated.file_len.cast_signed() - coded.file_len.cast_signed();
         }
     }
 
@@ -120,7 +113,11 @@ impl Stats {
         self.ablated_demos += other.ablated_demos;
         self.ablated_raw_bytes += other.ablated_raw_bytes;
         self.ablated_coded_bytes += other.ablated_coded_bytes;
-        for (total, growth) in self.growth.iter_mut().zip(&other.growth) {
+        for (total, growth) in self
+            .growth_by_variant
+            .iter_mut()
+            .zip(&other.growth_by_variant)
+        {
             *total += growth;
         }
     }
@@ -129,8 +126,7 @@ impl Stats {
         self.demos
     }
 
-    /// Tab-separated tables.
-    pub fn report(&self) -> String {
+    pub fn report_tsv(&self) -> String {
         let mut out = String::new();
         let raw = self.raw_bytes as f64;
         let coded = self.coded_bytes as f64;
@@ -259,9 +255,9 @@ impl Stats {
             self.ablated_demos, self.ablated_raw_bytes, self.ablated_coded_bytes
         );
         let mut variants: Vec<usize> = (0..VARIANTS.len()).collect();
-        variants.sort_by_key(|&variant| std::cmp::Reverse(self.growth[variant]));
+        variants.sort_by_key(|&variant| std::cmp::Reverse(self.growth_by_variant[variant]));
         for variant in variants {
-            let growth = self.growth[variant];
+            let growth = self.growth_by_variant[variant];
             let _ = writeln!(
                 out,
                 "{}\t{growth}\t{:.4}\t{:.4}",
@@ -286,14 +282,13 @@ impl Stats {
         for (segment, body) in segments.iter().zip(&coded.bodies) {
             container += (LEN_FIELD_LEN + SEGMENT_FIELDS_LEN) as f64;
             let Body::Transform(body) = body else {
-                // all tail or stored: every byte is the tail's
                 coded_bytes[TAIL] += body.len() as f64;
                 self.streams[TAIL].symbols += segment.raw.len() as u64;
                 is_seen[TAIL] = true;
                 continue;
             };
             let walked = &segment.walked;
-            let weights = lz_costs.blob_weights(walked);
+            let weights = lz_costs.token_bits_by_blob_stream(walked);
             let weight_total: f64 = weights.iter().sum();
             container += TRANSFORM_FIELDS_LEN as f64;
             let mut table = &body[TRANSFORM_FIELDS_LEN - 4..];
@@ -321,10 +316,9 @@ impl Stats {
                 *total += weight;
             }
         }
-        // the models block, by raw model length; the token models go to the blobs they code
-        let raw_models_len: usize = coded.model_lens.iter().sum();
+        let raw_models_len: usize = coded.used_raw_model_lens.iter().sum();
         let blob_weight_total: f64 = blob_weights.iter().sum();
-        for (stream, &model_len) in coded.model_lens.iter().enumerate() {
+        for (stream, &model_len) in coded.used_raw_model_lens.iter().enumerate() {
             if model_len == 0 {
                 continue;
             }
@@ -360,12 +354,11 @@ struct StreamRow {
     coded_bytes: f64,
 }
 
-/// Census rows 0-255 are the commands, by their byte.
 const ROW_FRAME_HEADERS: usize = 256;
 const ROW_SET_FRAMES: usize = 257;
 const ROW_ESCAPED: usize = 258;
 const ROW_TAIL: usize = 259;
-/// The first of `HIDDEN_TYPES + 1`: hidden blocks by type, the last for every other type.
+/// `HIDDEN_TYPES` rows by type, then one for every other type.
 const ROW_HIDDEN: usize = 260;
 const HIDDEN_TYPES: usize = 12;
 const CENSUS_ROWS: usize = ROW_HIDDEN + HIDDEN_TYPES + 1;
@@ -377,19 +370,14 @@ fn percent(part: f64, whole: f64) -> f64 {
     100.0 * part / whole
 }
 
-/// What an ablated walk codes differently.
 #[derive(Debug, Clone, Copy)]
 enum Ablation {
     None,
-    /// These commands as generic blobs, one per command.
     Generic(&'static [u8]),
-    /// Hidden blocks of this type as other hidden blocks.
     HiddenMisc(u32),
-    /// These structural or numeric streams as blob bytes, without a model.
     Blob(&'static [usize]),
 }
 
-/// Every command with a layout of its own but `svc_playerinfo` and the packet entities.
 const MINOR_COMMANDS: &[u8] = &[
     SVC_UPDATE_STAT,
     SVC_SOUND,
@@ -437,7 +425,6 @@ const VARIANTS: &[(&str, Ablation)] = &[
         "no model: PLAYER_WEAPON_FRAME",
         Ablation::Blob(&[PLAYER_WEAPON_FRAME]),
     ),
-    ("no model: ENTITY_GAP", Ablation::Blob(&[ENTITY_GAP])),
     ("no model: ENTITY_BITS", Ablation::Blob(&[ENTITY_BITS])),
     ("no model: ENTITY_MORE", Ablation::Blob(&[ENTITY_MORE])),
     ("no model: ENTITY_ANGLE", Ablation::Blob(&[ENTITY_ANGLE])),
@@ -486,7 +473,6 @@ const VARIANTS: &[(&str, Ablation)] = &[
     ("no model: USERCMD_ANGLE", Ablation::Blob(&[USERCMD_ANGLE])),
 ];
 
-/// The encoder's streams, with the ablated ones redirected.
 #[derive(Debug)]
 struct AblatedIo {
     inner: EncodeIo,
@@ -494,8 +480,7 @@ struct AblatedIo {
 }
 
 impl AblatedIo {
-    /// The blob stream that takes the place of structural or numeric stream `stream`: no
-    /// command has a byte this high, so the id is free.
+    /// Ids from `GENERIC + 128` up: no command byte reaches them.
     fn blob_of(&self, stream: usize) -> Option<usize> {
         const UNUSED_GENERIC: usize = GENERIC + 128;
         match self.ablation {
@@ -551,7 +536,6 @@ struct Segment<'a> {
     walked: Walked,
 }
 
-/// The encoder's pass 1, in one thread.
 fn walk_demo<'a>(
     demo: &'a [u8],
     ablation: Ablation,
@@ -594,29 +578,25 @@ fn walk_demo<'a>(
 #[derive(Debug)]
 enum Body {
     Transform(Vec<u8>),
-    /// All tail, or stored.
-    Fallback(Vec<u8>),
+    AllTailOrStored(Vec<u8>),
 }
 
 impl Body {
     fn len(&self) -> usize {
         match self {
-            Self::Transform(body) | Self::Fallback(body) => body.len(),
+            Self::Transform(body) | Self::AllTailOrStored(body) => body.len(),
         }
     }
 }
 
 #[derive(Debug)]
 struct Coded {
-    /// Of the whole file.
-    len: u64,
+    file_len: u64,
     bodies: Vec<Body>,
     models_block_len: usize,
-    /// By stream id: the raw model, 0 for a stream without a used model.
-    model_lens: Vec<usize>,
+    used_raw_model_lens: Vec<usize>,
 }
 
-/// The encoder's pass 2 and the file layout, in one thread.
 fn code(segments: &[Segment]) -> Coded {
     let mut builder = ModelBuilder::default();
     let walked: Vec<&Walked> = segments.iter().map(|segment| &segment.walked).collect();
@@ -638,7 +618,7 @@ fn code(segments: &[Segment]) -> Coded {
             }
             let protocol = segment.walked.start_protocol;
             let all_tail = walk_tail(segment.raw, protocol);
-            Body::Fallback(
+            Body::AllTailOrStored(
                 code_with(&all_tail, &mut used_ids)
                     .unwrap_or_else(|| stored(segment.raw, protocol)),
             )
@@ -646,9 +626,9 @@ fn code(segments: &[Segment]) -> Coded {
         .collect();
     used_ids.sort_unstable();
     used_ids.dedup();
-    let mut model_lens = vec![0; STREAM_COUNT];
+    let mut used_raw_model_lens = vec![0; STREAM_COUNT];
     for &stream in &used_ids {
-        model_lens[stream] = models[stream].as_ref().map_or(0, model_len);
+        used_raw_model_lens[stream] = models[stream].as_ref().map_or(0, model_len);
     }
     let models_block_len = if used_ids.is_empty() {
         0
@@ -660,10 +640,10 @@ fn code(segments: &[Segment]) -> Coded {
         .map(|body| LEN_FIELD_LEN + SEGMENT_FIELDS_LEN + body.len())
         .sum();
     Coded {
-        len: (HEADER_LEN + LEN_FIELD_LEN + models_block_len + bodies_len) as u64,
+        file_len: (HEADER_LEN + LEN_FIELD_LEN + models_block_len + bodies_len) as u64,
         bodies,
         models_block_len,
-        model_lens,
+        used_raw_model_lens,
     }
 }
 
@@ -671,17 +651,16 @@ fn model_len(model: &FileModel) -> usize {
     model.bytes.len()
 }
 
-/// What the tokens of the blob bytes cost, from their counts over the demo.
 struct LzCosts {
-    literals: ContextCosts,
-    lens: ContextCosts,
-    dists: ContextCosts,
+    literals: SymbolBitCosts,
+    lens: SymbolBitCosts,
+    dists: SymbolBitCosts,
 }
 
 impl LzCosts {
     fn new(segments: &[Segment]) -> Self {
         let costs_of = |stream: usize, alphabet: usize| {
-            let mut costs = ContextCosts::new(alphabet);
+            let mut costs = SymbolBitCosts::new(alphabet);
             for segment in segments {
                 costs.count(&segment.walked.streams[stream]);
             }
@@ -694,8 +673,7 @@ impl LzCosts {
         }
     }
 
-    /// By stream id: the bits of the tokens that produce the bytes of each blob stream.
-    fn blob_weights(&self, walked: &Walked) -> Vec<f64> {
+    fn token_bits_by_blob_stream(&self, walked: &Walked) -> Vec<f64> {
         let mut weights = vec![0f64; STREAM_COUNT];
         let literals = &walked.streams[LZ_LITERAL];
         let lens = &walked.streams[LZ_LENGTH];
@@ -711,7 +689,7 @@ impl LzCosts {
         for (token_index, &len_symbol) in lens.symbols.iter().enumerate() {
             let mut bits = self.lens.bits(lens.contexts[token_index], len_symbol)
                 + f64::from(mantissa_bit_count(len_symbol));
-            let len = value_of(len_symbol, &mut len_mantissas);
+            let len = length_of(len_symbol, &mut len_mantissas);
             let produced = if len == 0 {
                 bits += (self.literals).bits(
                     literals.contexts[literal_index],
@@ -745,15 +723,13 @@ impl LzCosts {
     }
 }
 
-/// -log2 of each symbol's share of its context.
-struct ContextCosts {
+struct SymbolBitCosts {
     alphabet: usize,
-    /// By context, then symbol.
     counts: Vec<u32>,
     totals: Vec<u32>,
 }
 
-impl ContextCosts {
+impl SymbolBitCosts {
     const CONTEXTS: usize = 256;
 
     fn new(alphabet: usize) -> Self {
@@ -777,13 +753,11 @@ impl ContextCosts {
     }
 }
 
-/// `math::bucket`, backwards.
 fn mantissa_bit_count(symbol: u8) -> u32 {
     u32::from(symbol).div_ceil(2).saturating_sub(1)
 }
 
-/// A length: never negative.
-fn value_of(symbol: u8, mantissas: &mut BitReader) -> usize {
+fn length_of(symbol: u8, mantissas: &mut BitReader) -> usize {
     if symbol == 0 {
         return 0;
     }
@@ -796,7 +770,6 @@ fn add(row: &mut CensusRow, bytes: usize) {
     row.bytes += bytes as u64;
 }
 
-/// The frames of a segment the walker walked, as it frames them.
 fn count_segment(raw: &[u8], mut protocol: ProtocolState, census: &mut [CensusRow]) {
     let mut offset = 0;
     while let Some(len) = frame_len(raw, offset) {
@@ -906,8 +879,7 @@ fn census_group(row: usize) -> usize {
     }
 }
 
-/// The hidden block headers (`HIDDEN_TAG`, `HIDDEN_LENGTH`, `HIDDEN_TYPE`) are with "hidden
-/// other": usercmd blocks carry 6 of their 29 raw bytes there.
+/// Hidden block headers count as "hidden other", also those of usercmd blocks.
 fn stream_group(stream: usize) -> usize {
     match stream {
         TIME | TYPE | COMMAND | MASK | SET => GROUP_FRAMING,
@@ -1094,7 +1066,6 @@ mod tests {
     use crate::protocol::{SVC_PRINT, SVC_UPDATE_PING};
     use pretty_assertions::assert_eq;
 
-    /// A frame for everyone: stat 0 of the target set to 100, a ping, a print.
     fn demo() -> Vec<u8> {
         const DEM_ALL: u8 = 6;
         let payload: &[u8] = &[

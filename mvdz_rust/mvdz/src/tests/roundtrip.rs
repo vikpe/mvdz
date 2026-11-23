@@ -14,10 +14,8 @@ fn check_all_ways(src: &[u8], what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Three `ENTITY_GAP` symbols per two-byte entity word: a stream with more symbols than its
-/// segment has bytes.
 #[test]
-fn a_stream_with_more_symbols_than_bytes_round_trips() -> anyhow::Result<()> {
+fn a_packet_of_120000_entity_words_round_trips() -> anyhow::Result<()> {
     let mut demo = Demo(synthetic(&[], false));
     let mut packet = vec![crate::protocol::SVC_PACKET_ENTITIES];
     for index in 0..120_000u32 {
