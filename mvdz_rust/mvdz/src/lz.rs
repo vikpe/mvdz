@@ -3,22 +3,20 @@
 //! other stream uses.
 
 use crate::error::{Error, Result};
-use crate::math::residual_bucket;
+use crate::math::clamped_bucket;
 use crate::memory::try_with_capacity;
-use crate::numeric::NumericContext;
-use crate::rans::{ByteDecoder, NumericDecoder, NumericSymbolWriter, NumericSymbols};
-use crate::streams::{LZ_DISTANCE, LZ_LENGTH};
+use crate::rans::{StreamDecoder, StreamSymbols, StreamWriter};
+use crate::streams::{LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL};
 
 /// The blob bytes of one segment as the encoder codes them.
 #[derive(Debug)]
 pub(crate) struct Tokens {
-    pub(crate) literals: Vec<u8>,
-    /// The byte before each literal, 0 before the first byte.
-    pub(crate) literal_contexts: Vec<u16>,
+    /// Each under the byte before it, 0 before the first byte.
+    pub(crate) literals: StreamSymbols,
     /// One per token, 0 for a literal.
-    pub(crate) lens: NumericSymbols,
+    pub(crate) lens: StreamSymbols,
     /// One per match.
-    pub(crate) dists: NumericSymbols,
+    pub(crate) dists: StreamSymbols,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,10 +31,9 @@ pub(crate) fn tokens(bytes: &[u8]) -> Tokens {
 
 /// `tokens` as their streams code them; `bytes` is what they expand to.
 pub(crate) fn code(bytes: &[u8], tokens: &[Token]) -> Tokens {
-    let mut literals = Vec::new();
-    let mut literal_contexts = Vec::new();
-    let mut lens = NumericSymbolWriter::new(LZ_LENGTH);
-    let mut dists = NumericSymbolWriter::new(LZ_DISTANCE);
+    let mut literals = StreamWriter::default();
+    let mut lens = StreamWriter::default();
+    let mut dists = StreamWriter::default();
     let mut position = 0usize;
     let mut previous_len = 0;
     for &token in tokens {
@@ -44,23 +41,21 @@ pub(crate) fn code(bytes: &[u8], tokens: &[Token]) -> Tokens {
             Token::Literal(byte) => {
                 let before = position.checked_sub(1).and_then(|before| bytes.get(before));
                 let previous_byte = before.copied().unwrap_or(0);
-                literals.push(byte);
-                literal_contexts.push(u16::from(previous_byte));
+                literals.push_symbol(u32::from(previous_byte), byte);
                 position += 1;
                 0
             }
             Token::Match { len, dist } => {
-                dists.push(bucket_context(len), coded_value(dist));
+                dists.push_value(bucket_context(len), coded_value(dist));
                 position += len;
                 len
             }
         };
-        lens.push(bucket_context(previous_len), coded_value(len));
+        lens.push_value(bucket_context(previous_len), coded_value(len));
         previous_len = len;
     }
     Tokens {
-        literals,
-        literal_contexts,
+        literals: literals.finish(),
         lens: lens.finish(),
         dists: dists.finish(),
     }
@@ -118,24 +113,24 @@ pub(crate) fn parse(bytes: &[u8]) -> Vec<Token> {
     tokens
 }
 
-/// The `len` blob bytes of a segment from its tokens.
-pub(crate) fn expand(
-    literals: &mut ByteDecoder,
-    lens: &mut NumericDecoder,
-    dists: &mut NumericDecoder,
-    len: usize,
-) -> Result<Vec<u8>> {
+/// The `len` blob bytes of a segment from its tokens; `decoders` by stream id.
+pub(crate) fn expand(decoders: &mut [StreamDecoder], len: usize) -> Result<Vec<u8>> {
     let corrupt = Error::Corrupt("blob tokens");
     let mut bytes: Vec<u8> = try_with_capacity(len)?;
     let mut previous_len = 0;
     while bytes.len() < len {
-        let token_len = lens.get(bucket_context(previous_len)).ok_or(corrupt)?;
+        let token_len = decoders[LZ_LENGTH]
+            .value(bucket_context(previous_len))
+            .ok_or(corrupt)?;
         let token_len = usize::try_from(token_len).map_err(|_| corrupt)?;
         if token_len == 0 {
             let previous_byte = bytes.last().copied().unwrap_or(0);
-            bytes.push(literals.get(u32::from(previous_byte)).ok_or(corrupt)?);
+            let literal = decoders[LZ_LITERAL].symbol(u32::from(previous_byte));
+            bytes.push(literal.ok_or(corrupt)?);
         } else {
-            let dist = dists.get(bucket_context(token_len)).ok_or(corrupt)?;
+            let dist = decoders[LZ_DISTANCE]
+                .value(bucket_context(token_len))
+                .ok_or(corrupt)?;
             let dist = usize::try_from(dist).map_err(|_| corrupt)?;
             let is_inside = dist >= 1 && dist <= bytes.len() && token_len <= len - bytes.len();
             if !is_inside {
@@ -151,12 +146,9 @@ pub(crate) fn expand(
     Ok(bytes)
 }
 
-fn bucket_context(value: usize) -> NumericContext {
+fn bucket_context(value: usize) -> u32 {
     const MAX_BUCKET: u8 = 63;
-    let bucket = residual_bucket(coded_value(value)).min(MAX_BUCKET);
-    NumericContext {
-        features: [bucket, 0, 0, 0],
-    }
+    clamped_bucket(coded_value(value), MAX_BUCKET)
 }
 
 /// A length or distance as its stream codes it: within the blob bytes of one segment.

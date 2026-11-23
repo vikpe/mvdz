@@ -11,7 +11,7 @@ use crate::protocol::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SINGLE, DEM_STATS, ProtocolState, frame_len, has_frame_run,
 };
 use crate::rans::FileModel;
-use crate::segment::{self, Numerics, Walked, cut_points};
+use crate::segment::{self, Walked, cut_points};
 use sha2::{Digest, Sha256};
 
 /// `max_threads` 0 is all logical cores.
@@ -84,7 +84,6 @@ struct Counted {
     is_walkable: bool,
     /// All tail when the segment does not walk.
     walked: Walked,
-    numerics: Numerics,
 }
 
 fn count_segment(raw: &[u8], start_protocol: ProtocolState) -> Counted {
@@ -100,7 +99,6 @@ fn count_segment(raw: &[u8], start_protocol: ProtocolState) -> Counted {
         start_protocol,
         end_protocol,
         is_walkable,
-        numerics: segment::numerics(raw, &walked),
         walked,
     }
 }
@@ -136,10 +134,7 @@ fn run_first_pass<'a>(segments: &[&'a [u8]], threads: usize) -> FirstPass<'a> {
                 is_walkable: counted.is_walkable,
             });
         }
-        let counted_segments: Vec<(&Walked, &Numerics)> = batch
-            .iter()
-            .map(|counted| (&counted.walked, &counted.numerics))
-            .collect();
+        let counted_segments: Vec<&Walked> = batch.iter().map(|counted| &counted.walked).collect();
         model_builder.add(&counted_segments, threads);
         first += batch_len;
     }
@@ -224,9 +219,8 @@ impl Body {
         walked: &Walked,
         file_models: &[Option<FileModel>],
     ) -> Option<Self> {
-        let numerics = segment::numerics(plan.raw, walked);
         let mut model_ids = Vec::new();
-        let coded = segment::encode(walked, &numerics, &mut model_ids, file_models)
+        let coded = segment::encode(walked, &mut model_ids, file_models)
             .filter(|coded| coded.len() as u64 <= MAX_SEGMENT_CODED)?;
         let mut bytes = segment_fields(plan.raw);
         bytes.extend_from_slice(&coded);

@@ -32,7 +32,7 @@ func TestResidualBucket(test *testing.T) {
 func TestQuantizedWeight(test *testing.T) {
 	weights := map[uint8]uint64{
 		0: 0, 1: 65536, 2: 92682, 3: 131072, 4: 185364,
-		80: 92682 << 39, 81: 1<<56 - 1, 255: 1<<56 - 1,
+		64: 92682 << 31, maxQuantized: 1 << 48,
 	}
 	for quantized, expected := range weights {
 		if weight := quantizedWeight(uint32(quantized)); weight != expected {
@@ -52,7 +52,7 @@ func TestNormalize(test *testing.T) {
 		{"exact", []uint64{1, 1, 2}, []int{1024, 1024, 2048}},
 		{"remainder to the first largest", []uint64{1, 1, 1}, []int{1366, 1365, 1365}},
 		{"largest pays for the floors of 1", []uint64{1 << 40, 1, 1, 0}, []int{4094, 1, 1, 0}},
-		{"largest weights", []uint64{1<<56 - 1, 1<<56 - 1}, []int{2048, 2048}},
+		{"largest weights", []uint64{1 << 48, 1 << 48}, []int{2048, 2048}},
 	}
 	for _, normalizeCase := range cases {
 		frequencies := normalize(normalizeCase.weights, frequencyTotal)

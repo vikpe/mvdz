@@ -54,7 +54,7 @@ too_many_lines = "allow"
 # just before. Only the entropy coders drop high bits, on purpose.
 cast_possible_truncation = "allow"
 
-# Forced inlining in the hot loops (walker, rANS, numeric groups) was
+# Forced inlining in the hot loops (walker, rANS, numeric fields) was
 # benchmarked
 inline_always = "allow"
 

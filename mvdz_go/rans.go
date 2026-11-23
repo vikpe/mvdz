@@ -54,6 +54,11 @@ func newStreamModel(raw []byte, alphabet int) (*streamModel, error) {
 		}
 	}
 	quantizedTables := raw[4+2*ownCount:]
+	for _, quantized := range quantizedTables {
+		if quantized > maxQuantized {
+			return nil, corrupt("model")
+		}
+	}
 	tables := make([]frequencyTable, ownCount+1)
 	for index := range tables {
 		tables[index] = newFrequencyTable(quantizedTables[index*alphabet:][:alphabet])

@@ -42,7 +42,7 @@ pub(crate) const LZ_LENGTH: usize = 35;
 /// The match distances of the blob bytes (`lz.rs`).
 pub(crate) const LZ_DISTANCE: usize = 36;
 
-const FIRST_BLOB_STREAM: usize = 37;
+pub(crate) const FIRST_BLOB_STREAM: usize = 37;
 pub(crate) const MASK: usize = 37;
 pub(crate) const ESCAPE_LENGTH: usize = 38;
 pub(crate) const HIDDEN_TAG: usize = 39;

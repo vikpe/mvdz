@@ -20,8 +20,14 @@ pub(crate) fn bucket(value: i32) -> (u16, u32, u32) {
 }
 
 #[inline(always)]
-pub(crate) fn residual_bucket(residual: i32) -> u8 {
+fn residual_bucket(residual: i32) -> u8 {
     bucket(residual).0 as u8
+}
+
+/// A field of a rANS context.
+#[inline(always)]
+pub(crate) fn clamped_bucket(residual: i32, max: u8) -> u32 {
+    u32::from(residual_bucket(residual).min(max))
 }
 
 /// floor(2^40 / d) + 1: n * RECIPROCALS[d] >> 40 == n / d exactly for
@@ -75,7 +81,10 @@ pub(crate) fn grid_f32(grid: u16) -> u32 {
 }
 
 const STEPS_PER_OCTAVE: u32 = 2;
-/// 16.16 fixed point.
+/// What [`quantize`] gives for the largest count.
+pub(crate) const MAX_QUANTIZED: u32 = 65;
+
+/// 16.16 fixed point; `quantized` at most [`MAX_QUANTIZED`].
 #[inline]
 pub(crate) fn quantized_weight(quantized: u32) -> u64 {
     /// 2^(k/2) in 16.16 fixed point, k = 0, 1.
@@ -85,12 +94,7 @@ pub(crate) fn quantized_weight(quantized: u32) -> u64 {
     }
     let step = quantized - 1;
     let (octave, octave_step) = (step / STEPS_PER_OCTAVE, step % STEPS_PER_OCTAVE);
-    let fraction = STEP_POWERS[octave_step as usize];
-    if octave >= 40 {
-        u64::MAX >> 8
-    } else {
-        fraction << octave
-    }
+    STEP_POWERS[octave_step as usize] << octave
 }
 
 /// The quantized count whose weight is nearest to `count` in ratio.
@@ -120,9 +124,10 @@ pub(crate) fn quantize(count: u32) -> u32 {
     }
 }
 
-/// Frequencies summing to exactly `total`, every present symbol at least 1.
+/// Frequencies summing to exactly `total`, every present symbol at least 1. Fits 64 bits
+/// for at most 256 `weights` of [`quantized_weight`] and a `total` of at most 2^12.
 pub(crate) fn normalize(weights: &[u64], total: u32) -> Vec<u32> {
-    let weight_total: u128 = weights.iter().map(|&weight| u128::from(weight)).sum();
+    let weight_total: u64 = weights.iter().sum();
     let mut freqs = vec![0u32; weights.len()];
     if weight_total == 0 {
         return freqs;
@@ -130,7 +135,7 @@ pub(crate) fn normalize(weights: &[u64], total: u32) -> Vec<u32> {
     let mut sum: i64 = 0;
     for (symbol, &weight) in weights.iter().enumerate() {
         if weight > 0 {
-            freqs[symbol] = ((u128::from(weight) * u128::from(total) / weight_total) as u32).max(1);
+            freqs[symbol] = ((weight * u64::from(total) / weight_total) as u32).max(1);
             sum += i64::from(freqs[symbol]);
         }
     }

@@ -15,6 +15,7 @@ usercmd.normal.segments.mvdz	b63058bd186b2d3732942c390e17c32b1c68731c08f8ff13fc2
 commands.normal.mvdz	aa06f3fca58ac614172aaca8ef682f12760f51d3971606d9ebafb2d561441c2c	8325	synthetic demo with every frame type, every command of the sizer, the playerinfo, packet-entity, sound and temp-entity forms, then FTE entity extensions
 protocol-change.normal.mvdz	0438eaa02a0979e8749064c9289bb972b9a08effa87d567cfec2384118668e5d	1171152	synthetic demo whose second segment announces FTE2 extensions: later segments start from the changed protocol (rule 3)
 two-matches.normal.mvdz	13b22b4630615a5f9893899613062b93db1bab7334ac60cb46839444a4a19bb2	16760	synthetic demo of two matches: float coordinates (MVD1), then a server data without extensions, which resets the protocol state
+width-switch.normal.mvdz	f4d7f944fb660be9854b2d65821eceb44e2d4191cad3db1df57d5fe6dfca9c61	2569	synthetic demo of three matches in one segment: 16-bit coordinates, float (MVD1), 16-bit again, then a sound before the player's next origin
 truncated-match.normal.mvdz	00fd501572f7ae55e030f93c7f548bb0630d69f1597999128ba9c6a819f06438	1058109	synthetic demo of a match cut off inside its last frame, then whole matches: the frames are walked again after the break (rule 2)
 oversized-frame.normal.mvdz	1b288c91b2bcc9b890c8054158b344709b0c3b4e78e02ac85ae382cd1bf9c143	1583826	synthetic demo with a 1.5 MiB frame of nops: it is cut every 2^20 bytes and the frames go on after it (rule 2)
 entity-words.normal.mvdz	43588cc355d1a081c754764a230937f62dd647e19cdfbe02c99fa478a83d9cd4	250965	synthetic demo with a packet of 120000 entity words, 3 ENTITY_GAP symbols per 2 bytes
@@ -59,7 +60,8 @@ hostile-tables-blob-id.mvdz	error: corrupt: tables	-	a model for a blob stream (
 hostile-tables-unassigned-id.mvdz	error: corrupt: tables	-	a model for a stream id past the last
 hostile-tables-empty.mvdz	error: corrupt: tables	-	a models block with n = 0
 hostile-tables-trailing.mvdz	error: corrupt: tables	-	a models block with one byte after its last entry
-hostile-tables-padding.mvdz	error: corrupt: rans stream	-	a model whose coded stream has one byte of padding (not consumed exactly)
+hostile-tables-padding.mvdz	error: corrupt: model	-	a model whose coded stream has one byte of padding (not consumed exactly)
 hostile-tables-alphabet.mvdz	error: corrupt: model	-	a numeric stream's entry holding a structural model (the raw length of alphabet 256)
 hostile-tables-raw-size.mvdz	error: corrupt: models size	-	a model declaring 4 MiB of raw bytes: the models together over the limit
+hostile-tables-quantized.mvdz	error: corrupt: model	-	a quantized count of 66, over the largest, for the only symbol of a table
 hostile-tables-own-count.mvdz	error: corrupt: model	-	a model declaring 65537 own tables: more than there are contexts

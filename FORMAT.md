@@ -211,8 +211,8 @@ Three kinds of stream, one id range each:
   symbol under a context, with rANS (section 6.4): ids 0-15 by the walker
   (section 4), id 16 by the blob tokens (section 6.6).
 * **Numeric** streams (ids 17-36) hold `i32` values, each under a feature
-  vector, with rANS (section 6.4): ids 17-34 are the residuals the numeric
-  groups decode after the walk (section 5), ids 35 and 36 belong to the
+  vector, with rANS (section 6.4): ids 17-34 are the residuals of the
+  numeric fields the walker codes (section 5), ids 35 and 36 belong to the
   blob tokens.
 * **Blob** streams (ids 37-321) are byte arrays the walker consumes in
   order. They have no body: their bytes come from the blob tokens.
@@ -283,19 +283,17 @@ An id of 322 or above is an error.
 
 1. Parse the segment fields (2.3) and the transform header and stream
    table (3.1).
-2. A stored segment (`n = 0`) is copied; go to step 7.
+2. A stored segment (`n = 0`) is copied; go to step 6.
 3. Construct a rANS decoder for every structural and numeric stream in the
    table, with its model from the models block.
 4. Expand the blob tokens (section 6.6) to `blob_total` bytes and split
    them among the blob streams in id order. Afterwards streams 35 and
    36 must be complete.
-5. **Walk** (section 4), producing the structural bytes of the segment and
-   the record lists of the numeric fields. Afterwards every structural
-   stream (stream 16 included) must be complete (section 6.5), and every
-   blob stream must be consumed exactly.
-6. Run the **numeric groups** (section 5) in their fixed order; afterwards
-   every numeric stream must be complete.
-7. Check `crc32(output) == crc32` of the segment fields.
+5. **Walk** (sections 4 and 5), producing every byte of the segment.
+   Afterwards every structural and numeric stream (stream 16 included)
+   must be complete (section 6.5), and every blob stream must be consumed
+   exactly.
+6. Check `crc32(output) == crc32` of the segment fields.
 
 ### 3.4 Whole-demo checks (`decode.rs:Decoder::finish`)
 
@@ -309,13 +307,12 @@ checks (3.3), and reports the end of the demo only after the whole-demo
 checks; a failure after some bytes were delivered is an error, and those
 bytes are a prefix of the demo.
 
-## 4. The structural transform (`walker.rs`, `protocol.rs`)
+## 4. The walk (`walker.rs`, `protocol.rs`)
 
 The decoder rebuilds the segment (length `raw_len`) into an output buffer
-`dst`. The walker writes every structural byte. For each numeric field it
-only *reserves* the bytes (records their offset in a record list); the
-numeric groups (section 5) fill them in afterwards. The structure never
-depends on a numeric value.
+`dst`, in one pass from its first byte to its last: the walker writes every
+byte where it stands. The numeric fields are written by the rules of
+section 5. The structure never depends on a numeric value.
 
 Three kinds of stream feed the walker (stream ids: section 3):
 
@@ -323,7 +320,8 @@ Three kinds of stream feed the walker (stream ids: section 3):
   with a 16-bit context (section 6);
 * *blob* streams: plain bytes, read in order from the stream's slice of the
   segment's blob bytes (section 6.6);
-* *numeric* streams: read only by section 5.
+* *numeric* streams (ids 17-34): rANS-coded residuals, read by the rules of
+  section 5.
 
 Walker primitives (decode direction; `p` = output cursor):
 
@@ -345,7 +343,6 @@ Walker primitives (decode direction; `p` = output cursor):
 * `copy_blob(s, n)`: copy the next `n` bytes of blob stream `s` to `dst[p..]`;
   `p += n`. Error if the stream has fewer than `n` bytes left or the output
   would overflow (`SegmentWalker::copy_blob`).
-* `reserve(n)`: `off = p`; `p += n`; error if `p > raw_len`; returns `off`.
 * `copy_command_body(s, c)`: `n = command_body_size(c, the unread bytes of blob s)`
   (section 4.2); `None` is an error; else `copy_blob(s, n)`.
 
@@ -477,25 +474,15 @@ Fresh for every segment; zero unless noted:
 | `usercmds[256]` | {drop, msec, grid, buttons, impulse u8; moves[3] u16} | 0 | per usercmd player number |
 | `entities[2048]` | {angles[3] u8, angle_residuals[3] u8, frame u8, model u8, bits u8, last_packet u32} | 0 | per entity number |
 | `stats[32][256]` | u8 | 0 | per (target, stat index) |
-| `player_origin_offsets[256][3]`, `entity_origin_offsets[2048][3]` | u32 | `NO_OFFSET` (0xFFFFFFFF) | offset of the latest origin coord per axis |
+| `player_tracks[256]` | {origins[3], angles[3]: AxisTrack; frame_times: (u32, u32)} | 0 | per player number, sections 5.3 and 5.4 |
+| `entity_origins[2048][3]` | AxisTrack | 0 | per entity number and axis, section 5.5 |
+| `player_float_origins[256][3]`, `entity_float_origins[2048][3]` | FloatTrack | 0 | per number and axis, section 5.2 |
+| `usercmd_tracks[256][3]` | AxisTrack | 0 | per usercmd player number and axis, section 5.6 |
+| `temp_entity_last[3]` | u16 | 0 | the latest temp-entity point, section 5.6 |
 | `previous_packet`, `current_packet` | list of u16 | empty | entity numbers (9-bit) of the previous and current packet |
 | `previous_packet_index` | usize | 0 | |
 | `packet_number` | u32 | 1 | packet counter |
 | `protocol` | ProtocolState | the transform header's | section 4.1 |
-
-Record lists (`walker.rs:RecordLists`), appended in walk order and read by
-section 5:
-
-* `PlayerInfoRecord {offset u32, time u32, flags u16, number u8, has_float_coords}`
-* `PacketEntityRecord {offset u32, number u16, bits u16}`;
-  `bits` holds origin `i` at `1 << 2i` and angle `i` at `2 << 2i`
-  (i = 0..2), `PE_IN_PREVIOUS` 64, `PE_FLOAT` 128, `PE_WIDE` 256
-* `SoundRecord {offset u32, references[3] u32, kind u8, number u8}`
-* `TempEntityRecord {offset u32, references[3] u32, kind u8}`
-* `UsercmdRecord {pitch_offset u32, number u8, grid_axes u8}` (section 4.11)
-
-The lists grow as the walk appends. Every record follows a byte the walk
-wrote, so `raw_len` bounds them (section 9, note 1).
 
 ### 4.4 Segment walk and frames (`SegmentWalker::run`, `SegmentWalker::frame`)
 
@@ -526,9 +513,9 @@ Frame types (`ty & 7`): `DEM_READ` 1, `DEM_SET` 2, `DEM_MULTIPLE` 3,
 `DEM_SINGLE` 4, `DEM_STATS` 5, `DEM_ALL` 6. Both contexts use `last_type`
 before it is updated; TIME's uses the previous frame's time byte.
 
-`length_prefixed(ty, hidden)`: `at = reserve(4)` (stop on error); then
-`hidden ? hidden_payload() : payload(ty)`; then write `n = p - at - 4` as
-u32le at `dst[at..at+4]`.
+`length_prefixed(ty, hidden)`: `at = p`; `p += 4`; error (stop) if
+`p > raw_len`; then `hidden ? hidden_payload() : payload(ty)`; then write
+`n = p - at - 4` as u32le at `dst[at..at+4]`.
 
 ### 4.5 Payload command loop (`SegmentWalker::payload`)
 
@@ -625,11 +612,7 @@ number = code_blob_byte(PLAYER_NUMBER)
 ps = players[number]
 flags = player_info_flags(ps.flags)
 frame = code_symbol_residual(PLAYER_FRAME, ps.frame | (flags & (DF_DEAD | DF_GIB)), ps.frame)  // bits 8-9
-cw = protocol.coord_size
-off = reserve(popcount(flags & 0x7) * cw + popcount(flags & 0x38) * 2)
-push PlayerInfoRecord{off, time, flags, number, protocol.has_float_coords}
-o = off
-for i in 0..3: if flags & (DF_ORIGIN << i): player_origin_offsets[number][i] = o; o += cw
+player_origins_and_angles(number, flags)                 // sections 5.3 and 5.4
 if flags & DF_MODEL:    code_blob_byte(PLAYER_MODEL)
 if flags & DF_SKIN_NUM: code_blob_byte(PLAYER_SKIN)
 if flags & DF_EFFECTS:  code_blob_byte(PLAYER_EFFECTS)
@@ -638,9 +621,9 @@ if flags & DF_WEAPON_FRAME: wf = code_symbol_residual(PLAYER_WEAPON_FRAME, ps.we
 players[number] = {flags, frame, wf}
 ```
 
-`DF_DEAD` is 1<<8 and `DF_GIB` 1<<9. The reserved block holds the origin
-coords (flag bits 0-2, `cw` bytes each) and then the angles (flag bits 3-5,
-2 bytes each); section 5 fills it.
+`DF_DEAD` is 1<<8 and `DF_GIB` 1<<9. The origin coords come first (flag
+bits 0-2, 2 or 4 bytes each), then the angles (flag bits 3-5, 2 bytes
+each).
 
 `player_info_flags(prev)` codes the 16-bit flags as `x = flags XOR prev`:
 
@@ -717,16 +700,8 @@ if bits & U_FRAME:     es.frame = code_blob_residual(ENTITY_FRAME, es.frame)
 if bits & U_COLOR_MAP: code_blob_byte(ENTITY_MISC)
 if bits & U_SKIN:      code_blob_byte(ENTITY_MISC)
 if bits & U_EFFECTS:   code_blob_byte(ENTITY_MISC)
-rb = 0
 for i in 0..3 over (U_ORIGIN_1, U_ANGLE_1), (U_ORIGIN_2, U_ANGLE_2), (U_ORIGIN_3, U_ANGLE_3):
-    if bits & origin_i: rb |= 1 << (2*i)
-    if bits & angle_i:  rb |= 2 << (2*i)
-if in_previous:                 rb |= PE_IN_PREVIOUS
-if protocol.has_float_coords:      rb |= PE_FLOAT
-if protocol.has_fte_float_coords:  rb |= PE_WIDE
-record = PacketEntityRecord{offset = p, number, bits = rb}
-for i in 0..3:
-    if bits & origin_i: entity_origin_offsets[number][i] = reserve(protocol.coord_size)
+    entity_origin(number, i, bits & origin_i, in_previous)           // section 5.5
     if bits & angle_i:
         if protocol.has_fte_float_coords:
             code_symbol(ENTITY_ANGLE, 3 | (model << 6))
@@ -735,7 +710,6 @@ for i in 0..3:
             q = min(byte_residual_bucket(es.angle_residuals[i]), 15)
             v = code_symbol_residual(ENTITY_ANGLE, i | (q << 2) | (model << 6), es.angles[i])
             es.angle_residuals[i] = v - es.angles[i] (mod 256); es.angles[i] = v
-push record
 if more & U_FTE_TRANS and protocol.fte & FTE_PEXT_TRANS:          code_blob_byte(ENTITY_MISC)
 if more & U_FTE_SCALE:                                         code_blob_byte(ENTITY_MISC)
 if more & U_FTE_FATNESS:                                       code_blob_byte(ENTITY_MISC)
@@ -750,10 +724,9 @@ entities[number] = es
   writes back `entities[number]`'s own `bits`.
 * `es` is copied after `last_packet` is set, so the write-back keeps it.
 * `previous_packet` and `current_packet` hold 9-bit numbers.
-* Angles sit between the reserved origin coords in wire order (origin 1,
-  angle 1, origin 2, angle 2, origin 3, angle 3); section 5 recomputes the
-  origin offsets from `record.offset` and `record.bits`
-  (`PacketEntityRecord::origin_offsets`).
+* Origins and angles alternate in wire order (origin 1, angle 1, origin 2,
+  angle 2, origin 3, angle 3). `entity_origin` runs for every axis, sent or
+  not.
 
 ### 4.9 sound (`SegmentWalker::sound`)
 
@@ -765,14 +738,14 @@ if ch & SND_ATTENUATION: code_blob_byte(SOUND_MISC)
 e = (ch >> 3) & 1023
 number = code_symbol(SOUND_NUMBER, (ch & 7) | (min(e, 33) << 3))
 if protocol.coord_size != 2: copy_blob(SOUND_FLOAT, 12); return
-if 1 <= e <= 32: references = player_origin_offsets[e - 1]; kind = 1
-else:            references = entity_origin_offsets[e];     kind = 2
-off = reserve(6)
-push SoundRecord{off, references, kind, number}
+if 1 <= e <= 32: origin = player_tracks[e - 1].origins; kind = 1
+else:            origin = entity_origins[e];            kind = 2
+for i in 0..3: code_u16(SOUND_ORIGIN, [i | kind << 2, number], origin[i].last)     // section 5.1
 ```
 
-`references` are copied at this moment: the latest origin offsets of that player
-or entity in this segment, or `NO_OFFSET`.
+`origin[i].last` is the latest 16-bit coordinate of that player or entity on
+axis `i` in this segment: 0 before the first, and a float coordinate does
+not change it (section 5.2).
 
 ### 4.10 temp entity (`SegmentWalker::temp_entity`)
 
@@ -787,13 +760,11 @@ if c != 2:
     return
 if t in {TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3}:       // beams
     e = code_blob_bytes(TEMP_ENTITY_MISC, 2)
-    references = (1 <= e <= 32) ? player_origin_offsets[e - 1] : [NO_OFFSET] * 3
-    off = reserve(12); push TempEntityRecord{off, references, t}
-elif t in {TE_GUNSHOT, TE_BLOOD}:
-    code_blob_byte(TEMP_ENTITY_MISC)
-    off = reserve(6); push TempEntityRecord{off, [NO_OFFSET] * 3, t}
+    origin = (1 <= e <= 32) ? last of player_tracks[e - 1].origins : [0, 0, 0]
+    temp_entity_beam(t, origin)                                  // section 5.6
 else:
-    off = reserve(6); push TempEntityRecord{off, [NO_OFFSET] * 3, t}
+    if t in {TE_GUNSHOT, TE_BLOOD}: code_blob_byte(TEMP_ENTITY_MISC)
+    temp_entity_point(t)                                         // section 5.6
 ```
 
 ### 4.11 Hidden payloads (`SegmentWalker::hidden_payload`)
@@ -820,8 +791,8 @@ type 1 per player input when usercmd recording is on (`sv_user.c`
 `SV_DebugClientCommand`), 23 bytes: player u8, dropnum u8, msec u8, pitch,
 yaw and roll as f32le, forward, side and up moves as i16le, buttons u8,
 impulse u8. Every block of type 1 and length 23 is coded so, field by field
-into stream `USERCMD`, whatever its bytes; its angles on the 360/65536 grid go to
-the numeric group of section 5 (stream `USERCMD_ANGLE`). The context's kind is in
+into stream `USERCMD`, whatever its bytes; its angles on the 360/65536 grid are
+numeric fields (section 5.6, stream `USERCMD_ANGLE`). The context's kind is in
 bits 12-15:
 
 ```
@@ -835,11 +806,9 @@ usercmd():
     grid = symbol(USERCMD, (3 << 12) | s.grid)                           // not written
     if grid > 7: error; return
     s.grid = grid
-    off = p
     for a in 0..3:
-        if grid & (1 << a): reserve(4)                           // angle a, section 5
+        if grid & (1 << a): usercmd_grid_angle(a, usercmd_tracks[player][a])     // section 5.6
         else: for k in 0..4: code_symbol(USERCMD, (4 << 12) | (a << 2) | k)
-    if grid != 0: push UsercmdRecord{pitch_offset = off, number = player, grid_axes = grid}
     for m in 0..3:
         lo = code_symbol(USERCMD, (5 << 12) | (m << 8) | (s.moves[m] & 0xff))
         hi = code_symbol(USERCMD, (6 << 12) | (m << 8) | lo)
@@ -859,45 +828,40 @@ four bytes. A type-1 block of another length goes to `HIDDEN_MISC` like every
 other block. A segment without usercmd blocks has neither `USERCMD` nor
 `USERCMD_ANGLE` in its table.
 
-## 5. Numeric groups (`numeric.rs`)
+## 5. Numeric fields (`numeric.rs`, `walker.rs`)
 
-The walk (section 4) leaves every numeric field of the segment as a reserved,
-unwritten slot and appends a record for it to one of five record lists:
-player infos, packet entities, sounds, temp entities and usercmds. After
-the walk, the numeric groups fill these slots. A group iterates one record
-list in walk order; for each value it computes a prediction `pred` and a
-feature vector `f` (up to 4 values, u8 each) from group-local state, takes a residual
-`r` from its stream with context `numeric_context(stream, f)` (section 6.4),
-writes `pred + r` at the slot's offset and updates its state.
+A numeric field is coded where it stands in the walk (section 4). The
+walker computes a prediction `pred` and a feature vector `f` (up to 4
+values, u8 each) from the state of the field's player or entity, takes a
+residual `r` from the field's stream with context
+`numeric_context(stream, f)` (section 6.4), writes `pred + r` at the cursor
+and updates the state.
 
-The groups (`numeric.rs:GROUPS`, `Group::streams`):
-
-| Group | Streams | Record list |
+| Field | Streams | Coded by |
 |---|---|---|
-| `PlayerOrigin(a)`, a = 0..2 | 17 + a (16-bit), 28 + a (float) | player infos |
-| `PlayerAngle(a)`, a = 0..2 | 20 + a | player infos |
-| `EntityOrigin(a)`, a = 0..2 | 23 + a (16-bit), 31 + a (float) | packet entities |
-| `UsercmdAngles` | 34 | usercmds |
-| `Sound` | 26 | sounds |
-| `TempEntity` | 27 | temp entities |
+| player origin, axis a = 0..2 | 17 + a (16-bit), 28 + a (float) | `player_origins_and_angles` (5.3) |
+| player angle, axis a = 0..2 | 20 + a | `player_origins_and_angles` (5.4) |
+| entity origin, axis a = 0..2 | 23 + a (16-bit), 31 + a (float) | `entity_origin` (5.5) |
+| usercmd angle | 34 | `usercmd_grid_angle` (5.6) |
+| sound origin | 26 | `sound` (4.9) |
+| temp-entity origin | 27 | `temp_entity_beam`, `temp_entity_point` (5.6) |
 
-Every group has its own state, starting from zero, even where two groups
-compute the same values (the frame times of the player groups). The
-`Sound` and `TempEntity` groups read coordinates that the origin groups
-write (section 5.6), so they run after all other groups; the other groups are
-independent of each other and may run in any order, also in parallel. The
-reference runs them in `GROUPS` order after the walk (`segment.rs:decode`).
+The state of this section is walker state (4.3): fresh for every segment,
+all zero.
 
-### 5.1 Value write rules (`numeric.rs:code_u16`, `code_u32`)
+### 5.1 Value write rules (`SegmentWalker::code_u16`, `code_u32`)
 
-* 16-bit field: `v = (pred + (r as u16)) mod 2^16`, written u16le at the
-  slot. The residual kept as state is `(r as u16) as i16 as i32`.
-* 32-bit field: `v = (pred + (r as u32)) mod 2^32`, written u32le. The
-  residual kept as state is `r`.
-* Every slot lies inside the segment's output: `reserve` checked it
-  (section 4).
+`r` is the next value of `stream` under `numeric_context(stream, f)`
+(section 6.4); an absent stream is an error.
 
-### 5.2 Prediction helpers (`numeric.rs:time_deltas`, `predict_time_scaled`; `math.rs:div_round`)
+* `code_u16(stream, f, pred)`: `v = (pred + (r as u16)) mod 2^16`, written
+  u16le at the cursor (`p += 2`). Returns `v` and the residual kept as
+  state, `(r as u16) as i16 as i32`.
+* `code_u32(stream, f, pred)`: `v = (pred + (r as u32)) mod 2^32`, written
+  u32le at the cursor (`p += 4`). Returns `v` and the residual kept as
+  state, `r`.
+
+### 5.2 Tracks and prediction helpers (`numeric.rs:AxisTrack`, `FloatTrack`, `time_deltas`; `math.rs:div_round`)
 
 ```
 time_deltas(frame_times = (last, previous), t) -> (now, before):
@@ -905,159 +869,152 @@ time_deltas(frame_times = (last, previous), t) -> (now, before):
     before = (last - previous) as i32
     frame_times = (t, last)
 
-predict_time_scaled(last u16, previous u16, now, before) -> u16:
-    velocity = (last - previous) as i16 as i32
-    if now == before or before <= 0 or now < 0:
-        return last + (velocity as u16)                              // mod 2^16
-    return last + (div_round(velocity * min(now, 32767), min(before, 32767)) as u16)
-
 div_round(a i32, b i32 > 0) -> i32:          // halves round away from zero
     n = |a| + b / 2                          // u32
     q = n / b                                // floor
     return a < 0 ? -q : q
 ```
 
-`AxisTrack` (per player or entity and axis, all zero initially): `last,
-previous, before_previous: u16; residual: i32; float_last_bits,
-float_previous_bits: u32; float_residual_bits: i32`. The 16-bit and the
-float fields are two states: a coded coordinate updates the one of its
-width, and an origin left out of its update holds both
-(`numeric.rs:AxisTrack::hold`):
-
-```
-hold(track):
-    previous = last; residual = 0
-    float_previous_bits = float_last_bits; float_residual_bits = 0
-```
-
-### 5.3 Player origins: streams 17-19 and 28-30 (`player_origin_step`)
-
-Group `PlayerOrigin(a)`. State: `AxisTrack` and `frame_times` per player
-number (256 each). For each player info record `p` (fields of section 4:
-`offset`, `time`, `flags`, `number`, `has_float_coords`), first
-`(now, before) = time_deltas(frame_times[p.number], p.time)`, for every
-record of that player whatever its flags; then with `s = tracks[p.number]`
-and `sent = p.flags & (1 << a)`:
-
-```
-if sent:
-    earlier = popcount(p.flags & ((1 << a) - 1))
-    if p.has_float_coords:                              // stream 28 + a
-        offset = p.offset + 4 * earlier
-        pred   = float_last_bits + (float_last_bits - float_previous_bits)   // u32 wrapping
-        f      = [residual_bucket(float_residual_bits), a]
-        v, r'  = 32-bit field (offset, pred, f)
-        float_previous_bits = float_last_bits; float_last_bits = v; float_residual_bits = r'
-    else:                                               // stream 17 + a
-        offset   = p.offset + 2 * earlier
-        pred     = predict_time_scaled(last, previous, now, before)
-        velocity = (last - previous) as i16 as i32
-        f        = [residual_bucket(residual), residual_bucket(velocity)]
-        v, r'    = 16-bit field (offset, pred, f); residual = r'
-        previous = last; last = v
-else:
-    hold(s)
-```
-
-### 5.4 Player angles: streams 20-22 (`player_angle_step`)
-
-Group `PlayerAngle(a)`. State and `time_deltas` as in section 5.3, separate from
-the origin groups'. For each player info record `p`, with `s =
-tracks[p.number]`:
-
-```
-if p.flags & (8 << a):
-    pred   = predict_time_scaled(last, previous, now, before)
-    width  = p.has_float_coords ? 4 : 2
-    offset = p.offset + width * popcount(p.flags & 7)
-                      + 2 * popcount((p.flags >> 3) & ((1 << a) - 1))
-    previous_velocity = (previous - before_previous) as i16 as i32
-    f      = [residual_bucket(residual), residual_bucket(previous_velocity)]
-    v, r'  = 16-bit field (offset, pred, f); residual = r'
-else:
-    residual = 0; v = last
-before_previous = previous; previous = last; last = v
-```
-
-Angles are 16-bit whether the coordinates are float or not.
-
-### 5.5 Entity origins: streams 23-25 and 31-33 (`entity_origin_step`)
-
-Group `EntityOrigin(a)`. State: `AxisTrack` per entity number (2048: a
-number is at most 511 + 512 + 1024). For each packet entity record `e`
-(fields of section 4: `offset`, `number`, `bits`; `bits` holds `1 << 2i` for
-origin `i` sent, `2 << 2i` for angle `i` sent, and `PE_IN_PREVIOUS` (64),
-`PE_FLOAT` (128), `PE_WIDE` (256)), with `s = tracks[e.number]`:
-
-```
-if e.bits & (1 << (2 * a)):                                      // origin a sent
-    offset = origin_offsets(e)[a]
-    if e.bits & PE_FLOAT:                                        // stream 31 + a
-        pred  = float_last_bits + (float_last_bits - float_previous_bits)
-        f     = [residual_bucket(float_residual_bits), a]
-        v, r' = 32-bit field (offset, pred, f)
-        float_previous_bits = float_last_bits; float_last_bits = v; float_residual_bits = r'
-    else:                                                        // stream 23 + a
-        velocity = (last - previous) as i16 as i32
-        pred     = last + (velocity as u16)
-        in_previous = (e.bits & PE_IN_PREVIOUS) ? 1 : 0
-        f     = [residual_bucket(residual), residual_bucket(velocity), in_previous]
-        v, r' = 16-bit field (offset, pred, f); residual = r'
-        previous = last; last = v
-else:
-    hold(s)
-```
-
-`origin_offsets(e)` (`walker.rs:PacketEntityRecord::origin_offsets`):
-`coord = PE_FLOAT ? 4 : 2`, `angle = PE_WIDE ? 2 : 1`, `pos = e.offset`;
-for `i` in 0..3: if `bits & (1 << 2i)`: `o[i] = pos; pos += coord`; if
-`bits & (2 << 2i)`: `pos += angle`.
-
-### 5.6 Usercmd angles (34), sounds (26), temp entities (27)
-
-**Usercmd angles, stream 34** (`numeric.rs:usercmd_angles`). State: three
-`AxisTrack`s per player number (256). For each usercmd record `u` (section 4:
-`pitch_offset`, `number`, `grid_axes`), for `a` in 0..3 with `u.grid_axes &
-(1 << a)` (other axes are skipped and their state is untouched), with `s =
-tracks[u.number][a]`:
+`AxisTrack`: the latest 16-bit values of one player or entity on one axis.
+`last, previous, before_previous: u16; residual: i32` (the residual of a
+16-bit field: it fits 16 bits).
 
 ```
 velocity          = (last - previous) as i16 as i32
 previous_velocity = (previous - before_previous) as i16 as i32
-pred  = last + (velocity as u16)                                 // mod 2^16
-f     = [residual_bucket(residual), residual_bucket(velocity),
-         residual_bucket(previous_velocity), a]
-v     = pred + (r as u16)                                        // the grid value
-write grid_f32(v) as u32le at u.pitch_offset + 4a
-residual = (v - pred) as i16 as i32
-before_previous = previous; previous = last; last = v
+push(v, r):  before_previous = previous; previous = last; last = v; residual = r
+hold():      push(last, 0)                   // a value left out of its update did not change
+predict_linear() -> u16:
+    return last + (velocity as u16)                                  // mod 2^16
+predict_time_scaled(now, before) -> u16:
+    if now == before or before <= 0 or now < 0: return predict_linear()
+    return last + (div_round(velocity * min(now, 32767), min(before, 32767)) as u16)
+```
+
+`FloatTrack`: the latest float coordinates of one player or entity on one
+axis, as f32 bit patterns. `last_bits, previous_bits: u32; residual: i32`.
+
+```
+push(v, r):  previous_bits = last_bits; last_bits = v; residual = r
+hold():      push(last_bits, 0)
+
+float_origin(stream, a, sent, track):
+    if not sent: track.hold(); return
+    pred = last_bits + (last_bits - previous_bits)                   // u32 wrapping
+    f    = [residual_bucket(track.residual), a]
+    v, r = code_u32(stream, f, pred)
+    track.push(v, r)
+```
+
+A player or entity has an `AxisTrack` and a `FloatTrack` per origin axis.
+An origin update, coded or left out, goes to the track of the coordinate
+width in force (`protocol.has_float_coords`, 4.1); the track of the other
+width is not touched, and is found as it was left when a server data brings
+its width back.
+
+### 5.3 Player origins: streams 17-19 and 28-30 (`SegmentWalker::player_origins_and_angles`)
+
+Called by `player_info` (4.7) with the player number and flags of the
+record. `time_deltas` runs for every record of the player, whatever its
+flags.
+
+```
+player_origins_and_angles(number, flags):
+    t = player_tracks[number]
+    (now, before) = time_deltas(t.frame_times, time)
+    for a in 0..3:
+        sent = flags & (DF_ORIGIN << a)
+        if protocol.has_float_coords:                   // stream 28 + a
+            float_origin(28 + a, a, sent, player_float_origins[number][a])
+        elif not sent:
+            t.origins[a].hold()
+        else:                                           // stream 17 + a
+            s    = t.origins[a]
+            pred = s.predict_time_scaled(now, before)
+            f    = [residual_bucket(s.residual), residual_bucket(s.velocity)]
+            v, r = code_u16(17 + a, f, pred)
+            s.push(v, r)
+    for a in 0..3: player angle a                       // section 5.4
+```
+
+`pred` and `f` are computed before the push.
+
+### 5.4 Player angles: streams 20-22
+
+The second loop of `player_origins_and_angles`, with the same `now` and
+`before`:
+
+```
+s = t.angles[a]
+if not flags & (DF_ANGLES << a):
+    s.hold()
+else:
+    pred = s.predict_time_scaled(now, before)
+    f    = [residual_bucket(s.residual), residual_bucket(s.previous_velocity)]
+    v, r = code_u16(20 + a, f, pred)
+    s.push(v, r)
+```
+
+Angles are 16-bit whether the coordinates are float or not.
+
+### 5.5 Entity origins: streams 23-25 and 31-33 (`SegmentWalker::entity_delta`)
+
+Called by `entity_delta` (4.8) for every axis of every entity word, with
+the extended entity number (at most 511 + 512 + 1024 = 2047):
+
+```
+entity_origin(number, a, sent, in_previous):
+    if protocol.has_float_coords:                       // stream 31 + a
+        float_origin(31 + a, a, sent, entity_float_origins[number][a])
+    elif not sent:
+        entity_origins[number][a].hold()
+    else:                                               // stream 23 + a
+        s    = entity_origins[number][a]
+        f    = [residual_bucket(s.residual), residual_bucket(s.velocity), in_previous ? 1 : 0]
+        v, r = code_u16(23 + a, f, s.predict_linear())
+        s.push(v, r)
+```
+
+Entity origins use no time.
+
+### 5.6 Usercmd angles (34), sounds (26), temp entities (27)
+
+**Usercmd angles, stream 34** (`SegmentWalker::usercmd_grid_angle`). Called
+by `usercmd` (4.11) for an angle on the grid, with `s =
+usercmd_tracks[player][a]`; the track of an angle off the grid is not
+touched.
+
+```
+usercmd_grid_angle(a, s):
+    f    = [residual_bucket(s.residual), residual_bucket(s.velocity),
+            residual_bucket(s.previous_velocity), a]
+    pred = s.predict_linear()
+    r    = the next value of stream 34 under numeric_context(34, f)
+    g    = pred + (r as u16)                                         // the grid value, mod 2^16
+    write grid_f32(g) as u32le at the cursor; p += 4
+    s.push(g, (g - pred) as i16 as i32)
 ```
 
 `grid_f32(g)` (`math.rs:grid_f32`) is the f32 `(g as i16) * 45/8192`,
 which is exact.
 
-**Sounds, stream 26** (`numeric.rs:sound_origins`). For each sound record
-`s` (section 4: `offset`, `references[3]`, `kind`, `number`), for `i` in 0..3:
-`pred = references[i] == NO_OFFSET ? 0 : the u16le already decoded at references[i]`,
-`f = [i | kind << 2, number]`, 16-bit field at `offset + 2i`.
+**Sounds, stream 26**: three `code_u16`, each predicted from the latest
+16-bit origin of the sound's player or entity (4.9).
 
-**Temp entities, stream 27** (`numeric.rs:temp_entity_origins`). State:
-`last[3]` u16, zero, across the segment. For each temp entity record `t`
-(section 4: `offset`, `references[3]`, `kind`):
+**Temp entities, stream 27** (`SegmentWalker::temp_entity`), with the
+walker's `temp_entity_last[3]`:
 
 ```
-if t.kind in {TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3}:   // 5, 6, 9
-    for i in 0..3: start[i] = 16-bit field (offset + 2i,
-                       pred = references[i] as for sounds, f = [i | 1 << 2, kind])
-    for i in 0..3: last[i]  = 16-bit field (offset + 6 + 2i,
-                       pred = start[i], f = [i | 2 << 2, kind])
-else:
-    for i in 0..3: last[i]  = 16-bit field (offset + 2i,
-                       pred = last[i], f = [i, kind])
+temp_entity_beam(kind, origin):                 // TE_LIGHTNING_1, _2, _3 (5, 6, 9)
+    for i in 0..3: start[i], _ = code_u16(27, [i | 1 << 2, kind], origin[i])
+    for i in 0..3: temp_entity_last[i], _ = code_u16(27, [i | 2 << 2, kind], start[i])
+
+temp_entity_point(kind):
+    for i in 0..3: temp_entity_last[i], _ = code_u16(27, [i, kind], temp_entity_last[i])
 ```
 
-`references` point only at 16-bit player or entity origin slots, written by the
-origin groups before these two groups run.
+`origin` is the latest 16-bit origin of the player the beam starts at, or
+zeros (4.10).
 
 ## 6. Entropy coding (`rans.rs`)
 
@@ -1080,7 +1037,7 @@ rans_len u32 | rans[rans_len] | extra (rest of the body)
 
 `rans` is the rANS stream (section 6.4). `extra` holds the mantissa
 bits of a numeric stream (section 6.4); for a structural stream it must be empty
-(`rans.rs:unpack`, `ByteDecoder::new`).
+(`rans.rs:unpack`, `StreamDecoder::is_done`).
 
 ### 6.2 Model (`rans.rs:read_model_header`, `read_model`)
 
@@ -1100,8 +1057,9 @@ tables    := (own_count + 1) x q[alphabet]     // one byte per symbol
   bytes long: an entry's `raw_len` must be that, with the `own_count` its
   first four bytes hold.
 
-Each table is a vector of log-quantized counts `q[s]`, 0 meaning absent;
-every byte value is valid. The first table is the fallback: it serves
+Each table is a vector of log-quantized counts `q[s]`: 0 means absent, and
+65 is the largest (what `quantize` gives for a count of 2^32 - 1, section
+8); a larger count is an error. The first table is the fallback: it serves
 every context that is not in `contexts`. Table `i + 1` serves context
 `contexts[i]`.
 
@@ -1113,10 +1071,10 @@ STEP_POWERS = [65536, 92682]                  // 2^(k/2) in 16.16 fixed point
 quantized_weight(q) -> u64:
     if q == 0: return 0
     step = q - 1; octave = step / 2; k = step % 2
-    return (octave >= 40) ? (2^64 - 1) >> 8 : STEP_POWERS[k] << octave
+    return STEP_POWERS[k] << octave           // q <= 65: at most 2^48
 
 normalize(w[0..alphabet]) -> f[0..alphabet]   (total 4096):
-    total = sum of w (u128)
+    total = sum of w                          // u64: at most 256 weights
     if total == 0: return all zeros
     sum = 0
     for s: if w[s] > 0: f[s] = max(floor(w[s] * 4096 / total), 1); sum += f[s]
@@ -1130,6 +1088,8 @@ normalize(w[0..alphabet]) -> f[0..alphabet]   (total 4096):
             f[b] -= take; diff += take
     return f
 ```
+
+Every value of `normalize` fits 64 bits: `w[s] * 4096` is at most 2^60.
 
 `freq = normalize(quantized_weight(q[s]))`, `cumulative[0] = 0`,
 `cumulative[s + 1] = cumulative[s] + freq[s]`. A table is **empty** if no
@@ -1158,10 +1118,10 @@ decode(context):
 keep it there. A symbol with `freq` 4096 leaves `x` as it is and reads no
 word, so a decoder may return it without the step.
 
-**Structural streams** (`ByteDecoder`): `context = walker_context & 0xFFFF`
+**Structural streams** (`StreamDecoder::symbol`): `context = walker_context & 0xFFFF`
 (every walker context fits 16 bits, section 4); the symbol is the byte.
 
-**Numeric streams** (`NumericDecoder`): `context = numeric_context(stream,
+**Numeric streams** (`StreamDecoder::value`): `context = numeric_context(stream,
 f)`; the symbol is the bucket `b`, 0 to 64. Then
 
 ```
@@ -1176,7 +1136,8 @@ bit `k % 8` of byte `k / 8`); a bit past the end is an over-read
 result; `get(0) = 0`. Buckets 63 and 64 (n = 32) give `m` up to 2^32 - 1;
 `m` is reinterpreted as i32 before the sign, and the negation wraps.
 
-`numeric_context(stream, f)` (`rans.rs:numeric_context`), with `c(v, m) =
+`numeric_context(stream, f)` (built where `walker.rs` codes each field; `lz.rs:bucket_context`
+for streams 35 and 36), with `c(v, m) =
 min(v, m)`:
 
 | Stream | Context |
@@ -1196,9 +1157,9 @@ A structural or numeric stream is complete only if the state is back at
 which is therefore even and at least 4). A numeric stream's mantissa bits
 must also end within the last byte of `extra`:
 `ceil(bits_read / 8) == len(extra)`, at most 7 padding bits
-(`ByteDecoder::is_done`, `NumericDecoder::is_done`, `BitReader::is_finished`).
+(`StreamDecoder::is_done`, `BitReader::is_finished`).
 An incomplete stream is an error. No stream stores how many symbols it
-holds: the walk and the numeric groups decide how many they read.
+holds: the walk decides how many it reads.
 
 ### 6.6 Blob tokens (`lz.rs`)
 
@@ -1282,6 +1243,7 @@ Each hostile vector breaks one rule only.
 | stream table | ids strictly increasing | section 3 |
 | blob streams of a segment | at most `2 * raw_len` bytes together | section 3 |
 | own tables per model | at most 65536 | section 6 |
+| quantized count | at most 65 | section 6 |
 
 With these, every size a decoder allocates is bounded: a segment yields at most 2^20
 bytes and takes at least its 16 header bytes of the file, its blob bytes are at most
@@ -1438,8 +1400,8 @@ its blob parser (rule 10) on its own.
     else (0, 7): `None`. A frame that runs past the end of `src` is `None`. The walk of a
     segment takes frames while `frame_len` is `Some`; the rest of the segment is its
     tail. Rules 2 and 9 cut the demo and sum `duration_ms` with it.
-12. **Walk** (`walker.rs`): the encoder runs the walk of section 4 over the source bytes
-    and codes what the decoder reads there. What section 4 does not say:
+12. **Walk** (`walker.rs`): the encoder runs the walk of sections 4 and 5 over the source
+    bytes and codes what the decoder reads there. What they do not say:
 
     * **Sizer**: the rows of `command_body_size` (section 4.2) for the commands the walker
       decodes field by field, sized to choose between walking a command and escaping:
@@ -1479,25 +1441,20 @@ its blob parser (rule 10) on its own.
 
 ## 9. Notes for implementers
 
-1. **Record lists are bounded by `raw_len`.** Every record follows at least one byte its
-   command wrote: the player number of a player record, the entity word of an entity
-   record, the channel word of a sound, the type of a temp entity, the player of a
-   usercmd.
-2. **Arithmetic that could overflow on invalid input** wraps in the reference: time
+1. **Arithmetic that could overflow on invalid input** wraps in the reference: time
    differences (`numeric.rs:time_deltas`), time-scaled predictions
-   (`predict_time_scaled`) and residuals. Use wrapping 32-bit and 16-bit arithmetic
-   (in Go: compute in `int32`/`uint16` and let it wrap before any clamp).
-3. **Coordinate offsets may point at 4-byte float fields** when the protocol switched to
-   float coordinates earlier in the same segment (an `svc_serverdata` mid-segment) and
-   back; sounds and temp entities then read the low 16 bits of that field as their
-   prediction. `observe_server_data` takes effect within a payload: later commands of the
-   same payload use the new coordinate width.
-4. **Time is segment-relative**: every walker and predictor state starts fresh in each
+   (`AxisTrack::predict_time_scaled`) and residuals. Use wrapping 32-bit and 16-bit
+   arithmetic (in Go: compute in `int32`/`uint16` and let it wrap before any clamp).
+2. **A server data takes effect within its payload**: later commands of the same payload
+   use the new coordinate width. A match with the other width leaves the tracks of this
+   one as they were (section 5.2), and a sound or beam is predicted from the latest
+   16-bit origin whatever happened since.
+3. **Time is segment-relative**: every walker and predictor state starts fresh in each
    segment, time at 0. A player's second record in a segment measures its previous
    time delta from 0.
-5. **Per-player timing**: player origins and angles keep the last two frame times per
-   player and advance them on every record, sent or not. Entity origins use no time.
-6. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
+4. **Per-player timing**: a player's origins and angles share the last two frame times
+   of the player, advanced on every record, sent or not. Entity origins use no time.
+5. **The demo's CRC-32 need not be hashed**: it follows from the segments' checked
    CRC-32s and lengths (zlib's `crc32_combine`), as the reference does
    (`decode.rs:Decoder::decode_batch`). Hashing the output again gives the same value.
 

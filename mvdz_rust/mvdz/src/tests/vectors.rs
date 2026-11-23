@@ -106,34 +106,56 @@ fn token_body(
     blob_counts: &[(usize, usize)],
     tokens: &crate::lz::Tokens,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let (models, ids, body) = token_models(structural, blob_counts, tokens)?;
+    Ok((crate::segment::models_body(&models, &ids), body))
+}
+
+/// The models by stream id before they are coded, their ids, and the transform body.
+type TokenModels = (Vec<Option<crate::rans::FileModel>>, Vec<usize>, Vec<u8>);
+
+/// As [`token_body`], with the models not yet coded.
+fn token_models(
+    structural: &[(usize, &[u8])],
+    blob_counts: &[(usize, usize)],
+    tokens: &crate::lz::Tokens,
+) -> anyhow::Result<TokenModels> {
     use crate::rans;
-    use crate::streams::{LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL};
+    use crate::streams::{LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL, is_structural};
     fn file_model(alphabet: usize, symbols: &[u8], contexts: &[u16]) -> rans::FileModel {
         let mut tally = rans::Tally::new(alphabet);
         tally.add(symbols, contexts);
         tally.file_model()
     }
     const UNCODABLE: &str = "every symbol has a code";
+    let structural_streams: Vec<(usize, rans::StreamSymbols)> = (structural.iter())
+        .map(|&(id, symbols)| {
+            let stream = rans::StreamSymbols {
+                symbols: symbols.to_vec(),
+                contexts: vec![0; symbols.len()],
+                extra: Vec::new(),
+            };
+            (id, stream)
+        })
+        .collect();
+    let token_streams = [
+        (LZ_LITERAL, &tokens.literals),
+        (LZ_LENGTH, &tokens.lens),
+        (LZ_DISTANCE, &tokens.dists),
+    ];
+    let streams = (structural_streams.iter())
+        .map(|(id, stream)| (*id, stream))
+        .chain(token_streams);
     // (id, model, body)
     let mut coded: Vec<(usize, rans::FileModel, Vec<u8>)> = Vec::new();
-    let structural_with_literals = (structural.iter())
-        .map(|&(id, symbols)| (id, symbols, vec![0u16; symbols.len()]))
-        .chain([(
-            LZ_LITERAL,
-            &tokens.literals[..],
-            tokens.literal_contexts.clone(),
-        )]);
-    for (id, symbols, contexts) in structural_with_literals {
-        if !symbols.is_empty() {
-            let model = file_model(256, symbols, &contexts);
-            let body = rans::encode_bytes(symbols, &contexts, &model).context(UNCODABLE)?;
-            coded.push((id, model, body));
-        }
-    }
-    for (id, numeric) in [(LZ_LENGTH, &tokens.lens), (LZ_DISTANCE, &tokens.dists)] {
-        if !numeric.symbols.is_empty() {
-            let model = file_model(rans::NUMERIC_ALPHABET, &numeric.symbols, &numeric.contexts);
-            let body = rans::encode_num(numeric, &model).context(UNCODABLE)?;
+    for (id, stream) in streams {
+        if !stream.symbols.is_empty() {
+            let alphabet = if is_structural(id) {
+                256
+            } else {
+                rans::NUMERIC_ALPHABET
+            };
+            let model = file_model(alphabet, &stream.symbols, &stream.contexts);
+            let body = rans::encode_stream(stream, &model).context(UNCODABLE)?;
             coded.push((id, model, body));
         }
     }
@@ -155,7 +177,7 @@ fn token_body(
         entries,
         bodies,
     };
-    Ok((crate::segment::models_body(&models, &ids), table.build()))
+    Ok((models, ids, table.build()))
 }
 
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
@@ -471,6 +493,7 @@ fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> 
 }
 
 fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
+    use crate::streams::{LZ_LENGTH, TAIL};
     const OVER_ONE_PER_CONTEXT: u32 = (1 << 16) + 1;
     let usercmd = usercmd_demo();
     let file = compress(&several_segments(&usercmd))?;
@@ -577,6 +600,21 @@ fn models_block(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()>
         "tables-raw-size",
         with_entries(&edited),
         "a model declaring 4 MiB of raw bytes: the models together over the limit",
+    );
+    // three literals: the lengths' model has one table with one symbol, which has every
+    // slot whatever its count, so only the limit refuses the file
+    let literals = b"abc";
+    let tokens = crate::lz::tokens(literals);
+    let (mut literal_models, ids, body) = token_models(&[], &[(TAIL, literals.len())], &tokens)?;
+    let lengths = (literal_models[LZ_LENGTH].as_mut()).context("a model of the lengths")?;
+    let no_own_contexts = 0u32.to_le_bytes();
+    assert!(lengths.bytes.starts_with(&no_own_contexts) && lengths.bytes[4] > 0);
+    lengths.bytes[4] = crate::math::MAX_QUANTIZED as u8 + 1;
+    let models_body = crate::segment::models_body(&literal_models, &ids);
+    add(
+        "tables-quantized",
+        one_segment(literals, &(models_body, body))?,
+        "a quantized count of 66, over the largest, for the only symbol of a table",
     );
     let own_count_only = OVER_ONE_PER_CONTEXT.to_le_bytes();
     let block = crate::rans::write_models_block(&[(entries[0].stream, &own_count_only)]);
@@ -950,6 +988,87 @@ fn second_match_starts_from_its_own_server_data() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Three matches in one segment: 16-bit coordinates, float (MVD1), 16-bit again, then a
+/// sound before the player's next origin.
+fn width_switch_demo() -> Vec<u8> {
+    const MVD_PEXT_1_FLOAT_COORDS: u32 = 1 << 0;
+    const ALL_ORIGINS: u16 = 0b111;
+    const FIRST_ORIGIN: u16 = 0b001;
+    const PLAYER_1_VOICE: u16 = 1 << 3 | 1;
+    let server_data = |extensions: &[&[u8]]| {
+        let mut parts: Vec<&[u8]> = extensions.to_vec();
+        let tail = [
+            28u32.to_le_bytes().to_vec(),
+            1u32.to_le_bytes().to_vec(),
+            c_string("qw"),
+            0u32.to_le_bytes().to_vec(),
+            c_string("width switch"),
+            vec![0; 40],
+        ];
+        parts.extend(tail.iter().map(Vec::as_slice));
+        message(11, &parts)
+    };
+    let position = |player: u8, step: i16| [10 * step + 256 * i16::from(player), 3 * step, 24];
+    let coords = |origin: [i16; 3]| origin.map(i16::to_le_bytes).concat();
+    let float_coords =
+        |origin: [i16; 3]| origin.map(|coord| f32::from(coord).to_le_bytes()).concat();
+    let player_info = |player: u8, flags: u16, origin: &[u8]| {
+        message(42, &[&[player], &flags.to_le_bytes(), &[0], origin])
+    };
+    let mut demo = Demo(Vec::new());
+    demo.frame(0, 6, &server_data(&[]));
+    for step in 0..40 {
+        let mut payload = Vec::new();
+        for player in 0..2 {
+            let origin = coords(position(player, step));
+            payload.extend(player_info(player, ALL_ORIGINS, &origin));
+        }
+        demo.frame(13, 6, &payload);
+    }
+    let mvd1_float_coords = MVD_PEXT_1_FLOAT_COORDS.to_le_bytes();
+    demo.frame(0, 6, &server_data(&[b"MVD1", &mvd1_float_coords]));
+    for step in 40..60 {
+        let mut payload = Vec::new();
+        for player in 0..2 {
+            let origin = position(player, step);
+            payload.extend(if step % 2 == 0 {
+                player_info(player, ALL_ORIGINS, &float_coords(origin))
+            } else {
+                player_info(player, FIRST_ORIGIN, &f32::from(origin[0]).to_le_bytes())
+            });
+        }
+        demo.frame(13, 6, &payload);
+    }
+    demo.frame(0, 6, &server_data(&[]));
+    let sound = message(
+        6,
+        &[
+            &PLAYER_1_VOICE.to_le_bytes(),
+            &[1],
+            &coords(position(0, 39)),
+        ],
+    );
+    demo.frame(13, 6, &sound);
+    for step in 40..60 {
+        let mut payload = Vec::new();
+        for player in 0..2 {
+            let origin = coords(position(player, step));
+            payload.extend(player_info(player, ALL_ORIGINS, &origin));
+        }
+        demo.frame(13, 6, &payload);
+    }
+    demo.0
+}
+
+#[test]
+fn width_switch_demo_is_walked() -> anyhow::Result<()> {
+    let demo = width_switch_demo();
+    let file = compress(&demo)?;
+    assert_eq!(unstructured_len(&file)?, 0);
+    assert_eq!(decompress(&file, 1)?, demo);
+    Ok(())
+}
+
 fn truncated_match_demo() -> Vec<u8> {
     let small = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     let mut demo = small[..small.len() - 3].to_vec();
@@ -1080,6 +1199,13 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         encode(&two_matches)?,
         &two_matches,
         "synthetic demo of two matches: float coordinates (MVD1), then a server data without extensions, which resets the protocol state",
+    );
+    let width_switch = width_switch_demo();
+    add(
+        "width-switch.normal.mvdz",
+        encode(&width_switch)?,
+        &width_switch,
+        "synthetic demo of three matches in one segment: 16-bit coordinates, float (MVD1), 16-bit again, then a sound before the player's next origin",
     );
     let truncated_match = truncated_match_demo();
     add(

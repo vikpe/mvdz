@@ -1,124 +1,50 @@
-//! The structural walker, one routine both ways. Numeric fields are only reserved and
-//! listed in [`RecordLists`]; `numeric.rs` fills them in after the walk.
+//! The walker, one routine both ways: every field of a segment in demo order, the numeric
+//! ones as residuals against the predictions of `numeric.rs`.
 
 use crate::fields::{read_u16, read_u32, read_usize};
-use crate::math::{byte_residual_bucket, on_grid};
+use crate::math::{byte_residual_bucket, clamped_bucket, grid_f32, on_grid};
+use crate::numeric::{AxisTrack, FloatTrack, time_deltas};
 use crate::protocol::{
     DEM_ALL, DEM_MULTIPLE, DEM_READ, DEM_SET, DEM_SINGLE, DEM_STATS, DF_ANGLES, DF_EFFECTS,
     DF_MODEL, DF_ORIGIN, DF_SKIN_NUM, DF_WEAPON_FRAME, FTE_PEXT_COLOR_MOD, FTE_PEXT_TRANS,
-    ORIGIN_ANGLE_FLAGS, ORIGIN_FLAGS, ProtocolState, SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT,
-    SVC_DAMAGE, SVC_DELTA_PACKET_ENTITIES, SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES,
-    SVC_PLAYER_INFO, SVC_PRINT, SVC_SERVER_DATA, SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT,
-    SVC_TEMP_ENTITY, SVC_UPDATE_ENTER_TIME, SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_PL,
-    SVC_UPDATE_STAT, SVC_UPDATE_STAT_LONG, TE_BLOOD, TE_GUNSHOT, TE_LIGHTNING_1, TE_LIGHTNING_2,
-    TE_LIGHTNING_3, U_COLOR_MAP, U_EFFECTS, U_FRAME, U_FTE_COLOR_MOD, U_FTE_ENTITY_DBL,
-    U_FTE_ENTITY_DBL_2, U_FTE_EVEN_MORE, U_FTE_FATNESS, U_FTE_MODEL_DBL, U_FTE_SCALE, U_FTE_TRANS,
-    U_FTE_YET_MORE, U_MODEL, U_MORE_BITS, U_SKIN, frame_len,
+    ORIGIN_ANGLE_FLAGS, ProtocolState, SND_ATTENUATION, SND_VOLUME, SVC_CENTER_PRINT, SVC_DAMAGE,
+    SVC_DELTA_PACKET_ENTITIES, SVC_NAILS, SVC_NAILS_2, SVC_PACKET_ENTITIES, SVC_PLAYER_INFO,
+    SVC_PRINT, SVC_SERVER_DATA, SVC_SET_INFO, SVC_SOUND, SVC_STUFF_TEXT, SVC_TEMP_ENTITY,
+    SVC_UPDATE_ENTER_TIME, SVC_UPDATE_FRAGS, SVC_UPDATE_PING, SVC_UPDATE_PL, SVC_UPDATE_STAT,
+    SVC_UPDATE_STAT_LONG, TE_BLOOD, TE_GUNSHOT, TE_LIGHTNING_1, TE_LIGHTNING_2, TE_LIGHTNING_3,
+    U_COLOR_MAP, U_EFFECTS, U_FRAME, U_FTE_COLOR_MOD, U_FTE_ENTITY_DBL, U_FTE_ENTITY_DBL_2,
+    U_FTE_EVEN_MORE, U_FTE_FATNESS, U_FTE_MODEL_DBL, U_FTE_SCALE, U_FTE_TRANS, U_FTE_YET_MORE,
+    U_MODEL, U_MORE_BITS, U_SKIN, frame_len,
 };
 use crate::streams::{
-    COMMAND, ENTITY_ANGLE, ENTITY_BITS, ENTITY_FRAME, ENTITY_GAP, ENTITY_HEADER, ENTITY_MISC,
-    ENTITY_MODEL, ENTITY_MORE, ESCAPE_LENGTH, FRAGS, GENERIC, HIDDEN_DAMAGE, HIDDEN_LENGTH,
-    HIDDEN_MISC, HIDDEN_TAG, HIDDEN_TYPE, MASK, NAILS, PING, PLAYER_EFFECTS, PLAYER_FLAGS,
-    PLAYER_FRAME, PLAYER_MODEL, PLAYER_NUMBER, PLAYER_SKIN, PLAYER_WEAPON_FRAME, PRINT_LEVEL, RAW,
-    SET, SOUND_CHANNEL, SOUND_FLOAT, SOUND_MISC, SOUND_NUMBER, STAT_INDEX, STAT_LONG_INDEX,
-    STAT_LONG_VALUE, STAT_VALUE, TAIL, TEMP_ENTITY_FLOAT, TEMP_ENTITY_MISC, TEMP_ENTITY_TYPE, TEXT,
-    TIME, TYPE, USERCMD,
+    COMMAND, ENTITY_ANGLE, ENTITY_BITS, ENTITY_FLOAT_ORIGIN, ENTITY_FRAME, ENTITY_GAP,
+    ENTITY_HEADER, ENTITY_MISC, ENTITY_MODEL, ENTITY_MORE, ENTITY_ORIGIN, ESCAPE_LENGTH, FRAGS,
+    GENERIC, HIDDEN_DAMAGE, HIDDEN_LENGTH, HIDDEN_MISC, HIDDEN_TAG, HIDDEN_TYPE, MASK, NAILS, PING,
+    PLAYER_ANGLE, PLAYER_EFFECTS, PLAYER_FLAGS, PLAYER_FLOAT_ORIGIN, PLAYER_FRAME, PLAYER_MODEL,
+    PLAYER_NUMBER, PLAYER_ORIGIN, PLAYER_SKIN, PLAYER_WEAPON_FRAME, PRINT_LEVEL, RAW, SET,
+    SOUND_CHANNEL, SOUND_FLOAT, SOUND_MISC, SOUND_NUMBER, SOUND_ORIGIN, STAT_INDEX,
+    STAT_LONG_INDEX, STAT_LONG_VALUE, STAT_VALUE, TAIL, TEMP_ENTITY_FLOAT, TEMP_ENTITY_MISC,
+    TEMP_ENTITY_ORIGIN, TEMP_ENTITY_TYPE, TEXT, TIME, TYPE, USERCMD, USERCMD_ANGLE,
 };
-
-pub(crate) const NO_OFFSET: u32 = u32::MAX;
 
 /// Every `context` fits in 16 bits, the rANS table key (FORMAT.md section 6.2).
 pub(crate) trait SymbolIo {
     /// `None`: the stream is absent or the context has an empty table.
     fn symbol(&mut self, stream: usize, context: u32, value: u8) -> Option<u8>;
+    /// As [`Self::symbol`], for a residual of a numeric stream.
+    fn residual(&mut self, stream: usize, context: u32, value: i32) -> Option<i32>;
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);
     fn take_blob(&mut self, stream: usize, len: usize) -> Option<&[u8]>;
     fn blob_rest(&self, stream: usize) -> &[u8];
 }
 
+/// FORMAT.md sections 5.3 and 5.4.
 #[derive(Debug, Clone, Copy, Default)]
-#[repr(C)]
-pub(crate) struct PlayerInfoRecord {
-    pub(crate) offset: u32,
-    pub(crate) time: u32,
-    pub(crate) flags: u16,
-    pub(crate) number: u8,
-    pub(crate) has_float_coords: bool,
-}
-
-pub(crate) const PE_IN_PREVIOUS: u16 = 64;
-pub(crate) const PE_FLOAT: u16 = 128;
-pub(crate) const PE_WIDE: u16 = 256;
-
-#[derive(Debug, Clone, Copy, Default)]
-#[repr(C)]
-pub(crate) struct PacketEntityRecord {
-    pub(crate) offset: u32,
-    pub(crate) number: u16,
-    pub(crate) bits: u16,
-}
-
-impl PacketEntityRecord {
-    #[inline]
-    pub(crate) fn origin_offsets(self) -> [u32; 3] {
-        let coord_width = if self.bits & PE_FLOAT != 0 { 4 } else { 2 };
-        let angle_width = if self.bits & PE_WIDE != 0 { 2 } else { 1 };
-        let mut offset = self.offset;
-        let mut offsets = [NO_OFFSET; 3];
-        for (axis, origin_offset) in offsets.iter_mut().enumerate() {
-            if self.bits & (1 << (2 * axis)) != 0 {
-                *origin_offset = offset;
-                offset += coord_width;
-            }
-            if self.bits & (2 << (2 * axis)) != 0 {
-                offset += angle_width;
-            }
-        }
-        offsets
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SoundRecord {
-    pub(crate) offset: u32,
-    pub(crate) references: [u32; 3],
-    pub(crate) kind: u8,
-    pub(crate) number: u8,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct TempEntityRecord {
-    pub(crate) offset: u32,
-    pub(crate) references: [u32; 3],
-    pub(crate) kind: u8,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct UsercmdRecord {
-    pub(crate) pitch_offset: u32,
-    pub(crate) number: u8,
-    pub(crate) grid_axes: u8,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RecordLists {
-    pub(crate) player_infos: Vec<PlayerInfoRecord>,
-    pub(crate) packet_entities: Vec<PacketEntityRecord>,
-    pub(crate) sounds: Vec<SoundRecord>,
-    pub(crate) temp_entities: Vec<TempEntityRecord>,
-    pub(crate) usercmds: Vec<UsercmdRecord>,
-}
-
-impl RecordLists {
-    pub(crate) fn for_segment(len: usize) -> Self {
-        Self {
-            player_infos: Vec::with_capacity(len / 18),
-            packet_entities: Vec::with_capacity(len / 32),
-            sounds: Vec::with_capacity(len / 400),
-            temp_entities: Vec::with_capacity(len / 400),
-            usercmds: Vec::new(),
-        }
-    }
+struct PlayerTracks {
+    origins: [AxisTrack; 3],
+    angles: [AxisTrack; 3],
+    /// Of the player's last two records.
+    frame_times: (u32, u32),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -157,12 +83,15 @@ pub(crate) struct SegmentWalker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
     pub(crate) has_error: bool,
     pub(crate) io: IO,
     pub(crate) protocol: ProtocolState,
-    records: &'a mut RecordLists,
     players: Box<[PlayerState; 256]>,
     entities: Box<[EntityState; 2048]>,
     stats: Box<[[u8; 256]; 32]>,
-    player_origin_offsets: Box<[[u32; 3]; 256]>,
-    entity_origin_offsets: Box<[[u32; 3]; 2048]>,
+    player_tracks: Vec<PlayerTracks>,
+    player_float_origins: Vec<[FloatTrack; 3]>,
+    entity_origins: Vec<[AxisTrack; 3]>,
+    entity_float_origins: Vec<[FloatTrack; 3]>,
+    usercmd_tracks: Vec<[AxisTrack; 3]>,
+    temp_entity_last: [u16; 3],
     time: u32,
     target: u8,
     last_type: u8,
@@ -183,24 +112,14 @@ pub(crate) struct SegmentWalker<'a, const IS_ENCODE: bool, IO: SymbolIo> {
 }
 
 impl<'a, IO: SymbolIo> SegmentWalker<'a, true, IO> {
-    pub(crate) fn encoder(
-        src: &'a [u8],
-        records: &'a mut RecordLists,
-        io: IO,
-        protocol: ProtocolState,
-    ) -> Self {
-        Self::new(src, &mut [], records, io, protocol)
+    pub(crate) fn encoder(src: &'a [u8], io: IO, protocol: ProtocolState) -> Self {
+        Self::new(src, &mut [], io, protocol)
     }
 }
 
 impl<'a, IO: SymbolIo> SegmentWalker<'a, false, IO> {
-    pub(crate) fn decoder(
-        dst: &'a mut [u8],
-        records: &'a mut RecordLists,
-        io: IO,
-        protocol: ProtocolState,
-    ) -> Self {
-        Self::new(&[], dst, records, io, protocol)
+    pub(crate) fn decoder(dst: &'a mut [u8], io: IO, protocol: ProtocolState) -> Self {
+        Self::new(&[], dst, io, protocol)
     }
 }
 
@@ -209,13 +128,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         clippy::large_stack_arrays,
         reason = "fixed-size tables keep byte-indexed lookups free of bounds checks"
     )]
-    fn new(
-        src: &'a [u8],
-        dst: &'a mut [u8],
-        records: &'a mut RecordLists,
-        io: IO,
-        protocol: ProtocolState,
-    ) -> Self {
+    fn new(src: &'a [u8], dst: &'a mut [u8], io: IO, protocol: ProtocolState) -> Self {
         SegmentWalker {
             src,
             dst,
@@ -223,12 +136,15 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             has_error: false,
             io,
             protocol,
-            records,
             players: Box::new([PlayerState::default(); 256]),
             entities: Box::new([EntityState::default(); 2048]),
             stats: Box::new([[0u8; 256]; 32]),
-            player_origin_offsets: Box::new([[NO_OFFSET; 3]; 256]),
-            entity_origin_offsets: Box::new([[NO_OFFSET; 3]; 2048]),
+            player_tracks: vec![PlayerTracks::default(); 256],
+            player_float_origins: vec![[FloatTrack::default(); 3]; 256],
+            entity_origins: vec![[AxisTrack::default(); 3]; 2048],
+            entity_float_origins: vec![[FloatTrack::default(); 3]; 2048],
+            usercmd_tracks: vec![[AxisTrack::default(); 3]; 256],
+            temp_entity_last: [0; 3],
             time: 0,
             target: 0,
             last_type: 0,
@@ -246,15 +162,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             previous_entity_gap: 0,
             usercmd_previous_players: [0; 2],
             usercmds: Box::new([UsercmdState::default(); 256]),
-        }
-    }
-
-    #[inline(always)]
-    fn limit(&self) -> usize {
-        if IS_ENCODE {
-            self.src.len()
-        } else {
-            self.dst.len()
         }
     }
 
@@ -286,11 +193,66 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         self.write_byte(high);
     }
 
-    /// The origin fields of player `entity` (1-based), if it is one.
-    fn player_references(&self, entity: usize) -> Option<[u32; 3]> {
+    #[inline(always)]
+    fn read_u32(&mut self) -> u32 {
+        u32::from_le_bytes(std::array::from_fn(|_| self.read_byte()))
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, value: u32) {
+        for byte in value.to_le_bytes() {
+            self.write_byte(byte);
+        }
+    }
+
+    /// The last 16-bit origin of player `entity` (1-based), if it is one.
+    fn player_origin(&self, entity: usize) -> Option<[u16; 3]> {
         (1..=32)
             .contains(&entity)
-            .then(|| self.player_origin_offsets[entity - 1])
+            .then(|| self.player_tracks[entity - 1].origins.map(AxisTrack::last))
+    }
+
+    /// A 16-bit numeric field and its residual (FORMAT.md section 5.1).
+    #[inline(always)]
+    fn code_u16(&mut self, stream: usize, context: u32, prediction: u16) -> (u16, i32) {
+        if IS_ENCODE {
+            let value = u16::from_le_bytes([self.read_byte(), self.read_byte()]);
+            let residual = i32::from(value.wrapping_sub(prediction).cast_signed());
+            self.residual(stream, context, residual);
+            (value, residual)
+        } else {
+            let residual = self.residual(stream, context, 0);
+            let value = prediction.wrapping_add(residual.cast_unsigned() as u16);
+            self.write_u16(value);
+            (value, i32::from(residual as i16))
+        }
+    }
+
+    #[inline(always)]
+    fn code_u32(&mut self, stream: usize, context: u32, prediction: u32) -> (u32, i32) {
+        if IS_ENCODE {
+            let value = self.read_u32();
+            let residual = value.wrapping_sub(prediction).cast_signed();
+            self.residual(stream, context, residual);
+            (value, residual)
+        } else {
+            let residual = self.residual(stream, context, 0);
+            let value = prediction.wrapping_add(residual.cast_unsigned());
+            self.write_u32(value);
+            (value, residual)
+        }
+    }
+
+    /// FORMAT.md section 5.2.
+    #[inline(always)]
+    fn float_origin(&mut self, stream: usize, axis: usize, is_sent: bool, track: &mut FloatTrack) {
+        if !is_sent {
+            track.hold();
+            return;
+        }
+        let context = clamped_bucket(track.residual(), 63) | (axis as u32) << 6;
+        let (bits, residual) = self.code_u32(stream, context, track.predict_linear());
+        track.push(bits, residual);
     }
 
     #[inline(always)]
@@ -301,6 +263,16 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             self.has_error = true;
             // ends every loop of the walk
             255
+        }
+    }
+
+    #[inline(always)]
+    fn residual(&mut self, stream: usize, context: u32, value: i32) -> i32 {
+        if let Some(residual) = self.io.residual(stream, context, value) {
+            residual
+        } else {
+            self.has_error = true;
+            0
         }
     }
 
@@ -392,16 +364,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         }
     }
 
-    #[inline(always)]
-    fn reserve(&mut self, len: usize) -> u32 {
-        let offset = self.offset;
-        self.offset += len;
-        if self.offset > self.limit() {
-            self.has_error = true;
-        }
-        offset as u32
-    }
-
     /// The tail is the bytes after the last whole frame: all of the `TAIL` blob stream.
     pub(crate) fn run(&mut self) {
         if IS_ENCODE {
@@ -463,8 +425,9 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             }
         } else {
             let len_offset = self.offset;
-            self.reserve(4);
-            if self.has_error {
+            self.offset += 4;
+            if self.offset > self.dst.len() {
+                self.has_error = true;
                 return;
             }
             if is_hidden {
@@ -696,7 +659,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     fn player_info(&mut self) {
         const DF_DEAD: u16 = 1 << 8;
         const DF_GIB: u16 = 1 << 9;
-        const ANGLE_FLAGS: u16 = DF_ANGLES | DF_ANGLES << 1 | DF_ANGLES << 2;
         let number = self.code_blob_byte(PLAYER_NUMBER);
         let previous = self.players[number as usize];
         let flags = self.player_info_flags(previous.flags);
@@ -705,27 +667,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             u32::from(previous.frame) | u32::from(flags & (DF_DEAD | DF_GIB)),
             previous.frame,
         );
-        let coord_width = self.protocol.coord_size();
-        let origin_count = (flags & ORIGIN_FLAGS).count_ones() as usize;
-        let angle_count = (flags & ANGLE_FLAGS).count_ones() as usize;
-        let offset = self.reserve(origin_count * coord_width + angle_count * 2);
-        self.records.player_infos.push(PlayerInfoRecord {
-            offset,
-            time: self.time,
-            flags,
-            number,
-            has_float_coords: self.protocol.has_float_coords,
-        });
-        let mut origin_offset = offset;
-        for (axis, axis_offset) in self.player_origin_offsets[number as usize]
-            .iter_mut()
-            .enumerate()
-        {
-            if flags & DF_ORIGIN << axis != 0 {
-                *axis_offset = origin_offset;
-                origin_offset += coord_width as u32;
-            }
-        }
+        self.player_origins_and_angles(number, flags);
         if flags & DF_MODEL != 0 {
             self.code_blob_byte(PLAYER_MODEL);
         }
@@ -749,6 +691,45 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             frame,
             weapon_frame,
         };
+    }
+
+    /// FORMAT.md sections 5.3 and 5.4.
+    fn player_origins_and_angles(&mut self, number: u8, flags: u16) {
+        let player = number as usize;
+        let mut tracks = self.player_tracks[player];
+        let time_deltas = time_deltas(&mut tracks.frame_times, self.time);
+        if self.protocol.has_float_coords {
+            let mut float_origins = self.player_float_origins[player];
+            for (axis, track) in float_origins.iter_mut().enumerate() {
+                let is_sent = flags & DF_ORIGIN << axis != 0;
+                self.float_origin(PLAYER_FLOAT_ORIGIN + axis, axis, is_sent, track);
+            }
+            self.player_float_origins[player] = float_origins;
+        } else {
+            for (axis, track) in tracks.origins.iter_mut().enumerate() {
+                if flags & DF_ORIGIN << axis == 0 {
+                    track.hold();
+                    continue;
+                }
+                let context = clamped_bucket(track.residual(), 19)
+                    | clamped_bucket(track.velocity(), 19) << 5;
+                let prediction = track.predict_time_scaled(time_deltas);
+                let (value, residual) = self.code_u16(PLAYER_ORIGIN + axis, context, prediction);
+                track.push(value, residual);
+            }
+        }
+        for (axis, track) in tracks.angles.iter_mut().enumerate() {
+            if flags & DF_ANGLES << axis == 0 {
+                track.hold();
+                continue;
+            }
+            let context = clamped_bucket(track.residual(), 23)
+                | clamped_bucket(track.previous_velocity(), 23) << 5;
+            let prediction = track.predict_time_scaled(time_deltas);
+            let (value, residual) = self.code_u16(PLAYER_ANGLE + axis, context, prediction);
+            track.push(value, residual);
+        }
+        self.player_tracks[player] = tracks;
     }
 
     fn predict_entity(&mut self, previous: i32) -> i32 {
@@ -888,34 +869,26 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         if bits & U_EFFECTS != 0 {
             self.code_blob_byte(ENTITY_MISC);
         }
-        let mut record_bits = 0u16;
         for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {
-            if bits & origin_flag != 0 {
-                record_bits |= 1 << (2 * axis);
-            }
-            if bits & angle_flag != 0 {
-                record_bits |= 2 << (2 * axis);
-            }
-        }
-        if was_in_previous_packet {
-            record_bits |= PE_IN_PREVIOUS;
-        }
-        if self.protocol.has_float_coords {
-            record_bits |= PE_FLOAT;
-        }
-        if self.protocol.has_fte_float_coords {
-            record_bits |= PE_WIDE;
-        }
-        let record = PacketEntityRecord {
-            offset: self.offset as u32,
-            number: number as u16,
-            bits: record_bits,
-        };
-        let coord_width = self.protocol.coord_size();
-        for (axis, (origin_flag, angle_flag)) in ORIGIN_ANGLE_FLAGS.into_iter().enumerate() {
-            if bits & origin_flag != 0 {
-                let offset = self.reserve(coord_width);
-                self.entity_origin_offsets[number][axis] = offset;
+            let is_origin_sent = bits & origin_flag != 0;
+            if self.protocol.has_float_coords {
+                let mut track = self.entity_float_origins[number][axis];
+                let stream = ENTITY_FLOAT_ORIGIN + axis;
+                self.float_origin(stream, axis, is_origin_sent, &mut track);
+                self.entity_float_origins[number][axis] = track;
+            } else {
+                let mut track = self.entity_origins[number][axis];
+                if is_origin_sent {
+                    let context = clamped_bucket(track.residual(), 17)
+                        | clamped_bucket(track.velocity(), 17) << 5
+                        | u32::from(was_in_previous_packet) << 10;
+                    let (value, residual) =
+                        self.code_u16(ENTITY_ORIGIN + axis, context, track.predict_linear());
+                    track.push(value, residual);
+                } else {
+                    track.hold();
+                }
+                self.entity_origins[number][axis] = track;
             }
             if bits & angle_flag != 0 {
                 if self.protocol.has_fte_float_coords {
@@ -934,7 +907,6 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 }
             }
         }
-        self.records.packet_entities.push(record);
         if more & U_FTE_TRANS != 0 && self.protocol.fte & FTE_PEXT_TRANS != 0 {
             self.code_blob_byte(ENTITY_MISC);
         }
@@ -966,20 +938,15 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             self.copy_blob(SOUND_FLOAT, 12);
             return;
         }
-        let (references, kind) = if let Some(references) = self.player_references(entity) {
-            (references, 1)
-        } else if entity < 2048 {
-            (self.entity_origin_offsets[entity], 2)
+        let (origin, kind) = if let Some(origin) = self.player_origin(entity) {
+            (origin, 1)
         } else {
-            ([NO_OFFSET; 3], 0)
+            (self.entity_origins[entity].map(AxisTrack::last), 2)
         };
-        let offset = self.reserve(6);
-        self.records.sounds.push(SoundRecord {
-            offset,
-            references,
-            kind,
-            number: sound_number,
-        });
+        for (axis, prediction) in origin.into_iter().enumerate() {
+            let context = axis as u32 | kind << 2 | u32::from(sound_number) << 4;
+            self.code_u16(SOUND_ORIGIN, context, prediction);
+        }
     }
 
     fn temp_entity(&mut self) {
@@ -1004,23 +971,33 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             }
             return;
         }
-        let (references, len) = match kind {
-            TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3 => {
-                let entity = self.code_blob_bytes(TEMP_ENTITY_MISC, 2) as usize;
-                (self.player_references(entity).unwrap_or([NO_OFFSET; 3]), 12)
+        let kind_context = u32::from(kind) << 4;
+        if matches!(kind, TE_LIGHTNING_1 | TE_LIGHTNING_2 | TE_LIGHTNING_3) {
+            const BEAM_START: u32 = 1;
+            const BEAM_END: u32 = 2;
+            let entity = self.code_blob_bytes(TEMP_ENTITY_MISC, 2) as usize;
+            let origin = self.player_origin(entity).unwrap_or_default();
+            let mut start = [0u16; 3];
+            for (axis, prediction) in origin.into_iter().enumerate() {
+                let context = axis as u32 | BEAM_START << 2 | kind_context;
+                start[axis] = self.code_u16(TEMP_ENTITY_ORIGIN, context, prediction).0;
             }
-            TE_GUNSHOT | TE_BLOOD => {
-                self.code_blob_byte(TEMP_ENTITY_MISC);
-                ([NO_OFFSET; 3], 6)
+            for (axis, axis_start) in start.into_iter().enumerate() {
+                let context = axis as u32 | BEAM_END << 2 | kind_context;
+                self.temp_entity_last[axis] =
+                    self.code_u16(TEMP_ENTITY_ORIGIN, context, axis_start).0;
             }
-            _ => ([NO_OFFSET; 3], 6),
-        };
-        let offset = self.reserve(len);
-        self.records.temp_entities.push(TempEntityRecord {
-            offset,
-            references,
-            kind,
-        });
+            return;
+        }
+        if matches!(kind, TE_GUNSHOT | TE_BLOOD) {
+            self.code_blob_byte(TEMP_ENTITY_MISC);
+        }
+        for axis in 0..3 {
+            let context = axis as u32 | kind_context;
+            self.temp_entity_last[axis] = self
+                .code_u16(TEMP_ENTITY_ORIGIN, context, self.temp_entity_last[axis])
+                .0;
+        }
     }
 
     /// `dem_multiple` with mask 0: blocks of [u32 len][u16 type][len bytes].
@@ -1074,7 +1051,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     }
 
     /// mvdsv `SV_DebugClientCommand`: player, drop, msec, 3 x f32 angles, 3 x i16 moves,
-    /// buttons, impulse. Angles on the grid go to `UsercmdRecord`; context kind in bits 12-15.
+    /// buttons, impulse. Context kind in bits 12-15.
     fn usercmd(&mut self) {
         let [last_player, second_last_player] = self.usercmd_previous_players;
         let player = self.code_symbol(
@@ -1101,23 +1078,17 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             return;
         }
         state.grid = grid;
-        let offset = self.offset as u32;
-        for axis in 0..3u32 {
+        let mut tracks = self.usercmd_tracks[player as usize];
+        for (axis, track) in tracks.iter_mut().enumerate() {
             if grid & (1 << axis) != 0 {
-                self.reserve(4);
+                self.usercmd_grid_angle(axis, track);
             } else {
                 for byte_index in 0..4 {
-                    self.code_symbol(USERCMD, 4 << 12 | axis << 2 | byte_index);
+                    self.code_symbol(USERCMD, 4 << 12 | (axis as u32) << 2 | byte_index);
                 }
             }
         }
-        if grid != 0 {
-            self.records.usercmds.push(UsercmdRecord {
-                pitch_offset: offset,
-                number: player,
-                grid_axes: grid,
-            });
-        }
+        self.usercmd_tracks[player as usize] = tracks;
         for (axis, axis_move) in state.moves.iter_mut().enumerate() {
             let low = self.code_symbol(
                 USERCMD,
@@ -1129,6 +1100,28 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         state.buttons = self.code_symbol(USERCMD, 7 << 12 | u32::from(state.buttons));
         state.impulse = self.code_symbol(USERCMD, 8 << 12 | u32::from(state.impulse));
         self.usercmds[player as usize] = state;
+    }
+
+    /// FORMAT.md section 5.6.
+    fn usercmd_grid_angle(&mut self, axis: usize, track: &mut AxisTrack) {
+        let context = clamped_bucket(track.residual(), 23)
+            | clamped_bucket(track.velocity(), 23) << 5
+            | clamped_bucket(track.previous_velocity(), 15) << 10
+            | (axis as u32) << 14;
+        let prediction = track.predict_linear();
+        let grid_value = if IS_ENCODE {
+            let grid_value = on_grid(self.read_u32()).expect("`usercmd` saw it on the grid");
+            let residual = i32::from(grid_value.wrapping_sub(prediction).cast_signed());
+            self.residual(USERCMD_ANGLE, context, residual);
+            grid_value
+        } else {
+            let residual = self.residual(USERCMD_ANGLE, context, 0);
+            let grid_value = prediction.wrapping_add(residual.cast_unsigned() as u16);
+            self.write_u32(grid_f32(grid_value));
+            grid_value
+        };
+        let residual = i32::from(grid_value.wrapping_sub(prediction).cast_signed());
+        track.push(grid_value, residual);
     }
 }
 

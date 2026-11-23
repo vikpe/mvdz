@@ -277,9 +277,6 @@ func collectStreams(segment []byte, protocol protocolState) (*segmentStreams, pr
 	if walker.err != nil {
 		return nil, protocol, false
 	}
-	if err := fillNumericFields(walked, &walker.records, streams); err != nil {
-		return nil, protocol, false
-	}
 	if !bytes.Equal(walked, segment) {
 		return nil, protocol, false
 	}

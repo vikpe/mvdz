@@ -1,266 +1,63 @@
 package mvdz
 
-import (
-	"encoding/binary"
-	"math/bits"
-)
-
-// fillNumericFields runs the numeric groups, FORMAT.md section 5: they write
-// the fields the walk reserved. Sounds and temp entities predict from origins,
-// so they run last.
-//
-// Both directions run the same steps: an encoder proposes each residual from
-// the value the segment holds, and the value written back is that value.
-func fillNumericFields(segment []byte, records *recordLists, streams *segmentStreams) error {
-	groups := numericGroups{segment: segment, streams: streams}
-	for axis := range 3 {
-		groups.playerOrigins(records.playerInfos, axis)
-		groups.playerAngles(records.playerInfos, axis)
-		groups.entityOrigins(records.packetEntities, axis)
-	}
-	groups.usercmdAngles(records.usercmds)
-	groups.soundOrigins(records.sounds)
-	groups.tempEntityOrigins(records.tempEntities)
-	return groups.err
-}
-
-type numericGroups struct {
-	segment []byte
-	streams *segmentStreams
-	err     error
-}
-
-// axisTrack is the history of one coordinate or angle, FORMAT.md section 5.2.
+// axisTrack is the 16-bit history of one axis, FORMAT.md section 5.2.
 type axisTrack struct {
-	last, previous, beforePrevious   uint16
-	residual                         int32
-	floatLastBits, floatPreviousBits uint32
-	floatResidualBits                int32
+	last, previous, beforePrevious uint16
+	residual                       int16
+}
+
+func (track *axisTrack) velocity() int32 {
+	return int32(int16(track.last - track.previous))
+}
+
+func (track *axisTrack) previousVelocity() int32 {
+	return int32(int16(track.previous - track.beforePrevious))
+}
+
+func (track *axisTrack) push(value uint16, residual int32) {
+	track.beforePrevious = track.previous
+	track.previous = track.last
+	track.last = value
+	track.residual = int16(residual)
+}
+
+// hold notes a value left out of its update: it did not change.
+func (track *axisTrack) hold() {
+	track.push(track.last, 0)
+}
+
+func (track *axisTrack) predictLinear() uint16 {
+	return track.last + uint16(track.velocity())
+}
+
+// predictTimeScaled extrapolates the last velocity, scaled by the time deltas
+// when they differ.
+func (track *axisTrack) predictTimeScaled(now, before int32) uint16 {
+	isUnscaled := now == before || before <= 0 || now < 0
+	if isUnscaled {
+		return track.predictLinear()
+	}
+	return track.last + uint16(divRound(track.velocity()*min(now, 32767), min(before, 32767)))
+}
+
+// floatTrack is the history of one float coordinate, as f32 bits.
+type floatTrack struct {
+	lastBits, previousBits uint32
+	residual               int32
+}
+
+func (track *floatTrack) push(valueBits uint32, residual int32) {
+	track.previousBits = track.lastBits
+	track.lastBits = valueBits
+	track.residual = residual
+}
+
+func (track *floatTrack) hold() {
+	track.push(track.lastBits, 0)
 }
 
 type frameTimes struct {
 	last, previous uint32
-}
-
-// FORMAT.md section 5.3
-func (groups *numericGroups) playerOrigins(records []playerInfoRecord, axis int) {
-	var tracks [256]axisTrack
-	var times [256]frameTimes
-	for _, record := range records {
-		now, before := times[record.number].deltas(record.time)
-		track := &tracks[record.number]
-		isSent := record.flags&(dfOrigin<<axis) != 0
-		earlierOrigins := uint32(bits.OnesCount16(record.flags & (1<<axis - 1)))
-		switch {
-		case !isSent:
-			track.hold()
-		case record.hasFloatCoords:
-			groups.floatOrigin(streamPlayerFloatOrigin+axis, record.offset+4*earlierOrigins, axis, track)
-		default:
-			velocity := int32(int16(track.last - track.previous))
-			context := min(residualBucket(track.residual), 19) | min(residualBucket(velocity), 19)<<5
-			prediction := predictTimeScaled(track.last, track.previous, now, before)
-			value, residual := groups.field16(streamPlayerOrigin+axis, context, record.offset+2*earlierOrigins, prediction)
-			track.residual = residual
-			track.previous = track.last
-			track.last = value
-		}
-	}
-}
-
-// FORMAT.md section 5.4
-func (groups *numericGroups) playerAngles(records []playerInfoRecord, axis int) {
-	var tracks [256]axisTrack
-	var times [256]frameTimes
-	for _, record := range records {
-		now, before := times[record.number].deltas(record.time)
-		track := &tracks[record.number]
-		value, residual := track.last, int32(0)
-		isSent := record.flags&(dfAngles<<axis) != 0
-		if isSent {
-			originSize := uint32(2)
-			if record.hasFloatCoords {
-				originSize = 4
-			}
-			originCount := uint32(bits.OnesCount16(record.flags & originFlags))
-			earlierAngles := uint32(bits.OnesCount16((record.flags >> 3) & (1<<axis - 1)))
-			offset := record.offset + originSize*originCount + 2*earlierAngles
-			previousVelocity := int32(int16(track.previous - track.beforePrevious))
-			context := min(residualBucket(track.residual), 23) | min(residualBucket(previousVelocity), 23)<<5
-			prediction := predictTimeScaled(track.last, track.previous, now, before)
-			value, residual = groups.field16(streamPlayerAngle+axis, context, offset, prediction)
-		}
-		track.residual = residual
-		track.beforePrevious = track.previous
-		track.previous = track.last
-		track.last = value
-	}
-}
-
-// FORMAT.md section 5.5
-func (groups *numericGroups) entityOrigins(records []packetEntityRecord, axis int) {
-	var tracks [2048]axisTrack
-	for _, record := range records {
-		track := &tracks[record.number&2047]
-		offset := record.originOffsets[axis]
-		switch {
-		case offset == noOffset:
-			track.hold()
-		case record.hasFloatCoords:
-			groups.floatOrigin(streamEntityFloatOrigin+axis, offset, axis, track)
-		default:
-			velocity := int32(int16(track.last - track.previous))
-			context := min(residualBucket(track.residual), 17) | min(residualBucket(velocity), 17)<<5
-			if record.isInPrevious {
-				context |= 1 << 10
-			}
-			value, residual := groups.field16(streamEntityOrigin+axis, context, offset, track.last+uint16(velocity))
-			track.residual = residual
-			track.previous = track.last
-			track.last = value
-		}
-	}
-}
-
-// hold notes an origin left out of its update: neither width moved.
-func (track *axisTrack) hold() {
-	track.previous = track.last
-	track.residual = 0
-	track.floatPreviousBits = track.floatLastBits
-	track.floatResidualBits = 0
-}
-
-// floatOrigin decodes a float coordinate as its bit pattern.
-func (groups *numericGroups) floatOrigin(stream int, offset uint32, axis int, track *axisTrack) {
-	prediction := track.floatLastBits + (track.floatLastBits - track.floatPreviousBits)
-	context := min(residualBucket(track.floatResidualBits), 63) | uint16(axis)<<6
-	sourceResidual := int32(groups.read32(offset) - prediction)
-	residual := groups.residual(stream, context, sourceResidual)
-	value := prediction + uint32(residual)
-	groups.write32(offset, value)
-	track.floatPreviousBits = track.floatLastBits
-	track.floatLastBits = value
-	track.floatResidualBits = residual
-}
-
-// FORMAT.md section 5.6
-func (groups *numericGroups) usercmdAngles(records []usercmdRecord) {
-	var tracks [256][3]axisTrack
-	for _, record := range records {
-		for axis := range 3 {
-			isOnGrid := record.gridAxes&(1<<axis) != 0
-			if !isOnGrid {
-				continue
-			}
-			track := &tracks[record.number][axis]
-			velocity := int32(int16(track.last - track.previous))
-			previousVelocity := int32(int16(track.previous - track.beforePrevious))
-			context := min(residualBucket(track.residual), 23) |
-				min(residualBucket(velocity), 23)<<5 |
-				min(residualBucket(previousVelocity), 15)<<10 |
-				uint16(axis)<<14
-			offset := record.pitchOffset + 4*uint32(axis)
-			prediction := track.last + uint16(velocity)
-			sourceValue, _ := onGrid(groups.read32(offset))
-			sourceResidual := int16(sourceValue - prediction)
-			residual := int16(groups.residual(streamUsercmdAngle, context, int32(sourceResidual)))
-			value := prediction + uint16(residual)
-			groups.write32(offset, gridF32(value))
-			track.residual = int32(residual)
-			track.beforePrevious = track.previous
-			track.previous = track.last
-			track.last = value
-		}
-	}
-}
-
-func (groups *numericGroups) soundOrigins(records []soundRecord) {
-	for _, record := range records {
-		for axis := range uint32(3) {
-			context := uint16(axis) | uint16(record.kind)<<2 | uint16(record.number)<<4
-			prediction := groups.referenced(record.references[axis])
-			groups.field16(streamSoundOrigin, context, record.offset+2*axis, prediction)
-		}
-	}
-}
-
-func (groups *numericGroups) tempEntityOrigins(records []tempEntityRecord) {
-	const point, beamStart, beamEnd = 0, 1, 2
-	var last [3]uint16
-	for _, record := range records {
-		kindContext := uint16(record.kind) << 4
-		isBeam := record.kind == teLightning1 || record.kind == teLightning2 || record.kind == teLightning3
-		if !isBeam {
-			for axis := range uint32(3) {
-				context := uint16(axis) | point<<2 | kindContext
-				last[axis], _ = groups.field16(streamTempEntityOrigin, context, record.offset+2*axis, last[axis])
-			}
-			continue
-		}
-		var start [3]uint16
-		for axis := range uint32(3) {
-			context := uint16(axis) | beamStart<<2 | kindContext
-			prediction := groups.referenced(record.references[axis])
-			start[axis], _ = groups.field16(streamTempEntityOrigin, context, record.offset+2*axis, prediction)
-		}
-		for axis := range uint32(3) {
-			context := uint16(axis) | beamEnd<<2 | kindContext
-			last[axis], _ = groups.field16(streamTempEntityOrigin, context, record.offset+6+2*axis, start[axis])
-		}
-	}
-}
-
-// referenced is the origin coordinate a sound or beam is predicted from.
-func (groups *numericGroups) referenced(offset uint32) uint16 {
-	if offset == noOffset {
-		return 0
-	}
-	return groups.read16(offset)
-}
-
-// field16 codes a 16-bit field, FORMAT.md section 5.1. It returns the value
-// and the residual to keep as state.
-func (groups *numericGroups) field16(stream int, context uint16, offset uint32, prediction uint16) (uint16, int32) {
-	sourceResidual := int16(groups.read16(offset) - prediction)
-	residual := int16(groups.residual(stream, context, int32(sourceResidual)))
-	value := prediction + uint16(residual)
-	if uint64(offset)+2 <= uint64(len(groups.segment)) {
-		binary.LittleEndian.PutUint16(groups.segment[offset:], value)
-	}
-	return value, int32(residual)
-}
-
-func (groups *numericGroups) read16(offset uint32) uint16 {
-	if uint64(offset)+2 > uint64(len(groups.segment)) {
-		return 0
-	}
-	return binary.LittleEndian.Uint16(groups.segment[offset:])
-}
-
-func (groups *numericGroups) read32(offset uint32) uint32 {
-	if uint64(offset)+4 > uint64(len(groups.segment)) {
-		return 0
-	}
-	return binary.LittleEndian.Uint32(groups.segment[offset:])
-}
-
-func (groups *numericGroups) write32(offset uint32, value uint32) {
-	if uint64(offset)+4 <= uint64(len(groups.segment)) {
-		binary.LittleEndian.PutUint32(groups.segment[offset:], value)
-	}
-}
-
-// residual is the next residual of a numeric stream; sourceResidual is the
-// one an encoder codes.
-func (groups *numericGroups) residual(stream int, context uint16, sourceResidual int32) int32 {
-	if groups.err != nil {
-		return 0
-	}
-	residual, isCoded := groups.streams.residual(stream, context, sourceResidual)
-	if !isCoded {
-		groups.err = corrupt("numeric stream exhausted or absent")
-	}
-	return residual
 }
 
 // deltas returns the time since the player's last record and the delta
@@ -273,13 +70,147 @@ func (times *frameTimes) deltas(time uint32) (now, before int32) {
 	return now, before
 }
 
-// predictTimeScaled extrapolates the last velocity, scaled by the time deltas
-// when they differ.
-func predictTimeScaled(last, previous uint16, now, before int32) uint16 {
-	velocity := int32(int16(last - previous))
-	isUnscaled := now == before || before <= 0 || now < 0
-	if isUnscaled {
-		return last + uint16(velocity)
+type playerTracks struct {
+	origins, angles [3]axisTrack
+	times           frameTimes
+}
+
+func lastValues(tracks *[3]axisTrack) [3]uint16 {
+	return [3]uint16{tracks[0].last, tracks[1].last, tracks[2].last}
+}
+
+// FORMAT.md sections 5.3 and 5.4
+func (walker *segmentWalker) playerOriginsAndAngles(number uint8, flags uint16) {
+	tracks := &walker.playerTracks[number]
+	now, before := tracks.times.deltas(walker.time)
+	hasFloatCoords := walker.protocol.hasFloatCoords()
+	for axis := range 3 {
+		isSent := flags&(dfOrigin<<axis) != 0
+		if hasFloatCoords {
+			walker.floatOrigin(streamPlayerFloatOrigin+axis, axis, isSent, &walker.playerFloatOrigins[number][axis])
+			continue
+		}
+		track := &tracks.origins[axis]
+		if !isSent {
+			track.hold()
+			continue
+		}
+		context := min(residualBucket(int32(track.residual)), 19) | min(residualBucket(track.velocity()), 19)<<5
+		value, residual := walker.codeU16(streamPlayerOrigin+axis, context, track.predictTimeScaled(now, before))
+		track.push(value, residual)
 	}
-	return last + uint16(divRound(velocity*min(now, 32767), min(before, 32767)))
+	for axis := range 3 {
+		track := &tracks.angles[axis]
+		isSent := flags&(dfAngles<<axis) != 0
+		if !isSent {
+			track.hold()
+			continue
+		}
+		context := min(residualBucket(int32(track.residual)), 23) | min(residualBucket(track.previousVelocity()), 23)<<5
+		value, residual := walker.codeU16(streamPlayerAngle+axis, context, track.predictTimeScaled(now, before))
+		track.push(value, residual)
+	}
+}
+
+// FORMAT.md section 5.5
+func (walker *segmentWalker) entityOrigin(number uint16, axis int, isSent, isInPrevious bool) {
+	if walker.protocol.hasFloatCoords() {
+		walker.floatOrigin(streamEntityFloatOrigin+axis, axis, isSent, &walker.entityFloatOrigins[number][axis])
+		return
+	}
+	track := &walker.entityOrigins[number][axis]
+	if !isSent {
+		track.hold()
+		return
+	}
+	context := min(residualBucket(int32(track.residual)), 17) | min(residualBucket(track.velocity()), 17)<<5
+	if isInPrevious {
+		context |= 1 << 10
+	}
+	value, residual := walker.codeU16(streamEntityOrigin+axis, context, track.predictLinear())
+	track.push(value, residual)
+}
+
+// FORMAT.md section 5.2
+func (walker *segmentWalker) floatOrigin(stream int, axis int, isSent bool, track *floatTrack) {
+	if !isSent {
+		track.hold()
+		return
+	}
+	prediction := track.lastBits + (track.lastBits - track.previousBits)
+	context := min(residualBucket(track.residual), 63) | uint16(axis)<<6
+	sourceResidual := int32(walker.peek32(0) - prediction)
+	residual := walker.residual(stream, context, sourceResidual)
+	valueBits := prediction + uint32(residual)
+	walker.write32(valueBits)
+	track.push(valueBits, residual)
+}
+
+// FORMAT.md section 5.6
+func (walker *segmentWalker) usercmdGridAngle(axis int, track *axisTrack) {
+	context := min(residualBucket(int32(track.residual)), 23) |
+		min(residualBucket(track.velocity()), 23)<<5 |
+		min(residualBucket(track.previousVelocity()), 15)<<10 |
+		uint16(axis)<<14
+	prediction := track.predictLinear()
+	sourceValue, _ := onGrid(walker.peek32(0))
+	sourceResidual := int16(sourceValue - prediction)
+	residual := int16(walker.residual(streamUsercmdAngle, context, int32(sourceResidual)))
+	value := prediction + uint16(residual)
+	walker.write32(gridF32(value))
+	track.push(value, int32(residual))
+}
+
+// kind: 1 for a player's origin, 2 for an entity's.
+func (walker *segmentWalker) soundOrigin(origin [3]uint16, kind uint16, number uint8) {
+	for axis := range 3 {
+		context := uint16(axis) | kind<<2 | uint16(number)<<4
+		walker.codeU16(streamSoundOrigin, context, origin[axis])
+	}
+}
+
+// FORMAT.md section 5.6; beamOrigin is of the player the beam starts at.
+func (walker *segmentWalker) tempEntityOrigins(kind uint8, isBeam bool, beamOrigin [3]uint16) {
+	const point, beamStart, beamEnd = 0, 1, 2
+	kindContext := uint16(kind) << 4
+	last := &walker.tempEntityLast
+	if !isBeam {
+		for axis := range 3 {
+			context := uint16(axis) | point<<2 | kindContext
+			last[axis], _ = walker.codeU16(streamTempEntityOrigin, context, last[axis])
+		}
+		return
+	}
+	var start [3]uint16
+	for axis := range 3 {
+		context := uint16(axis) | beamStart<<2 | kindContext
+		start[axis], _ = walker.codeU16(streamTempEntityOrigin, context, beamOrigin[axis])
+	}
+	for axis := range 3 {
+		context := uint16(axis) | beamEnd<<2 | kindContext
+		last[axis], _ = walker.codeU16(streamTempEntityOrigin, context, start[axis])
+	}
+}
+
+// codeU16 codes a 16-bit field, FORMAT.md section 5.1. It returns the value
+// and the residual to keep as state.
+func (walker *segmentWalker) codeU16(stream int, context uint16, prediction uint16) (uint16, int32) {
+	sourceResidual := int16(walker.peek16() - prediction)
+	residual := int16(walker.residual(stream, context, int32(sourceResidual)))
+	value := prediction + uint16(residual)
+	walker.write16(value)
+	return value, int32(residual)
+}
+
+// residual is the next residual of a numeric stream; sourceResidual is the
+// one an encoder codes.
+func (walker *segmentWalker) residual(stream int, context uint16, sourceResidual int32) int32 {
+	if walker.err != nil {
+		return 0
+	}
+	residual, isCoded := walker.streams.residual(stream, context, sourceResidual)
+	if !isCoded {
+		walker.fail("numeric stream exhausted or absent")
+	}
+	return residual
 }

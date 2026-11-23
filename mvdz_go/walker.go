@@ -1,20 +1,15 @@
 package mvdz
 
-import (
-	"encoding/binary"
-	"math/bits"
-)
+import "encoding/binary"
 
 const (
-	noOffset          = 0xFFFFFFFF
 	hiddenDamageDone  = 7
 	hiddenUsercmd     = 1
 	hiddenUsercmdSize = 23
 )
 
-// segmentWalker walks the structure of a segment and records where its
-// numeric fields are, FORMAT.md section 4. After the first error every
-// primitive does nothing and every loop stops.
+// segmentWalker walks a segment field by field, FORMAT.md sections 4 and 5.
+// After the first error every primitive does nothing and every loop stops.
 //
 // The walk is the same in both directions. Decoding writes the segment from
 // the streams. Encoding walks a copy of the segment: what the walker reads
@@ -27,7 +22,6 @@ type segmentWalker struct {
 	payloadEnd uint32 // read when encoding only
 	streams    *segmentStreams
 	protocol   protocolState
-	records    recordLists
 	err        error
 
 	// FORMAT.md section 4.3
@@ -47,12 +41,18 @@ type segmentWalker struct {
 	usercmds               [256]usercmdState
 	entities               [2048]entityState
 	stats                  [32][256]uint8
-	playerOriginOffsets    [256][3]uint32
-	entityOriginOffsets    [2048][3]uint32
 	previousPacket         []uint16
 	currentPacket          []uint16
 	previousPacketIndex    int
 	packetNumber           uint32
+
+	// FORMAT.md section 5
+	playerTracks       [256]playerTracks
+	playerFloatOrigins [256][3]floatTrack
+	entityOrigins      [2048][3]axisTrack
+	entityFloatOrigins [2048][3]floatTrack
+	usercmdTracks      [256][3]axisTrack
+	tempEntityLast     [3]uint16
 }
 
 type playerState struct {
@@ -75,64 +75,14 @@ type entityState struct {
 	lastPacket     uint32
 }
 
-// recordLists list the numeric fields in walk order, for the numeric groups.
-type recordLists struct {
-	playerInfos    []playerInfoRecord
-	packetEntities []packetEntityRecord
-	sounds         []soundRecord
-	tempEntities   []tempEntityRecord
-	usercmds       []usercmdRecord
-}
-
-type playerInfoRecord struct {
-	offset         uint32
-	time           uint32
-	flags          uint16
-	number         uint8
-	hasFloatCoords bool
-}
-
-type packetEntityRecord struct {
-	number         uint16
-	originOffsets  [3]uint32 // noOffset for an origin that is not sent
-	isInPrevious   bool
-	hasFloatCoords bool
-}
-
-type soundRecord struct {
-	offset     uint32
-	references [3]uint32
-	kind       uint8
-	number     uint8
-}
-
-type tempEntityRecord struct {
-	offset     uint32
-	references [3]uint32
-	kind       uint8
-}
-
-type usercmdRecord struct {
-	pitchOffset uint32
-	number      uint8
-	gridAxes    uint8
-}
-
 func newWalker(segment []byte, streams *segmentStreams) *segmentWalker {
-	walker := &segmentWalker{
+	return &segmentWalker{
 		segment:           segment,
 		streams:           streams,
 		protocol:          streams.protocol,
 		statPreviousIndex: 255,
 		packetNumber:      1,
 	}
-	for player := range walker.playerOriginOffsets {
-		walker.playerOriginOffsets[player] = [3]uint32{noOffset, noOffset, noOffset}
-	}
-	for entity := range walker.entityOriginOffsets {
-		walker.entityOriginOffsets[entity] = [3]uint32{noOffset, noOffset, noOffset}
-	}
-	return walker
 }
 
 // FORMAT.md section 4.4
@@ -174,7 +124,14 @@ func (walker *segmentWalker) frame() {
 
 func (walker *segmentWalker) lengthPrefixed(frameType uint8, isHidden bool) {
 	sourceLen := walker.peek32(0)
-	lengthOffset := walker.reserve(4)
+	lengthOffset := walker.position
+	if walker.err == nil && uint32(len(walker.segment))-lengthOffset < 4 {
+		walker.fail("segment overflow")
+	}
+	if walker.err != nil {
+		return
+	}
+	walker.position += 4
 	walker.payloadEnd = walker.position + sourceLen
 	if isHidden {
 		walker.hiddenPayload()
@@ -320,23 +277,7 @@ func (walker *segmentWalker) playerInfo() {
 	frameContext := uint16(player.frame) | flags&(dfDead|dfGib)
 	frame := walker.codeSymbolResidual(streamPlayerFrame, frameContext, player.frame)
 
-	coordSize := walker.protocol.coordSize()
-	originCount := uint32(bits.OnesCount16(flags & originFlags))
-	angleCount := uint32(bits.OnesCount16(flags & angleFlags))
-	offset := walker.reserve(originCount*coordSize + angleCount*2)
-	walker.records.playerInfos = append(walker.records.playerInfos, playerInfoRecord{
-		offset:         offset,
-		time:           walker.time,
-		flags:          flags,
-		number:         number,
-		hasFloatCoords: walker.protocol.hasFloatCoords(),
-	})
-	for axis := range 3 {
-		if flags&(dfOrigin<<axis) != 0 {
-			walker.playerOriginOffsets[number][axis] = offset
-			offset += coordSize
-		}
-	}
+	walker.playerOriginsAndAngles(number, flags)
 
 	if flags&dfModel != 0 {
 		walker.codeBlobByte(streamPlayerModel)
@@ -458,12 +399,7 @@ func (walker *segmentWalker) entityDelta(word uint16) {
 		number += 1024
 	}
 	entity := &walker.entities[number]
-	record := packetEntityRecord{
-		number:         number,
-		originOffsets:  [3]uint32{noOffset, noOffset, noOffset},
-		isInPrevious:   entity.lastPacket == walker.packetNumber-1,
-		hasFloatCoords: walker.protocol.hasFloatCoords(),
-	}
+	isInPrevious := entity.lastPacket == walker.packetNumber-1
 	entity.lastPacket = walker.packetNumber
 
 	if bits&uModel != 0 {
@@ -480,15 +416,12 @@ func (walker *segmentWalker) entityDelta(word uint16) {
 		}
 	}
 	for axis := range 3 {
-		if bits&entityOriginBits[axis] != 0 {
-			record.originOffsets[axis] = walker.reserve(walker.protocol.coordSize())
-			walker.entityOriginOffsets[number][axis] = record.originOffsets[axis]
-		}
+		isOriginSent := bits&entityOriginBits[axis] != 0
+		walker.entityOrigin(number, axis, isOriginSent, isInPrevious)
 		if bits&entityAngleBits[axis] != 0 {
 			walker.entityAngle(entity, axis)
 		}
 	}
-	walker.records.packetEntities = append(walker.records.packetEntities, record)
 
 	if more&uFteTrans != 0 && walker.protocol.fte&ftePextTrans != 0 {
 		walker.codeBlobByte(streamEntityMisc)
@@ -535,14 +468,12 @@ func (walker *segmentWalker) sound() {
 		walker.copyBlob(streamSoundFloat, 12)
 		return
 	}
-	record := soundRecord{references: walker.entityOriginOffsets[entity], kind: 2, number: number}
 	isPlayer := 1 <= entity && entity <= 32
 	if isPlayer {
-		record.references = walker.playerOriginOffsets[entity-1]
-		record.kind = 1
+		walker.soundOrigin(lastValues(&walker.playerTracks[entity-1].origins), 1, number)
+	} else {
+		walker.soundOrigin(lastValues(&walker.entityOrigins[entity]), 2, number)
 	}
-	record.offset = walker.reserve(6)
-	walker.records.sounds = append(walker.records.sounds, record)
 }
 
 // FORMAT.md section 4.10
@@ -554,25 +485,28 @@ func (walker *segmentWalker) tempEntity() {
 	kind := walker.codeSymbol(streamTempEntityType, context)
 	walker.previousTempEntity = kind
 
-	record := tempEntityRecord{references: [3]uint32{noOffset, noOffset, noOffset}, kind: kind}
-	coordCount := uint32(3)
+	var beamOrigin [3]uint16 // of the player a beam starts at
+	isBeam := false
 	switch kind {
 	case teLightning1, teLightning2, teLightning3:
 		entity := walker.codeBlobBytes(streamTempEntityMisc, 2)
 		isPlayer := 1 <= entity && entity <= 32
 		if isPlayer {
-			record.references = walker.playerOriginOffsets[entity-1]
+			beamOrigin = lastValues(&walker.playerTracks[entity-1].origins)
 		}
-		coordCount = 6
+		isBeam = true
 	case teGunshot, teBlood:
 		walker.codeBlobByte(streamTempEntityMisc)
 	}
 	if walker.protocol.hasFloatCoords() {
+		coordCount := uint32(3)
+		if isBeam {
+			coordCount = 6
+		}
 		walker.copyBlob(streamTempEntityFloat, coordCount*4)
 		return
 	}
-	record.offset = walker.reserve(coordCount * 2)
-	walker.records.tempEntities = append(walker.records.tempEntities, record)
+	walker.tempEntityOrigins(kind, isBeam, beamOrigin)
 }
 
 // FORMAT.md section 4.11
@@ -624,19 +558,15 @@ func (walker *segmentWalker) usercmd() {
 	}
 	state.grid = grid
 
-	pitchOffset := walker.position
-	for axis := range uint16(3) {
+	for axis := range 3 {
 		isOnGrid := grid&(1<<axis) != 0
 		if isOnGrid {
-			walker.reserve(4)
+			walker.usercmdGridAngle(axis, &walker.usercmdTracks[player][axis])
 			continue
 		}
 		for index := range uint16(4) {
-			walker.codeSymbol(streamUsercmd, 4<<12|axis<<2|index)
+			walker.codeSymbol(streamUsercmd, 4<<12|uint16(axis)<<2|index)
 		}
-	}
-	if grid != 0 {
-		walker.records.usercmds = append(walker.records.usercmds, usercmdRecord{pitchOffset, player, grid})
 	}
 
 	for move := range state.moves {
@@ -749,6 +679,11 @@ func (walker *segmentWalker) write16(value uint16) {
 	walker.write(uint8(value >> 8))
 }
 
+func (walker *segmentWalker) write32(value uint32) {
+	walker.write16(uint16(value))
+	walker.write16(uint16(value >> 16))
+}
+
 func (walker *segmentWalker) codeSymbol(stream int, context uint16) uint8 {
 	value := walker.symbol(stream, context, walker.peek(0))
 	walker.write(value)
@@ -808,20 +743,6 @@ func (walker *segmentWalker) copyBlob(stream int, count uint32) {
 		return
 	}
 	walker.position += count
-}
-
-// reserve leaves count bytes to the numeric groups and returns their offset.
-func (walker *segmentWalker) reserve(count uint32) uint32 {
-	offset := walker.position
-	if walker.err != nil {
-		return offset
-	}
-	if count > uint32(len(walker.segment))-walker.position {
-		walker.fail("segment overflow")
-		return offset
-	}
-	walker.position += count
-	return offset
 }
 
 // copyCommandBody sizes the body from the bytes that hold it, the blob

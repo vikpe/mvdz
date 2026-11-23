@@ -79,7 +79,6 @@ pub(crate) const DF_MODEL: u16 = 1 << 11;
 pub(crate) const DF_ORIGIN: u16 = 1 << 0;
 pub(crate) const DF_SKIN_NUM: u16 = 1 << 7;
 pub(crate) const DF_WEAPON_FRAME: u16 = 1 << 10;
-pub(crate) const ORIGIN_FLAGS: u16 = DF_ORIGIN | DF_ORIGIN << 1 | DF_ORIGIN << 2;
 
 /// Derived only from bytes already seen, so both directions agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

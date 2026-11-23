@@ -19,28 +19,24 @@ pub(crate) fn compress_unchecked(src: &[u8]) -> crate::Result<Vec<u8>> {
 
 /// Every segment all tail: the encoder's fallback layout.
 pub(crate) fn all_tail(src: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use crate::segment::{ModelBuilder, cut_points, models_body, numerics, walk_tail};
+    use crate::segment::{ModelBuilder, cut_points, models_body, walk_tail};
     let protocol = crate::protocol::ProtocolState::default();
     let walked_segments: Vec<_> = cut_points(src)
         .windows(2)
         .map(|cut| {
             let raw = &src[cut[0]..cut[1]];
-            let walked = walk_tail(raw, protocol);
-            let numerics = numerics(raw, &walked);
-            (raw, walked, numerics)
+            (raw, walk_tail(raw, protocol))
         })
         .collect();
     let mut model_builder = ModelBuilder::default();
-    let counted: Vec<_> = (walked_segments.iter())
-        .map(|(_, walked, numerics)| (walked, numerics))
-        .collect();
+    let counted: Vec<_> = walked_segments.iter().map(|(_, walked)| walked).collect();
     model_builder.add(&counted, 1);
     let models = model_builder.models(1);
     let mut model_ids = Vec::new();
     let mut segments = Vec::new();
-    for (raw, walked, numerics) in &walked_segments {
-        let coded = crate::segment::encode(walked, numerics, &mut model_ids, &models)
-            .context("a tail segment")?;
+    for (raw, walked) in &walked_segments {
+        let coded =
+            crate::segment::encode(walked, &mut model_ids, &models).context("a tail segment")?;
         let mut segment = segment_header_bytes(
             raw.len() as u32,
             crate::segment::duration_ms(raw),

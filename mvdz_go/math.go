@@ -57,6 +57,9 @@ func gridF32(grid uint16) uint32 {
 
 const stepsPerOctave = 2
 
+// maxQuantized is what quantize gives for the largest count.
+const maxQuantized = 65
+
 // quantizedWeight is 2^((quantized-1)/2) in 16.16 fixed point, FORMAT.md
 // section 6.3.
 func quantizedWeight(quantized uint32) uint64 {
@@ -65,11 +68,7 @@ func quantizedWeight(quantized uint32) uint64 {
 	}
 	stepPowers := [stepsPerOctave]uint64{65536, 92682}
 	step := quantized - 1
-	octave := step / stepsPerOctave
-	if octave >= 40 {
-		return math.MaxUint64 >> 8
-	}
-	return stepPowers[step%stepsPerOctave] << octave
+	return stepPowers[step%stepsPerOctave] << (step / stepsPerOctave)
 }
 
 // quantize is the quantized count whose weight is nearest to count in ratio,
@@ -100,7 +99,7 @@ func quantize(count uint32) uint32 {
 // present symbol getting at least 1, FORMAT.md section 6.3.
 func normalize(weights []uint64, total int) []int {
 	frequencies := make([]int, len(weights))
-	var weightTotal uint64 // at most 256 weights below 2^56
+	var weightTotal uint64 // at most 256 weights of at most 2^48
 	for _, weight := range weights {
 		weightTotal += weight
 	}
@@ -112,9 +111,7 @@ func normalize(weights []uint64, total int) []int {
 		if weight == 0 {
 			continue
 		}
-		high, low := bits.Mul64(weight, uint64(total))
-		share, _ := bits.Div64(high, low, weightTotal)
-		frequencies[symbol] = max(int(share), 1)
+		frequencies[symbol] = max(int(weight*uint64(total)/weightTotal), 1)
 		sum += frequencies[symbol]
 	}
 	difference := total - sum

@@ -21,7 +21,7 @@ const (
 	streamUsercmd           = 15
 	streamLzLiteral         = 16 // literal bytes of the blob tokens
 
-	// Numeric streams: rANS values, decoded by the numeric groups and the blob tokens.
+	// Numeric streams: rANS values, decoded by the walk and the blob tokens.
 	// Origins and angles have one stream per axis: the id below plus the axis.
 	streamPlayerOrigin      = 17
 	streamPlayerAngle       = 20

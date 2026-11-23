@@ -14,8 +14,7 @@ const transformFieldsLen = 4 * 4
 type fileModels [firstBlobStream]*streamModel
 
 // segmentStreams is the transform header of a segment and its streams.
-// Decoding reads the streams; encoding collects what the walk and the numeric
-// groups code.
+// Decoding reads the streams; encoding collects what the walk codes.
 type segmentStreams struct {
 	protocol   protocolState // at the segment start
 	stored     []byte        // decoding: the bytes of a stored segment, else nil
@@ -52,9 +51,6 @@ func decodeSegment(coded []byte, rawLen uint32, models *fileModels) ([]byte, err
 		if len(blob) != 0 {
 			return nil, corrupt("blob stream not consumed")
 		}
-	}
-	if err := fillNumericFields(output, &walker.records, streams); err != nil {
-		return nil, err
 	}
 	for _, decoder := range streams.decoders {
 		if decoder != nil && !decoder.isComplete() {

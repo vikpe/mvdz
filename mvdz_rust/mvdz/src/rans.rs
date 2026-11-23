@@ -4,9 +4,8 @@
 use crate::error::{Error, Result};
 use crate::fields::{put_usize, read_bytes, read_length_prefixed, read_usize};
 use crate::format::MAX_MODELS_RAW_LEN;
-use crate::math::{bucket, log2_fixed, normalize, quantize, quantized_weight};
+use crate::math::{MAX_QUANTIZED, bucket, log2_fixed, normalize, quantize, quantized_weight};
 use crate::memory::try_with_capacity;
-use crate::numeric::{NumericContext, numeric_context};
 use crate::parallel::par_map;
 use crate::streams::{STREAM_COUNT, is_numeric, is_structural};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -310,6 +309,10 @@ fn read_model_header(raw_model: &[u8], alphabet_size: usize) -> Result<ModelHead
         return Err(corrupt);
     }
     let (contexts, quantized_tables) = rest.split_at(2 * own_count);
+    let is_quantized = (quantized_tables.iter()).all(|&count| u32::from(count) <= MAX_QUANTIZED);
+    if !is_quantized {
+        return Err(corrupt);
+    }
     let quantized_tables = quantized_tables.to_vec();
     let keys: Vec<u32> = contexts
         .as_chunks::<2>()
@@ -657,7 +660,7 @@ pub(crate) fn write_models_block(raw_models: &[(usize, &[u8])]) -> ModelsBlock {
     let mut raw_len = meta.bytes.len();
     put_usize(&mut body, raw_models.len());
     for &(stream, raw_model) in raw_models {
-        let coded = encode_bytes(raw_model, &previous_bytes(raw_model), &meta)
+        let coded = pack_body(&meta.model, raw_model, &previous_bytes(raw_model), &[])
             .expect("the meta model is built from these bytes");
         put_usize(&mut body, stream);
         put_usize(&mut body, raw_model.len());
@@ -729,96 +732,17 @@ pub(crate) fn read_models_block(body: &[u8], threads: usize, max_memory: u64) ->
 
 fn decode_raw_model(coded: &[u8], raw_len: usize, meta: &DecoderModel) -> Result<Vec<u8>> {
     let corrupt = Error::Corrupt("model");
-    let mut decoder = ByteDecoder::new(coded, meta)?;
+    let mut decoder = StreamDecoder::new(coded, meta)?;
     let mut raw_model = try_with_capacity(raw_len)?;
     let mut previous_byte = 0;
     for _ in 0..raw_len {
-        previous_byte = decoder.get(u32::from(previous_byte)).ok_or(corrupt)?;
+        previous_byte = decoder.symbol(u32::from(previous_byte)).ok_or(corrupt)?;
         raw_model.push(previous_byte);
     }
     if !decoder.is_done() {
         return Err(corrupt);
     }
     Ok(raw_model)
-}
-
-#[inline(always)]
-fn byte_context(context: u32) -> u32 {
-    context & 0xffff
-}
-
-/// `None` when the model has no code for one of the symbols under its context.
-pub(crate) fn encode_bytes(
-    symbols: &[u8],
-    contexts: &[u16],
-    file_model: &FileModel,
-) -> Option<Vec<u8>> {
-    pack_body(&file_model.model, symbols, contexts, &[])
-}
-
-/// The symbols of one stream body under one model.
-#[derive(Debug)]
-struct SymbolDecoder<'a> {
-    model: &'a DecoderModel,
-    decoder: RansDecoder<'a>,
-}
-
-impl<'a> SymbolDecoder<'a> {
-    fn empty() -> Self {
-        SymbolDecoder {
-            model: &EMPTY_MODEL,
-            decoder: RansDecoder::finished_empty(),
-        }
-    }
-    fn new(rans: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
-        let decoder = RansDecoder::new(rans);
-        if decoder.state < STATE_MIN {
-            return Err(Error::Corrupt("rans stream"));
-        }
-        Ok(SymbolDecoder {
-            model: file_model,
-            decoder,
-        })
-    }
-    #[inline(always)]
-    fn get(&mut self, context_key: u32) -> Option<u32> {
-        let entry = self.model.entry(context_key);
-        self.model.decode(&mut self.decoder, entry)
-    }
-    fn is_done(&self) -> bool {
-        self.decoder.is_finished()
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ByteDecoder<'a> {
-    symbols: SymbolDecoder<'a>,
-}
-
-impl<'a> ByteDecoder<'a> {
-    pub(crate) fn empty() -> Self {
-        ByteDecoder {
-            symbols: SymbolDecoder::empty(),
-        }
-    }
-    pub(crate) fn new(body: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
-        let unpacked = unpack(body)?;
-        if !unpacked.extra.is_empty() {
-            return Err(Error::Corrupt("rans stream"));
-        }
-        Ok(ByteDecoder {
-            symbols: SymbolDecoder::new(unpacked.rans, file_model)?,
-        })
-    }
-    #[inline(always)]
-    pub(crate) fn get(&mut self, context: u32) -> Option<u8> {
-        self.symbols
-            .get(byte_context(context))
-            .map(|symbol| symbol as u8)
-    }
-    pub(crate) fn is_done(&self) -> bool {
-        self.symbols.is_done()
-    }
 }
 
 pub(crate) const NUMERIC_ALPHABET: usize = 65;
@@ -903,46 +827,37 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// `symbols`: the bucket of each value; `extra`: the mantissa bits of all of them.
+/// What one stream codes. `symbols`: the bytes of a structural stream, the bucket of each
+/// value of a numeric one; `extra`: the mantissa bits of the values.
 #[derive(Debug)]
-pub(crate) struct NumericSymbols {
+pub(crate) struct StreamSymbols {
     pub(crate) symbols: Vec<u8>,
     pub(crate) contexts: Vec<u16>,
     pub(crate) extra: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub(crate) struct NumericSymbolWriter {
-    stream: usize,
+#[derive(Debug, Default)]
+pub(crate) struct StreamWriter {
     symbols: Vec<u8>,
     contexts: Vec<u16>,
     bits: BitWriter,
 }
 
-impl NumericSymbolWriter {
-    pub(crate) fn new(stream: usize) -> Self {
-        Self {
-            stream,
-            symbols: Vec::new(),
-            contexts: Vec::new(),
-            bits: BitWriter::default(),
-        }
+impl StreamWriter {
+    #[inline(always)]
+    pub(crate) fn push_symbol(&mut self, context: u32, symbol: u8) {
+        debug_assert!(context <= 0xffff, "context {context:#x} over 16 bits");
+        self.symbols.push(symbol);
+        self.contexts.push(context as u16);
     }
     #[inline(always)]
-    pub(crate) fn push(&mut self, context: NumericContext, value: i32) {
+    pub(crate) fn push_value(&mut self, context: u32, value: i32) {
         let (symbol, mantissa_bits, mantissa) = bucket(value);
-        let key = numeric_context(self.stream, &context);
-        debug_assert!(
-            key <= 0xffff,
-            "stream {}: context {key:#x} over 16 bits",
-            self.stream
-        );
-        self.symbols.push(symbol as u8);
-        self.contexts.push(key as u16);
+        self.push_symbol(context, symbol as u8);
         self.bits.put(mantissa, mantissa_bits);
     }
-    pub(crate) fn finish(self) -> NumericSymbols {
-        NumericSymbols {
+    pub(crate) fn finish(self) -> StreamSymbols {
+        StreamSymbols {
             symbols: self.symbols,
             contexts: self.contexts,
             extra: self.bits.finish(),
@@ -951,36 +866,53 @@ impl NumericSymbolWriter {
 }
 
 /// `None` when the model has no code for one of the symbols under its context.
-pub(crate) fn encode_num(num: &NumericSymbols, file_model: &FileModel) -> Option<Vec<u8>> {
-    pack_body(&file_model.model, &num.symbols, &num.contexts, &num.extra)
+pub(crate) fn encode_stream(stream: &StreamSymbols, file_model: &FileModel) -> Option<Vec<u8>> {
+    pack_body(
+        &file_model.model,
+        &stream.symbols,
+        &stream.contexts,
+        &stream.extra,
+    )
 }
 
+/// One stream body under its model.
 #[derive(Debug)]
-pub(crate) struct NumericDecoder<'a> {
-    stream: usize,
-    symbols: SymbolDecoder<'a>,
+pub(crate) struct StreamDecoder<'a> {
+    model: &'a DecoderModel,
+    decoder: RansDecoder<'a>,
     bits: BitReader<'a>,
 }
 
-impl<'a> NumericDecoder<'a> {
+impl<'a> StreamDecoder<'a> {
+    /// Of a stream the segment does not code.
     pub(crate) fn empty() -> Self {
-        NumericDecoder {
-            stream: 0,
-            symbols: SymbolDecoder::empty(),
+        StreamDecoder {
+            model: &EMPTY_MODEL,
+            decoder: RansDecoder::finished_empty(),
             bits: BitReader::new(&[]),
         }
     }
-    pub(crate) fn new(stream: usize, body: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
+    pub(crate) fn new(body: &'a [u8], file_model: &'a DecoderModel) -> Result<Self> {
         let unpacked = unpack(body)?;
-        Ok(NumericDecoder {
-            stream,
-            symbols: SymbolDecoder::new(unpacked.rans, file_model)?,
+        let decoder = RansDecoder::new(unpacked.rans);
+        if decoder.state < STATE_MIN {
+            return Err(Error::Corrupt("rans stream"));
+        }
+        Ok(StreamDecoder {
+            model: file_model,
+            decoder,
             bits: BitReader::new(unpacked.extra),
         })
     }
     #[inline(always)]
-    pub(crate) fn get(&mut self, context: NumericContext) -> Option<i32> {
-        let symbol = self.symbols.get(numeric_context(self.stream, &context))?;
+    pub(crate) fn symbol(&mut self, context: u32) -> Option<u8> {
+        let entry = self.model.entry(context & 0xffff);
+        (self.model.decode(&mut self.decoder, entry)).map(|symbol| symbol as u8)
+    }
+    #[inline(always)]
+    pub(crate) fn value(&mut self, context: u32) -> Option<i32> {
+        let entry = self.model.entry(context);
+        let symbol = self.model.decode(&mut self.decoder, entry)?;
         if symbol > 64 {
             return None;
         }
@@ -995,15 +927,15 @@ impl<'a> NumericDecoder<'a> {
             magnitude
         })
     }
+    /// A structural stream has no mantissa bits: its `extra` is empty.
     pub(crate) fn is_done(&self) -> bool {
-        self.symbols.is_done() && self.bits.is_finished()
+        self.decoder.is_finished() && self.bits.is_finished()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streams::PLAYER_ORIGIN;
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
@@ -1050,12 +982,17 @@ mod tests {
                 ][(index % 3) as usize]
             })
             .collect();
-        let (file_model, model) = models(&symbols, &contexts, 256)?;
-        let body =
-            encode_bytes(&symbols, &contexts, &file_model).context("every symbol has a code")?;
-        let mut decoder = ByteDecoder::new(&body, &model)?;
+        let stream = StreamSymbols {
+            symbols,
+            contexts,
+            extra: Vec::new(),
+        };
+        let (symbols, contexts) = (&stream.symbols, &stream.contexts);
+        let (file_model, model) = models(symbols, contexts, 256)?;
+        let body = encode_stream(&stream, &file_model).context("every symbol has a code")?;
+        let mut decoder = StreamDecoder::new(&body, &model)?;
         for (index, &symbol) in symbols.iter().enumerate() {
-            assert_eq!(decoder.get(u32::from(contexts[index])), Some(symbol));
+            assert_eq!(decoder.symbol(u32::from(contexts[index])), Some(symbol));
         }
         assert!(decoder.is_done());
         // the model of a byte stream is refused as a numeric stream's
@@ -1068,37 +1005,40 @@ mod tests {
             .is_err()
         );
         // a body cut short is refused; a symbol short does not finish
-        assert!(ByteDecoder::new(&body[..body.len() - 2], &model).is_err());
-        let mut decoder = ByteDecoder::new(&body, &model)?;
+        assert!(StreamDecoder::new(&body[..body.len() - 2], &model).is_err());
+        let mut decoder = StreamDecoder::new(&body, &model)?;
         for &context in &contexts[..symbols.len() - 1] {
-            decoder.get(u32::from(context));
+            decoder.symbol(u32::from(context));
         }
         assert!(!decoder.is_done());
         Ok(())
     }
 
     #[test]
+    fn quantized_count_over_the_maximum_is_refused() {
+        let table_memory = TableMemory::new(u64::MAX);
+        let no_own_contexts = 0u32.to_le_bytes();
+        let model_of = |quantized: u8| [&no_own_contexts[..], &[quantized; 256]].concat();
+        assert!(read_model(&model_of(MAX_QUANTIZED as u8), 256, &table_memory).is_ok());
+        assert!(read_model(&model_of(MAX_QUANTIZED as u8 + 1), 256, &table_memory).is_err());
+        assert_eq!(quantize(u32::MAX), MAX_QUANTIZED);
+    }
+
+    #[test]
     fn numeric_round_trip() -> anyhow::Result<()> {
-        let values: Vec<(NumericContext, i32)> = (0..3000i32)
-            .map(|index| {
-                (
-                    NumericContext {
-                        features: [(index % 5).cast_unsigned() as u8, 0, 0, 0],
-                    },
-                    (index * 37) % 2001 - 1000,
-                )
-            })
+        let values: Vec<(u32, i32)> = (0..3000i32)
+            .map(|index| ((index % 5).cast_unsigned(), (index * 37) % 2001 - 1000))
             .collect();
-        let mut writer = NumericSymbolWriter::new(PLAYER_ORIGIN);
+        let mut writer = StreamWriter::default();
         for (context, value) in &values {
-            writer.push(*context, *value);
+            writer.push_value(*context, *value);
         }
-        let num = writer.finish();
-        let (file_model, model) = models(&num.symbols, &num.contexts, NUMERIC_ALPHABET)?;
-        let body = encode_num(&num, &file_model).context("every symbol has a code")?;
-        let mut decoder = NumericDecoder::new(PLAYER_ORIGIN, &body, &model)?;
+        let stream = writer.finish();
+        let (file_model, model) = models(&stream.symbols, &stream.contexts, NUMERIC_ALPHABET)?;
+        let body = encode_stream(&stream, &file_model).context("every symbol has a code")?;
+        let mut decoder = StreamDecoder::new(&body, &model)?;
         for &(context, value) in &values {
-            assert_eq!(decoder.get(context), Some(value));
+            assert_eq!(decoder.value(context), Some(value));
         }
         assert!(decoder.is_done());
         Ok(())
