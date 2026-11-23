@@ -14,15 +14,12 @@ exclude = ["/fuzz"]
 
 [features]
 fuzz = []
-# measurements: examples/stats.rs
-stats = []
 
 [dependencies]
 sha2 = { workspace = true }
 crc32fast = { workspace = true }
 
 [dev-dependencies]
-mvdz = { path = ".", features = ["stats"] }
 anyhow = { workspace = true }
 criterion = { workspace = true }
 pretty_assertions = { workspace = true }
@@ -31,10 +28,6 @@ pretty_assertions = { workspace = true }
 [[bench]]
 name = "codec"
 harness = false
-
-[[example]]
-name = "stats"
-required-features = ["stats"]
 
 [lints]
 workspace = true

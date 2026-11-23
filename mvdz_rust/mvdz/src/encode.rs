@@ -216,7 +216,7 @@ pub(crate) fn compress(src: &[u8], threads: usize) -> Result<Vec<u8>> {
 }
 
 /// FORMAT.md 8 rule 1, of a demo held whole.
-#[cfg(any(test, feature = "fuzz", feature = "stats"))]
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
     let first_segment_len = segment::cut_points(demo).get(1).copied().unwrap_or(0);
     check_first_segment(&demo[..first_segment_len])

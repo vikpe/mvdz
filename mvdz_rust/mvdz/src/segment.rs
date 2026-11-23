@@ -15,9 +15,6 @@ use crate::streams::{
 use crate::walker::{SegmentIo, SegmentWalker};
 use std::io::{self, Read};
 
-#[cfg(feature = "stats")]
-pub mod stats;
-
 pub(crate) const SEGMENT_TARGET_RAW: usize = 256 * 1024;
 
 /// The streams of a segment, by stream id: decode reads them, encode collects what the walk
@@ -29,8 +26,6 @@ pub(crate) struct Streams<'a, const IS_ENCODE: bool> {
     decoders: [rans::StreamDecoder<'a>; FIRST_BLOB_STREAM],
     /// The unread rest of each.
     decode_blobs: Vec<&'a [u8]>,
-    #[cfg(feature = "stats")]
-    ablation: stats::Ablation,
 }
 
 impl Streams<'_, true> {
@@ -40,8 +35,6 @@ impl Streams<'_, true> {
             encode_blobs: Vec::from_fn(STREAM_COUNT, |_| Vec::new()),
             decoders: std::array::from_fn(|_| rans::StreamDecoder::empty()),
             decode_blobs: Vec::new(),
-            #[cfg(feature = "stats")]
-            ablation: stats::Ablation::None,
         }
     }
 }
@@ -56,8 +49,6 @@ impl<'a> Streams<'a, false> {
             encode_blobs: Vec::new(),
             decoders,
             decode_blobs,
-            #[cfg(feature = "stats")]
-            ablation: stats::Ablation::None,
         }
     }
 }
@@ -67,11 +58,6 @@ impl<const IS_ENCODE: bool> Streams<'_, IS_ENCODE> {
     /// is absent or the context has an empty table.
     #[inline(always)]
     pub(crate) fn symbol(&mut self, stream: usize, context: u32, source: u8) -> Option<u8> {
-        #[cfg(feature = "stats")]
-        if let Some(blob) = self.ablated_blob(stream) {
-            self.encode_blobs[blob].push(source);
-            return Some(source);
-        }
         if IS_ENCODE {
             self.writers[stream].push_symbol(context, source);
             return Some(source);
@@ -86,11 +72,6 @@ impl<const IS_ENCODE: bool> Streams<'_, IS_ENCODE> {
     /// As [`Self::symbol`], for a residual of a numeric stream.
     #[inline(always)]
     pub(crate) fn residual(&mut self, stream: usize, context: u32, source: i32) -> Option<i32> {
-        #[cfg(feature = "stats")]
-        if let Some(blob) = self.ablated_blob(stream) {
-            self.collect_ablated_residual(blob, stream, source);
-            return Some(source);
-        }
         if IS_ENCODE {
             self.writers[stream].push_value(context, source);
             return Some(source);
@@ -172,15 +153,7 @@ impl Walked {
 
 /// `None`: the transform cannot represent the segment.
 pub(crate) fn walk(src: &[u8], protocol: ProtocolState) -> Option<(Walked, ProtocolState)> {
-    walk_streams(src, protocol, Streams::encoder())
-}
-
-fn walk_streams(
-    src: &[u8],
-    protocol: ProtocolState,
-    streams: Streams<'_, true>,
-) -> Option<(Walked, ProtocolState)> {
-    let mut walker = SegmentWalker::new(SegmentIo::encoder(src, streams), protocol);
+    let mut walker = SegmentWalker::new(SegmentIo::encoder(src, Streams::encoder()), protocol);
     walker.run(src.len() - framed_len(src));
     let (streams, end_protocol) = walker.finish()?;
     Some((Walked::new(streams, src.len(), protocol), end_protocol))
@@ -452,7 +425,7 @@ impl<R: Read> SegmentReader<R> {
 }
 
 /// The segment bounds of a demo held whole, from 0 to its length.
-#[cfg(any(test, feature = "fuzz", feature = "stats"))]
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     let mut segments = SegmentReader::new(src);
     let mut cuts = vec![0];

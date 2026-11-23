@@ -275,7 +275,6 @@ dependencies = [
  "anyhow",
  "crc32fast",
  "criterion",
- "mvdz",
  "pretty_assertions",
  "sha2",
 ]

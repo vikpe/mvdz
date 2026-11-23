@@ -36,7 +36,3 @@ pub use format::Header;
 #[cfg(feature = "fuzz")]
 #[doc(hidden)]
 pub mod fuzz;
-
-#[cfg(feature = "stats")]
-#[doc(hidden)]
-pub use segment::stats;

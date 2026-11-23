@@ -202,11 +202,6 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
     }
 
     fn command(&mut self, command: u8) {
-        #[cfg(feature = "stats")]
-        if self.io.streams.is_generic(command) {
-            self.copy_command_body(GENERIC + command as usize, command);
-            return;
-        }
         match command {
             SVC_PLAYER_INFO => self.player_info(),
             SVC_PACKET_ENTITIES | SVC_DELTA_PACKET_ENTITIES => {
@@ -536,11 +531,6 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             }
             let block_len = self.io.code_blob_bytes(HIDDEN_LENGTH, 4);
             let block_type = self.io.code_blob_bytes(HIDDEN_TYPE, 2);
-            #[cfg(feature = "stats")]
-            if self.io.streams.is_hidden_misc(block_type) {
-                self.io.copy_blob(HIDDEN_MISC, block_len as usize);
-                continue;
-            }
             if block_type == MVD_HIDDEN_USERCMD && block_len == 23 {
                 self.usercmd();
             } else {
