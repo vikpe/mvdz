@@ -6,7 +6,9 @@
     reason = "byte counts as shares and ratios: far under 2^52"
 )]
 
-use super::{EncodeIo, ModelBuilder, Walked, cut_points, encode, stored, walk_tail};
+use super::{
+    ModelBuilder, Streams, Walked, cut_points, encode, models_body, stored, walk_streams, walk_tail,
+};
 use crate::fields::{read_u16, read_usize};
 use crate::format::{HEADER_LEN, LEN_FIELD_LEN, MAX_SEGMENT_CODED, SEGMENT_FIELDS_LEN};
 use crate::protocol::{
@@ -25,7 +27,6 @@ use crate::streams::{
     STREAM_COUNT, TAIL, TEMP_ENTITY_FLOAT, TEMP_ENTITY_MISC, TEMP_ENTITY_ORIGIN, TEMP_ENTITY_TYPE,
     TIME, TYPE, USERCMD, USERCMD_ANGLE, is_blob,
 };
-use crate::walker::{SegmentWalker, SymbolIo};
 use std::fmt::Write;
 
 #[derive(Debug, Clone)]
@@ -371,7 +372,7 @@ fn percent(part: f64, whole: f64) -> f64 {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Ablation {
+pub(super) enum Ablation {
     None,
     Generic(&'static [u8]),
     HiddenMisc(u32),
@@ -473,59 +474,32 @@ const VARIANTS: &[(&str, Ablation)] = &[
     ("no model: USERCMD_ANGLE", Ablation::Blob(&[USERCMD_ANGLE])),
 ];
 
-#[derive(Debug)]
-struct AblatedIo {
-    inner: EncodeIo,
-    ablation: Ablation,
-}
-
-impl AblatedIo {
-    /// Ids from `GENERIC + 128` up: no command byte reaches them.
-    fn blob_of(&self, stream: usize) -> Option<usize> {
+impl<const IS_ENCODE: bool> Streams<'_, IS_ENCODE> {
+    /// The blob that takes an ablated stream's values: ids from `GENERIC + 128` up, which no
+    /// command byte reaches.
+    pub(super) fn ablated_blob(&self, stream: usize) -> Option<usize> {
         const UNUSED_GENERIC: usize = GENERIC + 128;
         match self.ablation {
             Ablation::Blob(streams) if streams.contains(&stream) => Some(UNUSED_GENERIC + stream),
             _ => None,
         }
     }
-}
 
-impl SymbolIo for AblatedIo {
-    #[inline(always)]
-    fn symbol(&mut self, stream: usize, context: u32, value: u8) -> Option<u8> {
-        match self.blob_of(stream) {
-            Some(blob) => self.inner.blobs[blob].push(value),
-            None => return self.inner.symbol(stream, context, value),
-        }
-        Some(value)
-    }
-    #[inline(always)]
-    fn residual(&mut self, stream: usize, context: u32, value: i32) -> Option<i32> {
-        let Some(blob) = self.blob_of(stream) else {
-            return self.inner.residual(stream, context, value);
-        };
+    pub(super) fn collect_ablated_residual(&mut self, blob: usize, stream: usize, value: i32) {
         let is_float = (PLAYER_FLOAT_ORIGIN..PLAYER_FLOAT_ORIGIN + 3).contains(&stream)
             || (ENTITY_FLOAT_ORIGIN..ENTITY_FLOAT_ORIGIN + 3).contains(&stream);
         if is_float {
-            self.inner.blobs[blob].extend_from_slice(&value.to_le_bytes());
+            self.encode_blobs[blob].extend_from_slice(&value.to_le_bytes());
         } else {
-            self.inner.blobs[blob].extend_from_slice(&(value as i16).to_le_bytes());
+            self.encode_blobs[blob].extend_from_slice(&(value as i16).to_le_bytes());
         }
-        Some(value)
     }
-    fn put_blob(&mut self, stream: usize, bytes: &[u8]) {
-        self.inner.put_blob(stream, bytes);
-    }
-    fn take_blob(&mut self, _: usize, _: usize) -> Option<&[u8]> {
-        None
-    }
-    fn blob_rest(&self, _: usize) -> &[u8] {
-        &[]
-    }
-    fn is_generic(&self, command: u8) -> bool {
+
+    pub(crate) fn is_generic(&self, command: u8) -> bool {
         matches!(self.ablation, Ablation::Generic(commands) if commands.contains(&command))
     }
-    fn is_hidden_misc(&self, block_type: u32) -> bool {
+
+    pub(crate) fn is_hidden_misc(&self, block_type: u32) -> bool {
         matches!(self.ablation, Ablation::HiddenMisc(ablated_type) if ablated_type == block_type)
     }
 }
@@ -546,24 +520,20 @@ fn walk_demo<'a>(
     let mut segments = Vec::with_capacity(cuts.len());
     for (&start, &end) in cuts.iter().zip(&cuts[1..]) {
         let raw = &demo[start..end];
-        let io = AblatedIo {
-            inner: EncodeIo::new(),
-            ablation,
-        };
-        let mut walker = SegmentWalker::encoder(raw, io, protocol);
-        walker.run();
+        let mut streams = Streams::encoder();
+        streams.ablation = ablation;
+        let walked = walk_streams(raw, protocol, streams);
         let start_protocol = protocol;
-        let is_walked = !walker.has_error;
         if let Some(census) = census.as_deref_mut() {
-            if is_walked {
+            if walked.is_some() {
                 count_segment(raw, start_protocol, census);
             } else {
                 add(&mut census[ROW_TAIL], raw.len());
             }
         }
-        let segment = if is_walked {
-            protocol = walker.protocol;
-            Walked::new(walker.io.inner, raw.len(), start_protocol)
+        let segment = if let Some((walked, end_protocol)) = walked {
+            protocol = end_protocol;
+            walked
         } else {
             walk_tail(raw, start_protocol)
         };
@@ -633,7 +603,7 @@ fn code(segments: &[Segment]) -> Coded {
     let models_block_len = if used_ids.is_empty() {
         0
     } else {
-        super::models_body(&models, &used_ids).len()
+        models_body(&models, &used_ids).len()
     };
     let bodies_len: usize = bodies
         .iter()

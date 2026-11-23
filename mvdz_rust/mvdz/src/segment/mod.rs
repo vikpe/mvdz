@@ -12,90 +12,124 @@ use crate::streams::{
     FIRST_BLOB_STREAM, LZ_DISTANCE, LZ_LENGTH, LZ_LITERAL, RAW, STREAM_COUNT, TAIL, is_blob,
     is_structural,
 };
-use crate::walker::{SegmentWalker, SymbolIo};
+use crate::walker::{SegmentIo, SegmentWalker};
 
 #[cfg(feature = "stats")]
 pub mod stats;
 
 pub(crate) const SEGMENT_TARGET_RAW: usize = 256 * 1024;
 
-/// By stream id.
+/// The streams of a segment, by stream id: decode reads them, encode collects what the walk
+/// codes. The one part of the walk that depends on the direction.
 #[derive(Debug)]
-struct EncodeIo {
-    streams: Vec<rans::StreamWriter>,
-    blobs: Vec<Vec<u8>>,
+pub(crate) struct Streams<'a, const IS_ENCODE: bool> {
+    writers: Vec<rans::StreamWriter>,
+    encode_blobs: Vec<Vec<u8>>,
+    decoders: [rans::StreamDecoder<'a>; FIRST_BLOB_STREAM],
+    /// The unread rest of each.
+    decode_blobs: Vec<&'a [u8]>,
+    #[cfg(feature = "stats")]
+    ablation: stats::Ablation,
 }
 
-impl EncodeIo {
-    fn new() -> Self {
+impl Streams<'_, true> {
+    fn encoder() -> Self {
         Self {
-            streams: Vec::from_fn(FIRST_BLOB_STREAM, |_| rans::StreamWriter::default()),
-            blobs: Vec::from_fn(STREAM_COUNT, |_| Vec::new()),
+            writers: Vec::from_fn(FIRST_BLOB_STREAM, |_| rans::StreamWriter::default()),
+            encode_blobs: Vec::from_fn(STREAM_COUNT, |_| Vec::new()),
+            decoders: std::array::from_fn(|_| rans::StreamDecoder::empty()),
+            decode_blobs: Vec::new(),
+            #[cfg(feature = "stats")]
+            ablation: stats::Ablation::None,
         }
     }
 }
 
-impl SymbolIo for EncodeIo {
-    #[inline(always)]
-    fn symbol(&mut self, stream: usize, context: u32, value: u8) -> Option<u8> {
-        self.streams[stream].push_symbol(context, value);
-        Some(value)
-    }
-    #[inline(always)]
-    fn residual(&mut self, stream: usize, context: u32, value: i32) -> Option<i32> {
-        self.streams[stream].push_value(context, value);
-        Some(value)
-    }
-    fn put_blob(&mut self, stream: usize, bytes: &[u8]) {
-        self.blobs[stream].extend_from_slice(bytes);
-    }
-    fn take_blob(&mut self, _: usize, _: usize) -> Option<&[u8]> {
-        None
-    }
-    fn blob_rest(&self, _: usize) -> &[u8] {
-        &[]
+impl<'a> Streams<'a, false> {
+    fn decoder(
+        decoders: [rans::StreamDecoder<'a>; FIRST_BLOB_STREAM],
+        decode_blobs: Vec<&'a [u8]>,
+    ) -> Self {
+        Self {
+            writers: Vec::new(),
+            encode_blobs: Vec::new(),
+            decoders,
+            decode_blobs,
+            #[cfg(feature = "stats")]
+            ablation: stats::Ablation::None,
+        }
     }
 }
 
-#[derive(Debug)]
-struct DecodeIo<'a> {
-    /// By stream id.
-    decoders: [rans::StreamDecoder<'a>; FIRST_BLOB_STREAM],
-    /// The unread rest of each blob stream.
-    blobs: Vec<&'a [u8]>,
-}
-
-impl SymbolIo for DecodeIo<'_> {
+impl<const IS_ENCODE: bool> Streams<'_, IS_ENCODE> {
+    /// The next symbol of a structural stream; encode collects `source`. `None`: the stream
+    /// is absent or the context has an empty table.
     #[inline(always)]
-    fn symbol(&mut self, stream: usize, context: u32, _: u8) -> Option<u8> {
+    pub(crate) fn symbol(&mut self, stream: usize, context: u32, source: u8) -> Option<u8> {
+        #[cfg(feature = "stats")]
+        if let Some(blob) = self.ablated_blob(stream) {
+            self.encode_blobs[blob].push(source);
+            return Some(source);
+        }
+        if IS_ENCODE {
+            self.writers[stream].push_symbol(context, source);
+            return Some(source);
+        }
         debug_assert!(
             context <= 0xffff,
             "stream {stream}: context {context:#x} over 16 bits"
         );
         self.decoders[stream].symbol(context)
     }
+
+    /// As [`Self::symbol`], for a residual of a numeric stream.
     #[inline(always)]
-    fn residual(&mut self, stream: usize, context: u32, _: i32) -> Option<i32> {
+    pub(crate) fn residual(&mut self, stream: usize, context: u32, source: i32) -> Option<i32> {
+        #[cfg(feature = "stats")]
+        if let Some(blob) = self.ablated_blob(stream) {
+            self.collect_ablated_residual(blob, stream, source);
+            return Some(source);
+        }
+        if IS_ENCODE {
+            self.writers[stream].push_value(context, source);
+            return Some(source);
+        }
         self.decoders[stream].value(context)
     }
-    fn put_blob(&mut self, _: usize, _: &[u8]) {}
-    fn take_blob(&mut self, stream: usize, len: usize) -> Option<&[u8]> {
-        read_bytes(&mut self.blobs[stream], len)
+
+    /// Encode: appends to a blob stream.
+    #[inline]
+    pub(crate) fn collect_blob(&mut self, stream: usize, bytes: &[u8]) {
+        self.encode_blobs[stream].extend_from_slice(bytes);
     }
-    fn blob_rest(&self, stream: usize) -> &[u8] {
-        self.blobs[stream]
+
+    /// Decode: fills `out` with the next bytes of a blob stream; `false` if it has fewer.
+    #[inline]
+    pub(crate) fn take_blob(&mut self, stream: usize, out: &mut [u8]) -> bool {
+        match read_bytes(&mut self.decode_blobs[stream], out.len()) {
+            Some(bytes) => {
+                out.copy_from_slice(bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Decode: the unread rest of a blob stream.
+    pub(crate) fn blob_rest(&self, stream: usize) -> &[u8] {
+        self.decode_blobs[stream]
     }
 }
 
-fn walk_decode(io: DecodeIo, dst: &mut [u8], protocol: ProtocolState) -> Result<()> {
-    let mut walker = SegmentWalker::decoder(dst, io, protocol);
-    walker.run();
-    if walker.has_error {
+fn walk_decode(streams: Streams<'_, false>, dst: &mut [u8], protocol: ProtocolState) -> Result<()> {
+    let tail = streams.decode_blobs[TAIL].len();
+    let mut walker = SegmentWalker::new(SegmentIo::decoder(dst, streams), protocol);
+    walker.run(tail);
+    let Some((streams, _)) = walker.finish() else {
         return bad("structure");
-    }
-    let io = &walker.io;
-    if !io.decoders.iter().all(rans::StreamDecoder::is_done)
-        || !io.blobs.iter().all(|blob| blob.is_empty())
+    };
+    if !streams.decoders.iter().all(rans::StreamDecoder::is_done)
+        || !streams.decode_blobs.iter().all(|blob| blob.is_empty())
     {
         return bad("unconsumed stream data");
     }
@@ -113,10 +147,10 @@ pub(crate) struct Walked {
 }
 
 impl Walked {
-    fn new(io: EncodeIo, raw_len: usize, protocol: ProtocolState) -> Self {
-        let blob_bytes: Vec<u8> = (io.blobs.iter()).flatten().copied().collect();
+    fn new(walked: Streams<'_, true>, raw_len: usize, protocol: ProtocolState) -> Self {
+        let blob_bytes: Vec<u8> = (walked.encode_blobs.iter()).flatten().copied().collect();
         let tokens = lz::tokens(&blob_bytes);
-        let mut streams: Vec<rans::StreamSymbols> = (io.streams.into_iter())
+        let mut streams: Vec<rans::StreamSymbols> = (walked.writers.into_iter())
             .map(rans::StreamWriter::finish)
             .collect();
         streams[LZ_LITERAL] = tokens.literals;
@@ -124,7 +158,7 @@ impl Walked {
         streams[LZ_DISTANCE] = tokens.dists;
         Self {
             streams,
-            blobs: io.blobs,
+            blobs: walked.encode_blobs,
             raw_len,
             start_protocol: protocol,
         }
@@ -137,19 +171,33 @@ impl Walked {
 
 /// `None`: the transform cannot represent the segment.
 pub(crate) fn walk(src: &[u8], protocol: ProtocolState) -> Option<(Walked, ProtocolState)> {
-    let mut walker = SegmentWalker::encoder(src, EncodeIo::new(), protocol);
-    walker.run();
-    if walker.has_error {
-        return None;
+    walk_streams(src, protocol, Streams::encoder())
+}
+
+fn walk_streams(
+    src: &[u8],
+    protocol: ProtocolState,
+    streams: Streams<'_, true>,
+) -> Option<(Walked, ProtocolState)> {
+    let mut walker = SegmentWalker::new(SegmentIo::encoder(src, streams), protocol);
+    walker.run(src.len() - framed_len(src));
+    let (streams, end_protocol) = walker.finish()?;
+    Some((Walked::new(streams, src.len(), protocol), end_protocol))
+}
+
+/// The whole frames from the start.
+fn framed_len(src: &[u8]) -> usize {
+    let mut end = 0;
+    while let Some(len) = frame_len(src, end) {
+        end += len;
     }
-    let end_protocol = walker.protocol;
-    Some((Walked::new(walker.io, src.len(), protocol), end_protocol))
+    end
 }
 
 pub(crate) fn walk_tail(src: &[u8], protocol: ProtocolState) -> Walked {
-    let mut io = EncodeIo::new();
-    io.blobs[TAIL] = src.to_vec();
-    Walked::new(io, src.len(), protocol)
+    let mut streams = Streams::encoder();
+    streams.encode_blobs[TAIL] = src.to_vec();
+    Walked::new(streams, src.len(), protocol)
 }
 
 /// Of the blob streams of a segment together (FORMAT.md 7).
@@ -486,13 +534,17 @@ pub(crate) fn decode(
             at += entry.size;
         }
     }
-    walk_decode(DecodeIo { decoders, blobs }, dst, transform_header.protocol)
+    walk_decode(
+        Streams::decoder(decoders, blobs),
+        dst,
+        transform_header.protocol,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streams::{USERCMD, USERCMD_ANGLE, is_numeric, is_structural};
+    use crate::streams::{ENTITY_BITS, USERCMD, USERCMD_ANGLE, is_numeric, is_structural};
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
@@ -515,12 +567,16 @@ mod tests {
 
     fn coded(src: &[u8]) -> anyhow::Result<(Vec<u8>, rans::Models)> {
         let (walked, _) = walk(src, ProtocolState::default()).context("the demo walks")?;
-        let models = build_models(&[&walked]);
+        coded_walked(&walked)
+    }
+
+    fn coded_walked(walked: &Walked) -> anyhow::Result<(Vec<u8>, rans::Models)> {
+        let models = build_models(&[walked]);
         let ids: Vec<usize> = (0..models.len())
             .filter(|&stream| models[stream].is_some())
             .collect();
         let file_models = rans::read_models_block(&models_body(&models, &ids), 1, u64::MAX)?;
-        let body = encode(&walked, &mut Vec::new(), &models).context("a transform body")?;
+        let body = encode(walked, &mut Vec::new(), &models).context("a transform body")?;
         Ok((body, file_models))
     }
 
@@ -553,6 +609,42 @@ mod tests {
     fn segment_round_trip() -> anyhow::Result<()> {
         let src = demo();
         let (body, file_models) = coded(&src)?;
+        let transform_header = parse_transform_header(&body, src.len())?;
+        let dst = decoded(&body, &transform_header, src.len(), Some(&file_models))?;
+        assert!(dst == src);
+        Ok(())
+    }
+
+    /// Entity 5 keeps its bits (`ENTITY_BITS` symbol 0 under its own context) while entities
+    /// 10 to 39 toggle theirs, so the fallback table does not decode entity 5's symbols.
+    fn entity_demo() -> Vec<u8> {
+        let mut demo = Vec::new();
+        for frame in 0..12u8 {
+            let mut payload = vec![crate::protocol::SVC_PACKET_ENTITIES];
+            payload.extend_from_slice(&(1u16 << 11 | 5).to_le_bytes());
+            payload.extend_from_slice(&[frame, 1]);
+            for entity in 10..40u16 {
+                let origin_bit = 9 + u16::from(frame % 2);
+                payload.extend_from_slice(&(1u16 << origin_bit | entity).to_le_bytes());
+                payload.extend_from_slice(&[entity as u8, frame]);
+            }
+            payload.extend_from_slice(&[0, 0]);
+            demo.push(13);
+            demo.push(6);
+            demo.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            demo.extend_from_slice(&payload);
+        }
+        demo
+    }
+
+    /// FORMAT.md 4.8: the entity keeps 7 bits of its word; bit 7 of the `ENTITY_BITS` symbol
+    /// falls off, so the output is the demo.
+    #[test]
+    fn entity_bits_symbol_bit_7_falls_off() -> anyhow::Result<()> {
+        let src = entity_demo();
+        let (mut walked, _) = walk(&src, ProtocolState::default()).context("the demo walks")?;
+        walked.streams[ENTITY_BITS].symbols[0] |= 0x80;
+        let (body, file_models) = coded_walked(&walked)?;
         let transform_header = parse_transform_header(&body, src.len())?;
         let dst = decoded(&body, &transform_header, src.len(), Some(&file_models))?;
         assert!(dst == src);

@@ -161,7 +161,7 @@ its start is in its transform header (3.1). A reader does not check where
 a demo is cut: a segment may start or end inside a frame, and the bytes
 after its last whole frame are its tail (4.4).
 
-**Cut points written by the reference encoder** (`segment.rs:cut_points`):
+**Cut points written by the reference encoder** (`segment/mod.rs:cut_points`):
 a segment ends at the first frame boundary at or after 256 KiB of its
 start. A frame that runs past 1 MiB from the segment start, and data that
 does not frame, are cut every 1 MiB up to where the frames go on, and each
@@ -170,9 +170,9 @@ beyond the rules above.
 
 ---------------------------------------------------------------------------
 
-## 3. Segment (`segment.rs`)
+## 3. Segment (`segment/mod.rs`)
 
-### 3.1 Transform header and stream table (`segment.rs:parse_transform_header`)
+### 3.1 Transform header and stream table (`segment/mod.rs:parse_transform_header`)
 
 ```
 coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
@@ -272,7 +272,7 @@ An id of 315 or above is an error.
 | 58 | `TEMP_ENTITY_FLOAT` | blob | temp-entity origins with float coordinates |
 | 59 + c | `GENERIC` + c | blob | body of every other svc command c (including 11, serverdata) |
 
-### 3.3 Decoding a segment (`decode.rs:decode_segment`, `segment.rs:decode`)
+### 3.3 Decoding a segment (`decode.rs:decode_segment`, `segment/mod.rs:decode`)
 
 1. Parse the segment fields (2.3) and the transform header and stream
    table (3.1).
@@ -319,7 +319,7 @@ Three kinds of stream feed the walker (stream ids: section 3):
 Walker primitives (decode direction; `p` = output cursor):
 
 * `symbol(s, ctx)`: the next symbol of structural stream `s` under context
-  `ctx`; error if `s` is absent (`segment.rs:DecodeIo::symbol`).
+  `ctx`; error if `s` is absent (`segment/mod.rs:Streams::symbol`).
 * `code_symbol(s, ctx)`: `v = symbol(s, ctx)`; write `v` at `dst[p]`;
   `p += 1`; return `v`.
 * `code_symbol_residual(s, ctx, pred)`: `v = (symbol(s, ctx) + pred) mod 256`;
@@ -1261,7 +1261,7 @@ its blob parser (rule 10) on its own.
    unless that frame walks without an escape (section 4) or 16 more whole frames of type 1 to 6
    follow it (`has_frame_run`, rule 2). A damaged demo with an intact start is encoded.
    The unchecked entry point (the fuzz targets' `encode_any`) writes any bytes.
-2. **Cut points** (`segment.rs:cut_points`): an empty demo has no segment. Otherwise walk
+2. **Cut points** (`segment/mod.rs:cut_points`): an empty demo has no segment. Otherwise walk
    the frames from the start (`frame_len`, rule 11) and cut after a frame whenever
    at least 2^18 bytes have accumulated since the last cut and bytes remain. Where a
    frame would take the segment past 2^20 bytes, or the bytes do not frame, find where
@@ -1278,7 +1278,7 @@ its blob parser (rule 10) on its own.
 3. **Protocol state**: the first pass walks the segments in order (section 4). Segment k's
    `fte`, `fte2`, `mvd1` are the state at the end of the last segment before it whose
    walk succeeded (0 for the first).
-4. **Models** (`segment.rs:ModelBuilder`, `rans.rs:Tally::file_model`): every
+4. **Models** (`segment/mod.rs:ModelBuilder`, `rans.rs:Tally::file_model`): every
    structural and numeric stream gets one model, built from its symbol counts per
    context summed over every segment whose walk succeeded:
    * A context gets its own table where its entropy plus 48 + 6 bits per present symbol
@@ -1324,7 +1324,7 @@ its blob parser (rule 10) on its own.
      rule 5 then writes it another way: the models do not depend on pass 2.
    * While the models block of all models would exceed 2^22 bytes, coded or raw
      (section 7), the model with the longest raw model is dropped (ties: highest stream
-     id), never those of streams 15, 34 and 35 (`segment.rs:fit_models_block`).
+     id), never those of streams 15, 34 and 35 (`segment/mod.rs:fit_models_block`).
 5. **Segments** (`encode.rs:code_segments`): a segment is written the first of these
    ways that works:
    * transform-coded (section 3), if its walk succeeds;
@@ -1345,7 +1345,7 @@ its blob parser (rule 10) on its own.
    each segment against its input, then the whole-demo checks. A file that fails is
    `Internal`: a bug in the encoder.
 8. **Determinism**: the output depends only on the input, not on the thread count.
-9. **Duration** (`segment.rs:duration_ms`): a segment's `duration_ms` is the sum of the
+9. **Duration** (`segment/mod.rs:duration_ms`): a segment's `duration_ms` is the sum of the
    time bytes of the whole frames it starts with (`frame_len`, rule 11),
    stopping at the first bytes that do not frame. The header's `duration_ms` is the sum
    of the segments'.
