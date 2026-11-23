@@ -35,14 +35,14 @@ impl EncodeIo {
 
 impl SymbolIo for EncodeIo {
     #[inline(always)]
-    fn symbol(&mut self, stream: usize, context: u32, value: u8) -> u8 {
+    fn symbol(&mut self, stream: usize, context: u32, value: u8) -> Option<u8> {
         debug_assert!(
             context <= 0xffff,
             "stream {stream}: context {context:#x} over 16 bits"
         );
         self.symbols[stream].push(value);
         self.contexts[stream].push(context as u16);
-        value
+        Some(value)
     }
     fn put_blob(&mut self, stream: usize, bytes: &[u8]) {
         self.blobs[stream].extend_from_slice(bytes);
@@ -80,23 +80,16 @@ pub(crate) struct DecodeIo<'a> {
     structural: [rans::ByteDecoder<'a>; FIRST_NUMERIC_STREAM],
     /// The unread rest of each blob stream.
     blobs: Vec<&'a [u8]>,
-    pub(crate) is_over: bool,
 }
 
 impl SymbolIo for DecodeIo<'_> {
     #[inline(always)]
-    fn symbol(&mut self, stream: usize, context: u32, _: u8) -> u8 {
+    fn symbol(&mut self, stream: usize, context: u32, _: u8) -> Option<u8> {
         debug_assert!(
             context <= 0xffff,
             "stream {stream}: context {context:#x} over 16 bits"
         );
-        if let Some(value) = self.structural[stream].get(context) {
-            value
-        } else {
-            self.is_over = true;
-            // 255 ends every loop of the walk
-            255
-        }
+        self.structural[stream].get(context)
     }
     fn put_blob(&mut self, _: usize, _: &[u8]) {}
     fn take_blob(&mut self, stream: usize, len: usize) -> Option<&[u8]> {
@@ -141,14 +134,10 @@ fn walk_decode<'a>(
     records: &mut RecordLists,
     protocol: ProtocolState,
 ) -> Result<()> {
-    let io = DecodeIo {
-        structural,
-        blobs,
-        is_over: false,
-    };
+    let io = DecodeIo { structural, blobs };
     let mut walker = SegmentWalker::decoder(dst, records, io, protocol);
     walker.run();
-    if walker.has_error || walker.io.is_over {
+    if walker.has_error {
         return bad("structure");
     }
     if !walker.io.structural.iter().all(rans::ByteDecoder::is_done)

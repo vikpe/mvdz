@@ -29,7 +29,8 @@ pub(crate) const NO_OFFSET: u32 = u32::MAX;
 
 /// Every `context` fits in 16 bits, the rANS table key (FORMAT.md section 6.2).
 pub(crate) trait SymbolIo {
-    fn symbol(&mut self, stream: usize, context: u32, value: u8) -> u8;
+    /// `None`: the stream is absent or the context has an empty table.
+    fn symbol(&mut self, stream: usize, context: u32, value: u8) -> Option<u8>;
     fn put_blob(&mut self, stream: usize, bytes: &[u8]);
     fn take_blob(&mut self, stream: usize, len: usize) -> Option<&[u8]>;
     fn blob_rest(&self, stream: usize) -> &[u8];
@@ -293,12 +294,23 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     }
 
     #[inline(always)]
+    fn symbol(&mut self, stream: usize, context: u32, value: u8) -> u8 {
+        if let Some(symbol) = self.io.symbol(stream, context, value) {
+            symbol
+        } else {
+            self.has_error = true;
+            // ends every loop of the walk
+            255
+        }
+    }
+
+    #[inline(always)]
     fn code_symbol(&mut self, stream: usize, context: u32) -> u8 {
         if IS_ENCODE {
             let byte = self.read_byte();
-            self.io.symbol(stream, context, byte)
+            self.symbol(stream, context, byte)
         } else {
-            let byte = self.io.symbol(stream, context, 0);
+            let byte = self.symbol(stream, context, 0);
             self.write_byte(byte);
             byte
         }
@@ -308,11 +320,10 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
     fn code_symbol_residual(&mut self, stream: usize, context: u32, prediction: u8) -> u8 {
         if IS_ENCODE {
             let byte = self.read_byte();
-            self.io
-                .symbol(stream, context, byte.wrapping_sub(prediction));
+            self.symbol(stream, context, byte.wrapping_sub(prediction));
             byte
         } else {
-            let byte = self.io.symbol(stream, context, 0).wrapping_add(prediction);
+            let byte = self.symbol(stream, context, 0).wrapping_add(prediction);
             self.write_byte(byte);
             byte
         }
@@ -529,7 +540,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             }
             if IS_ENCODE {
                 if self.offset == end {
-                    self.io.symbol(COMMAND, context, 255);
+                    self.symbol(COMMAND, context, 255);
                     return;
                 }
                 let command = self.src[self.offset];
@@ -539,12 +550,12 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 let size = match size {
                     Some(size) if command != 0 => size,
                     _ => {
-                        self.io.symbol(COMMAND, context, 0);
+                        self.symbol(COMMAND, context, 0);
                         self.escape(end);
                         return;
                     }
                 };
-                self.io.symbol(COMMAND, context, command);
+                self.symbol(COMMAND, context, command);
                 self.offset += 1;
                 let start = self.offset;
                 self.command(command);
@@ -554,7 +565,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 }
                 self.previous_command = command;
             } else {
-                let command = self.io.symbol(COMMAND, context, 0);
+                let command = self.symbol(COMMAND, context, 0);
                 match command {
                     255 => return,
                     0 => {
@@ -664,27 +675,27 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             let main_byte = (changed & 0x3f) as u8
                 | (((changed >> 10) & 1) as u8) << 6
                 | u8::from(rare_bits != 0) << 7;
-            self.io.symbol(PLAYER_FLAGS, context, main_byte);
+            self.symbol(PLAYER_FLAGS, context, main_byte);
             if rare_bits != 0 {
                 let rare_byte = ((changed >> 6) & 0xf) as u8 | (((changed >> 11) & 0xf) as u8) << 4;
-                self.io.symbol(
+                self.symbol(
                     PLAYER_FLAGS,
                     0x100 | u32::from((previous >> 6) & 0xff),
                     rare_byte,
                 );
-                self.io.symbol(PLAYER_FLAGS, 0x200, (changed >> 15) as u8);
+                self.symbol(PLAYER_FLAGS, 0x200, (changed >> 15) as u8);
             }
             changed
         } else {
-            let main_byte = u16::from(self.io.symbol(PLAYER_FLAGS, context, 0));
+            let main_byte = u16::from(self.symbol(PLAYER_FLAGS, context, 0));
             let mut changed = (main_byte & 0x3f) | ((main_byte >> 6) & 1) << 10;
             if main_byte & 0x80 != 0 {
-                let rare_byte = u16::from(self.io.symbol(
+                let rare_byte = u16::from(self.symbol(
                     PLAYER_FLAGS,
                     0x100 | u32::from((previous >> 6) & 0xff),
                     0,
                 ));
-                let bit15_byte = u16::from(self.io.symbol(PLAYER_FLAGS, 0x200, 0));
+                let bit15_byte = u16::from(self.symbol(PLAYER_FLAGS, 0x200, 0));
                 changed |= (rare_byte & 0xf) << 6 | (rare_byte >> 4) << 11 | (bit15_byte & 1) << 15;
             }
             self.write_u16(changed ^ previous);
@@ -791,32 +802,29 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 word = read_word;
                 self.offset += 2;
                 if word == 0 {
-                    self.io.symbol(ENTITY_GAP, entity_context, 0);
+                    self.symbol(ENTITY_GAP, entity_context, 0);
                     break;
                 }
                 entity = (word & 511) as usize;
                 let gap = ((i32::from(word & 511) - previous_entity - 1) & 511) + 1;
                 if gap < 255 {
-                    self.io
-                        .symbol(ENTITY_GAP, entity_context, gap.cast_unsigned() as u8);
+                    self.symbol(ENTITY_GAP, entity_context, gap.cast_unsigned() as u8);
                 } else {
-                    self.io.symbol(ENTITY_GAP, entity_context, 255);
-                    self.io
-                        .symbol(ENTITY_GAP, 1 << 12, gap.cast_unsigned() as u8);
-                    self.io
-                        .symbol(ENTITY_GAP, 2 << 12, (gap >> 8).cast_unsigned() as u8);
+                    self.symbol(ENTITY_GAP, entity_context, 255);
+                    self.symbol(ENTITY_GAP, 1 << 12, gap.cast_unsigned() as u8);
+                    self.symbol(ENTITY_GAP, 2 << 12, (gap >> 8).cast_unsigned() as u8);
                 }
                 let state = self.entities[entity];
-                self.io.symbol(
+                self.symbol(
                     ENTITY_BITS,
                     u32::from(state.bits) | u32::from(state.model) << 7,
                     (word >> 9) as u8 ^ state.bits,
                 );
             } else {
-                let mut gap = i32::from(self.io.symbol(ENTITY_GAP, entity_context, 0));
+                let mut gap = i32::from(self.symbol(ENTITY_GAP, entity_context, 0));
                 if gap == 255 {
-                    gap = i32::from(self.io.symbol(ENTITY_GAP, 1 << 12, 0));
-                    gap |= i32::from(self.io.symbol(ENTITY_GAP, 2 << 12, 0)) << 8;
+                    gap = i32::from(self.symbol(ENTITY_GAP, 1 << 12, 0));
+                    gap |= i32::from(self.symbol(ENTITY_GAP, 2 << 12, 0)) << 8;
                 }
                 if gap == 0 {
                     self.write_u16(0);
@@ -824,7 +832,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 }
                 entity = ((previous_entity + gap) & 511).cast_unsigned() as usize;
                 let state = self.entities[entity];
-                let bits = self.io.symbol(
+                let bits = self.symbol(
                     ENTITY_BITS,
                     u32::from(state.bits) | u32::from(state.model) << 7,
                     0,
@@ -1098,9 +1106,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
                 }
             }
         }
-        grid = self
-            .io
-            .symbol(USERCMD, 3 << 12 | u32::from(state.grid), grid);
+        grid = self.symbol(USERCMD, 3 << 12 | u32::from(state.grid), grid);
         if grid > 7 {
             self.has_error = true;
             return;

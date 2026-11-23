@@ -101,23 +101,58 @@ pub(crate) fn all_stored(src: &[u8]) -> Vec<u8> {
 
 /// The bytes the walk left unstructured: the RAW and TAIL streams of every segment.
 pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
-    use crate::fields::{read_usize, skip};
     use crate::streams::{RAW, TAIL};
-    const PROTOCOL_FIELDS_LEN: usize = 3 * 4;
     let mut total = 0;
     for segment in parts(file)?.segments {
-        let mut rest = &segment[SEGMENT_FIELDS_LEN..];
-        skip(&mut rest, PROTOCOL_FIELDS_LEN).context("the transform header")?;
-        let stream_count = read_usize(&mut rest).context("the stream count")?;
-        for _ in 0..stream_count {
-            let id = read_usize(&mut rest).context("a stream id")?;
-            let size = read_usize(&mut rest).context("a stream's size")?;
-            if id == RAW || id == TAIL {
-                total += size;
-            }
-        }
+        let table = StreamTable::parse(&segment[SEGMENT_FIELDS_LEN..])?;
+        let unstructured = (table.entries.iter()).filter(|&&(id, _)| id == RAW || id == TAIL);
+        total += unstructured.map(|&(_, size)| size).sum::<usize>();
     }
     Ok(total)
+}
+
+/// The transform header and bodies of a segment (FORMAT.md section 3.1).
+#[derive(Clone)]
+pub(crate) struct StreamTable {
+    /// fte, fte2, mvd1
+    pub(crate) fields: [usize; 3],
+    pub(crate) stream_count: usize,
+    /// (id, size)
+    pub(crate) entries: Vec<(usize, usize)>,
+    pub(crate) bodies: Vec<u8>,
+}
+
+impl StreamTable {
+    pub(crate) fn parse(transform: &[u8]) -> anyhow::Result<Self> {
+        use crate::fields::read_usize;
+        let mut rest = transform;
+        let mut next = || read_usize(&mut rest).context("a transform header field");
+        let fields = [next()?, next()?, next()?];
+        let stream_count = next()?;
+        let mut entries = Vec::new();
+        for _ in 0..stream_count {
+            entries.push((next()?, next()?));
+        }
+        Ok(Self {
+            fields,
+            stream_count,
+            entries,
+            bodies: rest.to_vec(),
+        })
+    }
+
+    pub(crate) fn build(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for field in self.fields.into_iter().chain([self.stream_count]) {
+            crate::fields::put_usize(&mut out, field);
+        }
+        for &(id, size) in &self.entries {
+            crate::fields::put_usize(&mut out, id);
+            crate::fields::put_usize(&mut out, size);
+        }
+        out.extend_from_slice(&self.bodies);
+        out
+    }
 }
 
 pub(crate) fn several_segments(demo: &[u8]) -> Vec<u8> {

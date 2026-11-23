@@ -2,7 +2,6 @@
 //! `MVDZ_WRITE_VECTORS=1` rewrites them instead of checking them.
 
 use super::common::*;
-use crate::fields::put_usize;
 use crate::format::*;
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
@@ -139,29 +138,24 @@ fn token_body(
         }
     }
     coded.sort_by_key(|&(id, ..)| id);
-    let mut body = Vec::new();
-    // fte, fte2, mvd1; the number of streams
-    for field in [0, 0, 0, coded.len() + blob_counts.len()] {
-        put_usize(&mut body, field);
-    }
-    for (id, _, stream_body) in &coded {
-        for field in [*id, stream_body.len()] {
-            put_usize(&mut body, field);
-        }
-    }
-    for &(id, count) in blob_counts {
-        put_usize(&mut body, id);
-        put_usize(&mut body, count);
-    }
+    let coded_entries = (coded.iter()).map(|(id, _, stream_body)| (*id, stream_body.len()));
+    let entries: Vec<(usize, usize)> = coded_entries.chain(blob_counts.iter().copied()).collect();
+    let mut bodies = Vec::new();
     let mut ids = Vec::new();
     let mut models: Vec<Option<rans::FileModel>> = Vec::new();
     for (id, model, stream_body) in coded {
-        body.extend_from_slice(&stream_body);
+        bodies.extend_from_slice(&stream_body);
         models.resize_with(models.len().max(id + 1), || None);
         models[id] = Some(model);
         ids.push(id);
     }
-    Ok((crate::segment::models_body(&models, &ids), body))
+    let table = StreamTable {
+        fields: [0; 3],
+        stream_count: entries.len(),
+        entries,
+        bodies,
+    };
+    Ok((crate::segment::models_body(&models, &ids), table.build()))
 }
 
 fn one_segment(demo: &[u8], (models, body): &(Vec<u8>, Vec<u8>)) -> anyhow::Result<Vec<u8>> {
@@ -333,50 +327,6 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     models_block(&mut add)
 }
 
-/// The transform header and bodies of a segment (FORMAT.md section 3.1).
-#[derive(Clone)]
-struct StreamTable {
-    /// fte, fte2, mvd1
-    fields: [usize; 3],
-    stream_count: usize,
-    /// (id, size)
-    entries: Vec<(usize, usize)>,
-    bodies: Vec<u8>,
-}
-
-impl StreamTable {
-    fn parse(transform: &[u8]) -> anyhow::Result<Self> {
-        use crate::fields::read_usize;
-        let mut rest = transform;
-        let mut next = || read_usize(&mut rest).context("a transform header field");
-        let fields = [next()?, next()?, next()?];
-        let stream_count = next()?;
-        let mut entries = Vec::new();
-        for _ in 0..stream_count {
-            entries.push((next()?, next()?));
-        }
-        Ok(Self {
-            fields,
-            stream_count,
-            entries,
-            bodies: rest.to_vec(),
-        })
-    }
-
-    fn build(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for field in self.fields.into_iter().chain([self.stream_count]) {
-            put_usize(&mut out, field);
-        }
-        for &(id, size) in &self.entries {
-            put_usize(&mut out, id);
-            put_usize(&mut out, size);
-        }
-        out.extend_from_slice(&self.bodies);
-        out
-    }
-}
-
 /// One-segment files whose stream table breaks a rule of FORMAT.md section 3.1.
 fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
@@ -506,15 +456,15 @@ fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> 
         one_segment(demo, &body)?,
         "a `TAIL` stream of raw_len + 1 bytes",
     );
-    let mut body = Vec::new();
-    // fte, fte2, mvd1; no stream
-    for field in [0, 0, 0, 0] {
-        put_usize(&mut body, field);
-    }
-    body.extend_from_slice(&demo[..3]);
+    let stored = StreamTable {
+        fields: [0; 3],
+        stream_count: 0,
+        entries: Vec::new(),
+        bodies: demo[..3].to_vec(),
+    };
     add(
         "stored-len",
-        one_segment(demo, &(Vec::new(), body))?,
+        one_segment(demo, &(Vec::new(), stored.build()))?,
         "a stored segment of 4 bytes holding 3",
     );
     Ok(())
