@@ -78,7 +78,7 @@ func (cursor *byteCursor) isAtEnd() bool {
 	return !cursor.isShort && cursor.position == len(cursor.data)
 }
 
-// bitReader reads the mantissa bits of a numeric stream, FORMAT.md section 6.4:
+// bitReader reads the mantissa bits of a numeric stream, FORMAT.md 6.4:
 // least significant bit first, zeros past the end.
 type bitReader struct {
 	data     []byte
@@ -98,7 +98,7 @@ func (reader *bitReader) read(count int) uint32 {
 	return value
 }
 
-// FORMAT.md section 6.5: the bits end within the last byte.
+// FORMAT.md 6.5: the bits end within the last byte.
 func (reader *bitReader) isFinished() bool {
 	return (reader.position+7)/8 == len(reader.data)
 }

@@ -1,4 +1,4 @@
-//! The prediction state of the numeric fields (FORMAT.md section 5).
+//! The prediction state of the numeric fields (FORMAT.md 5).
 
 use crate::math::div_round;
 

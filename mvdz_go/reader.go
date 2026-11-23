@@ -12,7 +12,7 @@ import (
 	"io"
 )
 
-// Error categories, FORMAT.md section 7. ErrCorrupt is wrapped with the rule
+// Error categories, FORMAT.md 7. ErrCorrupt is wrapped with the rule
 // that was broken; match with errors.Is.
 var (
 	ErrNotMvdz            = errors.New("mvdz: not an MVDZ file")
@@ -85,7 +85,7 @@ func (reader *Reader) nextSegment() ([]byte, error) {
 		return nil, reader.finish()
 	}
 
-	// FORMAT.md section 2.3; the checks are in the order of section 7.
+	// FORMAT.md 2.3; the checks are in the order of 7.
 	codedLen, err := readU32(reader.input)
 	if err != nil {
 		return nil, err
@@ -121,7 +121,7 @@ func (reader *Reader) nextSegment() ([]byte, error) {
 	return decoded, nil
 }
 
-// finish makes the whole-demo checks, FORMAT.md section 3.4.
+// finish makes the whole-demo checks, FORMAT.md 3.4.
 func (reader *Reader) finish() error {
 	var trailing [1]byte
 	count, err := io.ReadFull(reader.input, trailing[:])
@@ -137,7 +137,7 @@ func (reader *Reader) finish() error {
 	return io.EOF
 }
 
-// FORMAT.md section 2.2
+// FORMAT.md 2.2
 func readModels(input io.Reader) (*fileModels, error) {
 	length, err := readU32(input)
 	if err != nil {

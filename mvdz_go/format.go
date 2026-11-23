@@ -24,7 +24,7 @@ const (
 	maxRawLen       = 1 << 20
 )
 
-// FORMAT.md section 2.1
+// FORMAT.md 2.1
 func readHeader(input io.Reader) (Header, error) {
 	var fields [headerSize]byte
 	count, err := io.ReadFull(input, fields[:])
@@ -50,7 +50,7 @@ func readHeader(input io.Reader) (Header, error) {
 	return header, nil
 }
 
-// appendHeader writes the file header, FORMAT.md section 2.1.
+// appendHeader writes the file header, FORMAT.md 2.1.
 func appendHeader(file []byte, header Header) []byte {
 	file = append(file, "MVDZ"...)
 	file = binary.LittleEndian.AppendUint32(file, formatVersion)
@@ -60,7 +60,7 @@ func appendHeader(file []byte, header Header) []byte {
 	return append(file, header.Sha256[:]...)
 }
 
-// appendSegment writes a segment block, FORMAT.md section 2.3.
+// appendSegment writes a segment block, FORMAT.md 2.3.
 func appendSegment(file []byte, raw []byte, durationMs uint32, coded []byte) []byte {
 	file = binary.LittleEndian.AppendUint32(file, uint32(len(coded)))
 	file = binary.LittleEndian.AppendUint32(file, uint32(len(raw)))

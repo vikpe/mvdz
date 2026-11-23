@@ -1,4 +1,4 @@
-//! The MVDZ container (FORMAT.md section 2) and the layout rules every reader applies.
+//! The MVDZ container (FORMAT.md 2) and the layout rules every reader applies.
 
 use crate::error::{Error, Result, bad};
 use crate::fields::{put_u32, put_usize, read_array, read_u32, read_u64};
@@ -127,7 +127,7 @@ pub(crate) fn parse_segment_header(body: &[u8]) -> Result<SegmentHeader> {
     Ok(SegmentHeader { raw_len, crc32 })
 }
 
-/// The layout rules (FORMAT.md section 7) over the blocks read so far.
+/// The layout rules (FORMAT.md 7) over the blocks read so far.
 #[derive(Debug)]
 pub(crate) struct Layout {
     pub(crate) header: Header,

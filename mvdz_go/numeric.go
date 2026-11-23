@@ -1,6 +1,6 @@
 package mvdz
 
-// axisTrack is the 16-bit history of one axis, FORMAT.md section 5.2.
+// axisTrack is the 16-bit history of one axis, FORMAT.md 5.2.
 type axisTrack struct {
 	last, previous, beforePrevious uint16
 	residual                       int16
@@ -61,7 +61,7 @@ type frameTimes struct {
 }
 
 // deltas returns the time since the player's last record and the delta
-// before that, and takes time as the last, FORMAT.md section 5.2.
+// before that, and takes time as the last, FORMAT.md 5.2.
 func (times *frameTimes) deltas(time uint32) (now, before int32) {
 	now = int32(time - times.last)
 	before = int32(times.last - times.previous)
@@ -74,7 +74,7 @@ func lastValues(tracks *[3]axisTrack) [3]uint16 {
 	return [3]uint16{tracks[0].last, tracks[1].last, tracks[2].last}
 }
 
-// FORMAT.md sections 5.3 and 5.4
+// FORMAT.md 5.3 and 5.4
 func (walker *segmentWalker) playerOriginsAndAngles(player *playerState, flags uint16) {
 	now, before := player.times.deltas(walker.time)
 	hasFloatCoords := walker.protocol.hasFloatCoords()
@@ -106,7 +106,7 @@ func (walker *segmentWalker) playerOriginsAndAngles(player *playerState, flags u
 	}
 }
 
-// FORMAT.md section 5.5
+// FORMAT.md 5.5
 func (walker *segmentWalker) entityOrigin(entity *entityState, axis int, isSent, isInPrevious bool) {
 	if walker.protocol.hasFloatCoords() {
 		walker.floatOrigin(streamEntityFloatOrigin+axis, axis, isSent, &entity.floatOrigins[axis])
@@ -125,7 +125,7 @@ func (walker *segmentWalker) entityOrigin(entity *entityState, axis int, isSent,
 	track.push(value, residual)
 }
 
-// FORMAT.md section 5.2
+// FORMAT.md 5.2
 func (walker *segmentWalker) floatOrigin(stream int, axis int, isSent bool, track *floatTrack) {
 	if !isSent {
 		track.hold()
@@ -140,7 +140,7 @@ func (walker *segmentWalker) floatOrigin(stream int, axis int, isSent bool, trac
 	track.push(valueBits, residual)
 }
 
-// FORMAT.md section 5.6
+// FORMAT.md 5.6
 func (walker *segmentWalker) usercmdGridAngle(axis int, track *axisTrack) {
 	context := min(residualBucket(int32(track.residual)), 23) |
 		min(residualBucket(track.velocity()), 23)<<5 |
@@ -163,7 +163,7 @@ func (walker *segmentWalker) soundOrigin(origin [3]uint16, kind uint16, number u
 	}
 }
 
-// FORMAT.md section 5.6; beamOrigin is of the player the beam starts at.
+// FORMAT.md 5.6; beamOrigin is of the player the beam starts at.
 func (walker *segmentWalker) tempEntityOrigins(kind uint8, isBeam bool, beamOrigin [3]uint16) {
 	const point, beamStart, beamEnd = 0, 1, 2
 	kindContext := uint16(kind) << 4
@@ -186,7 +186,7 @@ func (walker *segmentWalker) tempEntityOrigins(kind uint8, isBeam bool, beamOrig
 	}
 }
 
-// codeU16 codes a 16-bit field, FORMAT.md section 5.1. It returns the value
+// codeU16 codes a 16-bit field, FORMAT.md 5.1. It returns the value
 // and the residual to keep as state.
 func (walker *segmentWalker) codeU16(stream int, context uint16, prediction uint16) (uint16, int32) {
 	sourceResidual := int16(walker.peek16() - prediction)

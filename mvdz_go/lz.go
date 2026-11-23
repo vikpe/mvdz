@@ -2,7 +2,7 @@ package mvdz
 
 import "encoding/binary"
 
-// The blob bytes of a segment as LZ77 tokens, FORMAT.md section 6.6: a
+// The blob bytes of a segment as LZ77 tokens, FORMAT.md 6.6: a
 // literal byte, or a match that copies bytes already produced. Three streams
 // code them, with the models every other stream uses.
 
@@ -13,7 +13,7 @@ type lzToken struct {
 	literal  uint8
 }
 
-// lzParse is the canonical parse, FORMAT.md section 8 rule 10: greedy, the
+// lzParse is the canonical parse, FORMAT.md 8 rule 10: greedy, the
 // longest of at most maxChain earlier positions with the same hash, the
 // nearest of equally long ones.
 func lzParse(data []byte) []lzToken {

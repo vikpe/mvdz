@@ -1,7 +1,7 @@
 package mvdz
 
 // maxBlobTotal is the most the blob streams of a segment may hold together,
-// FORMAT.md section 7.
+// FORMAT.md 7.
 func maxBlobTotal(rawLen uint32) uint64 {
 	return 2 * uint64(rawLen)
 }
@@ -32,7 +32,7 @@ type codedValue struct {
 }
 
 // decodeSegment decodes the transform of one segment to its rawLen bytes,
-// FORMAT.md section 3.3.
+// FORMAT.md 3.3.
 func decodeSegment(coded []byte, rawLen uint32, models *fileModels) ([]byte, error) {
 	streams, err := readStreams(coded, rawLen, models)
 	if err != nil {
@@ -61,7 +61,7 @@ func decodeSegment(coded []byte, rawLen uint32, models *fileModels) ([]byte, err
 }
 
 // readStreams reads the transform header, the stream table and the stream
-// bodies, FORMAT.md section 3.1.
+// bodies, FORMAT.md 3.1.
 func readStreams(coded []byte, rawLen uint32, models *fileModels) (*segmentStreams, error) {
 	fields := byteCursor{data: coded}
 	streams := new(segmentStreams)

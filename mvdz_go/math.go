@@ -5,7 +5,7 @@ import "math/bits"
 // The exact arithmetic of the format, FORMAT.md: every encoder and decoder
 // computes these values bit for bit, in any language. Integers throughout.
 
-// residualBucket is q(v) of FORMAT.md section 1: 0 for zero, else twice the
+// residualBucket is q(v) of FORMAT.md 1: 0 for zero, else twice the
 // bit length of the magnitude, less one, plus one for a negative value.
 func residualBucket(value int32) uint16 {
 	if value == 0 {
@@ -33,7 +33,7 @@ func divRound(dividend, divisor int32) int32 {
 	return quotient
 }
 
-// gridFromF32Bits is the grid value of a usercmd angle, FORMAT.md section 4.11; false
+// gridFromF32Bits is the grid value of a usercmd angle, FORMAT.md 4.11; false
 // for -0.0, NaN, +180 and anything else off the 360/65536 grid.
 func gridFromF32Bits(angleBits uint32) (uint16, bool) {
 	// The float is significand * 2^(exponent - 150): 8192 times it is
@@ -52,7 +52,7 @@ func gridFromF32Bits(angleBits uint32) (uint16, bool) {
 	return grid, gridToF32Bits(grid) == angleBits
 }
 
-// gridToF32Bits is the float bits of grid * 45/8192, FORMAT.md section 5.6. It is
+// gridToF32Bits is the float bits of grid * 45/8192, FORMAT.md 5.6. It is
 // exact: |grid| * 45 has at most 21 bits.
 func gridToF32Bits(grid uint16) uint32 {
 	value := int32(int16(grid))
@@ -78,7 +78,7 @@ const stepsPerOctave = 2
 const maxQuantized = 65
 
 // quantizedWeight is 2^((quantized-1)/2) in 16.16 fixed point, FORMAT.md
-// section 6.3.
+// 6.3.
 func quantizedWeight(quantized uint32) uint64 {
 	if quantized == 0 {
 		return 0
@@ -89,7 +89,7 @@ func quantizedWeight(quantized uint32) uint64 {
 }
 
 // quantize is the quantized count whose weight is nearest to count in ratio,
-// FORMAT.md section 8 rule 4.
+// FORMAT.md 8 rule 4.
 func quantize(count uint32) uint32 {
 	if count == 0 {
 		return 0
@@ -113,7 +113,7 @@ func quantize(count uint32) uint32 {
 }
 
 // normalize scales the weights to frequencies that sum to total, every
-// present symbol getting at least 1, FORMAT.md section 6.3.
+// present symbol getting at least 1, FORMAT.md 6.3.
 func normalize(weights []uint64, total int) []int {
 	frequencies := make([]int, len(weights))
 	var weightTotal uint64 // at most 256 weights of at most 2^48
@@ -154,7 +154,7 @@ func normalize(weights []uint64, total int) []int {
 }
 
 // log2Fixed is log2 of value (at least 1) with 16 fraction bits, rounded
-// down, FORMAT.md section 8 rule 4.
+// down, FORMAT.md 8 rule 4.
 func log2Fixed(value uint64) uint64 {
 	const fractionBits = 16
 	const one = 1 << 30

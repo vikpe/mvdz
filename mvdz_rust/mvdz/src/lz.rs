@@ -1,4 +1,4 @@
-//! The blob bytes of a segment as LZ77 tokens (FORMAT.md section 6.6): a literal byte, or a
+//! The blob bytes of a segment as LZ77 tokens (FORMAT.md 6.6): a literal byte, or a
 //! match that copies bytes already produced. Three streams code them, with the models every
 //! other stream uses.
 
@@ -61,7 +61,7 @@ pub(crate) fn code(bytes: &[u8], tokens: &[Token]) -> Tokens {
     }
 }
 
-/// The canonical parse (FORMAT.md section 8): greedy, the longest of at most `MAX_CHAIN`
+/// The canonical parse (FORMAT.md 8): greedy, the longest of at most `MAX_CHAIN`
 /// earlier positions with the same hash, the nearest of equally long ones.
 pub(crate) fn parse(bytes: &[u8]) -> Vec<Token> {
     const MIN_MATCH: usize = 4;

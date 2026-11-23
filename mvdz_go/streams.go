@@ -1,6 +1,6 @@
 package mvdz
 
-// Stream ids, FORMAT.md section 3.2: the names there with a stream prefix.
+// Stream ids, FORMAT.md 3.2: the names there with a stream prefix.
 const (
 	// Structural streams: rANS symbols, decoded by the walker.
 	streamTime              = 0

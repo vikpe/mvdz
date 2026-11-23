@@ -16,7 +16,7 @@ const (
 	ransLowerBound     = 1 << 16
 )
 
-// streamModel is the model of one stream, FORMAT.md section 6.2.
+// streamModel is the model of one stream, FORMAT.md 6.2.
 type streamModel struct {
 	raw      []byte           // the raw model
 	contexts []uint16         // strictly increasing
@@ -30,7 +30,7 @@ type frequencyTable struct {
 	cumulative []uint16
 }
 
-// rawModelLen is the length of a raw model, FORMAT.md section 6.2.
+// rawModelLen is the length of a raw model, FORMAT.md 6.2.
 func rawModelLen(ownCount int, alphabet int) int {
 	return 4 + 2*ownCount + (ownCount+1)*alphabet
 }
@@ -74,7 +74,7 @@ func (model *streamModel) table(context uint16) *frequencyTable {
 	return &model.tables[index+1]
 }
 
-// FORMAT.md section 6.3
+// FORMAT.md 6.3
 func newFrequencyTable(quantized []byte) frequencyTable {
 	weights := make([]uint64, len(quantized))
 	for symbol, count := range quantized {
@@ -111,7 +111,7 @@ type listedModel struct {
 	raw    []byte
 }
 
-// writeModelsBlock lays out the body of the models block, FORMAT.md section
+// writeModelsBlock lays out the body of the models block, FORMAT.md
 // 2.2: the meta model as it is, then every raw model coded under it. It also
 // returns the raw length the format limits.
 func writeModelsBlock(models []listedModel) (body []byte, rawLen int) {
@@ -135,7 +135,7 @@ func writeModelsBlock(models []listedModel) (body []byte, rawLen int) {
 	return body, rawLen
 }
 
-// readModelsBlock reads the body of the models block, FORMAT.md section 2.2.
+// readModelsBlock reads the body of the models block, FORMAT.md 2.2.
 func readModelsBlock(body []byte) (*fileModels, error) {
 	if len(body) < 4 {
 		return nil, corrupt("tables")
@@ -244,7 +244,7 @@ func (tally streamTally) add(values []codedValue, alphabet int, isNumeric bool) 
 }
 
 // tableCost is what an own table costs in the models block, in bits,
-// FORMAT.md section 8.
+// FORMAT.md 8.
 type tableCost struct {
 	base      uint64
 	perSymbol uint64
@@ -258,7 +258,7 @@ var (
 )
 
 // rawModel builds the raw model of a stream from its counts, FORMAT.md
-// section 8 rule 4.
+// 8 rule 4.
 func (tally streamTally) rawModel(alphabet int, cost tableCost) []byte {
 	contexts := slices.Sorted(maps.Keys(tally))
 	ownContexts := tally.ownContexts(contexts, alphabet, cost)
@@ -282,7 +282,7 @@ func (tally streamTally) rawModel(alphabet int, cost tableCost) []byte {
 }
 
 // ownContexts chooses the contexts that get a table of their own, FORMAT.md
-// section 8 rule 4: those that cost fewer bits coded with their own table,
+// 8 rule 4: those that cost fewer bits coded with their own table,
 // the table included, than with the fallback table, and those the fallback
 // table cannot code. The first pass measures against all contexts together,
 // the second against the contexts the first left to the fallback.
@@ -365,7 +365,7 @@ func streamAlphabet(stream int) int {
 }
 
 // streamDecoder decodes one structural or numeric stream of a segment,
-// FORMAT.md sections 6.1, 6.4 and 6.5.
+// FORMAT.md 6.1, 6.4 and 6.5.
 type streamDecoder struct {
 	model        *streamModel
 	rans         []byte
@@ -458,7 +458,7 @@ func (decoder *streamDecoder) word() uint32 {
 }
 
 // encodeStream codes the symbols or residuals of one stream to a stream
-// body, FORMAT.md section 6.1 and Appendix A; false if the model does not
+// body, FORMAT.md 6.1 and Appendix A; false if the model does not
 // hold a symbol.
 func encodeStream(model *streamModel, values []codedValue, isNumeric bool) ([]byte, bool) {
 	var mantissas bitWriter

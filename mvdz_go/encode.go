@@ -9,14 +9,14 @@ import (
 	"hash/crc32"
 )
 
-// Error categories of encoding, FORMAT.md section 7.
+// Error categories of encoding, FORMAT.md 7.
 var (
 	ErrNotMvd       = errors.New("mvdz: not an MVD demo")
 	ErrDemoTooLarge = errors.New("mvdz: demo too large")
 	ErrInternal     = errors.New("mvdz: internal error")
 )
 
-// Encode codes an MVD demo as an MVDZ file, FORMAT.md section 8.
+// Encode codes an MVD demo as an MVDZ file, FORMAT.md 8.
 func Encode(demo []byte) ([]byte, error) {
 	if !startsLikeDemo(demo) {
 		return nil, ErrNotMvd
@@ -38,7 +38,7 @@ func encodeAny(demo []byte) ([]byte, error) {
 	}
 	models := buildModels(segments)
 
-	// The second pass: FORMAT.md section 8 rules 3, 5 and 9.
+	// The second pass: FORMAT.md 8 rules 3, 5 and 9.
 	var codedSegments []byte
 	var isModelUsed [firstBlobStream]bool
 	var protocol protocolState
@@ -61,7 +61,7 @@ func encodeAny(demo []byte) ([]byte, error) {
 	file = appendModelsBlock(file, models, &isModelUsed)
 	file = append(file, codedSegments...)
 
-	// FORMAT.md section 8 rule 7
+	// FORMAT.md 8 rule 7
 	decoded, err := Decode(file)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the file does not decode: %w", ErrInternal, err)
@@ -72,7 +72,7 @@ func encodeAny(demo []byte) ([]byte, error) {
 	return file, nil
 }
 
-// codeSegment writes a segment the first way that works, FORMAT.md section 8
+// codeSegment writes a segment the first way that works, FORMAT.md 8
 // rule 5: transform-coded, all tail, stored. It marks the models it uses and
 // returns the protocol state at the end of the segment.
 func codeSegment(segment []byte, protocol protocolState, models *fileModels, isModelUsed *[firstBlobStream]bool) ([]byte, protocolState) {
@@ -99,7 +99,7 @@ func codeSegment(segment []byte, protocol protocolState, models *fileModels, isM
 	return storedSegment(segment, protocol), endProtocol
 }
 
-// startsLikeDemo is the input check, FORMAT.md section 8 rule 1: the first
+// startsLikeDemo is the input check, FORMAT.md 8 rule 1: the first
 // frame is whole, of a type that carries a payload, and not empty; and it
 // walks without an escape or 16 more whole frames follow it.
 func startsLikeDemo(demo []byte) bool {
@@ -137,7 +137,7 @@ func hasFrameRun(data []byte) bool {
 	return true
 }
 
-// cutSegments cuts a demo into segments, FORMAT.md section 8 rule 2.
+// cutSegments cuts a demo into segments, FORMAT.md 8 rule 2.
 func cutSegments(demo []byte) [][]byte {
 	var segments [][]byte
 	framedLen := 0
@@ -188,7 +188,7 @@ func nextFrameRun(segment []byte, unframedStart int) int {
 	return len(segment)
 }
 
-// buildModels is the first pass, FORMAT.md section 8 rule 4: it counts the
+// buildModels is the first pass, FORMAT.md 8 rule 4: it counts the
 // symbols of every segment as walked, or as all tail where the walk fails,
 // and builds one model per stream; nil for a stream without a model.
 func buildModels(segments [][]byte) *fileModels {
@@ -223,7 +223,7 @@ func buildModels(segments [][]byte) *fileModels {
 
 // fitModelsBlock drops the model with the longest raw model (ties: the
 // highest stream id) until the models block is within the limits of
-// FORMAT.md section 7. The models of the blob tokens stay: every fallback
+// FORMAT.md 7. The models of the blob tokens stay: every fallback
 // but the stored segment needs them.
 func fitModelsBlock(models *fileModels) {
 	for {
@@ -285,7 +285,7 @@ func collectStreams(segment []byte, protocol protocolState) (*segmentStreams, pr
 }
 
 // allTailStreams is a segment with every byte in the tail blob stream: the
-// fallback layout of FORMAT.md section 8 rule 5.
+// fallback layout of FORMAT.md 8 rule 5.
 func allTailStreams(segment []byte, protocol protocolState) *segmentStreams {
 	streams := &segmentStreams{isEncoding: true, protocol: protocol}
 	streams.blobs[streamTail] = segment
@@ -294,7 +294,7 @@ func allTailStreams(segment []byte, protocol protocolState) *segmentStreams {
 }
 
 // collectBlobTokens parses the blob bytes, the blob streams in id order, and
-// collects their tokens, FORMAT.md section 6.6.
+// collects their tokens, FORMAT.md 6.6.
 func collectBlobTokens(streams *segmentStreams) {
 	var blobBytes []byte
 	for _, blob := range streams.blobs {
@@ -303,9 +303,9 @@ func collectBlobTokens(streams *segmentStreams) {
 	lzCode(blobBytes, lzParse(blobBytes), streams)
 }
 
-// encodeStreams lays out the coded bytes of a segment, FORMAT.md section 3.1
-// and section 8 rule 5; false if a stream has no model or no code for one of
-// its symbols, or a limit of FORMAT.md section 7 does not hold.
+// encodeStreams lays out the coded bytes of a segment, FORMAT.md 3.1
+// and 8 rule 5; false if a stream has no model or no code for one of
+// its symbols, or a limit of FORMAT.md 7 does not hold.
 func encodeStreams(streams *segmentStreams, rawLen uint32, models *fileModels) ([]byte, bool) {
 	blobTotal := uint64(0)
 	for _, blob := range streams.blobs {
@@ -349,7 +349,7 @@ func encodeStreams(streams *segmentStreams, rawLen uint32, models *fileModels) (
 }
 
 // storedSegment is the segment as it is, behind a transform header without
-// streams, FORMAT.md section 3.1: the one layout with a size bound.
+// streams, FORMAT.md 3.1: the one layout with a size bound.
 func storedSegment(segment []byte, protocol protocolState) []byte {
 	const noStreams = 0
 	coded := make([]byte, 0, transformFieldsLen+len(segment))
@@ -364,7 +364,7 @@ func appendTransformFields(coded []byte, protocol protocolState, entryCount uint
 	return binary.LittleEndian.AppendUint32(coded, entryCount)
 }
 
-// appendModelsBlock appends the models block, FORMAT.md section 8 rule 6: the
+// appendModelsBlock appends the models block, FORMAT.md 8 rule 6: the
 // models some segment uses.
 func appendModelsBlock(file []byte, models *fileModels, isModelUsed *[firstBlobStream]bool) []byte {
 	_, body, _ := modelsBlock(models, isModelUsed)

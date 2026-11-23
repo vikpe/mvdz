@@ -117,7 +117,7 @@ var (
 	entityAngleBits  = [3]uint16{uAngle1, uAngle2, uAngle3}
 )
 
-// protocolState is the protocol extension state, FORMAT.md section 4.1.
+// protocolState is the protocol extension state, FORMAT.md 4.1.
 type protocolState struct {
 	fte  uint32
 	fte2 uint32 // carried to the next segment's transform header; no rule reads it
@@ -182,7 +182,7 @@ func (protocol *protocolState) observeServerData(body []byte) {
 
 // commandBodySize is the length of the body of command that starts body, or
 // false if the command is unknown or its body does not fit, FORMAT.md
-// section 4.2 and section 8 rule 12.
+// 4.2 and 8 rule 12.
 func (protocol protocolState) commandBodySize(command uint8, body []byte) (uint32, bool) {
 	fields := byteCursor{data: body}
 	coord := protocol.coordSize()
@@ -301,7 +301,7 @@ func (protocol protocolState) commandBodySize(command uint8, body []byte) (uint3
 	return uint32(fields.position), !fields.isShort
 }
 
-// skipEntityDelta skips an entity word and its delta, FORMAT.md section 4.2.
+// skipEntityDelta skips an entity word and its delta, FORMAT.md 4.2.
 func (protocol protocolState) skipEntityDelta(fields *byteCursor) {
 	bits := fields.u16() &^ 511
 	var more uint16
@@ -347,7 +347,7 @@ func (protocol protocolState) skipEntityDelta(fields *byteCursor) {
 }
 
 // scanFrames is the length of the whole frames data starts with and the sum
-// of their time bytes, FORMAT.md section 8 rules 9 and 11.
+// of their time bytes, FORMAT.md 8 rules 9 and 11.
 func scanFrames(data []byte) (framedLen int, durationMs uint32) {
 	for {
 		frameLen, isFrame := frameLen(data[framedLen:])

@@ -1,5 +1,5 @@
 //! Transform-coded segments: the walk and the stream bodies
-//! (FORMAT.md section 3).
+//! (FORMAT.md 3).
 
 use crate::error::{Error, Result, bad};
 use crate::fields::{put_usize, read_bytes, read_u32, read_usize};
@@ -152,7 +152,7 @@ pub(crate) fn walk_tail(src: &[u8], protocol: ProtocolState) -> Walked {
     Walked::new(io, src.len(), protocol)
 }
 
-/// Of the blob streams of a segment together (FORMAT.md section 7).
+/// Of the blob streams of a segment together (FORMAT.md 7).
 fn max_blob_total(raw_len: usize) -> usize {
     raw_len.saturating_mul(2)
 }
@@ -165,7 +165,7 @@ fn blob_ids(walked: &Walked) -> Vec<usize> {
 }
 
 /// One model per structural and numeric stream from its per-context counts over every segment
-/// (FORMAT.md section 8 rule 4). Segments are added a few at a time; only counts are kept.
+/// (FORMAT.md 8 rule 4). Segments are added a few at a time; only counts are kept.
 #[derive(Debug)]
 pub(crate) struct ModelBuilder {
     tallies: Vec<Option<rans::Tally>>,
@@ -226,7 +226,7 @@ fn models_block(models: &[Option<rans::FileModel>], ids: &[usize]) -> rans::Mode
 }
 
 /// Drops the largest models until the models block is within the limits of FORMAT.md
-/// section 7; a segment with a dropped stream is then not transform-coded. The models of
+/// 7; a segment with a dropped stream is then not transform-coded. The models of
 /// the blob tokens stay: every fallback but the stored segment needs them.
 fn fit_models_block(models: &mut [Option<rans::FileModel>], max_len: u64, max_raw_len: u64) {
     loop {
@@ -307,7 +307,7 @@ pub(crate) fn encode(
     Some(out)
 }
 
-/// The segment as it is, behind a transform header without streams (FORMAT.md section 3.1):
+/// The segment as it is, behind a transform header without streams (FORMAT.md 3.1):
 /// the one layout with a size bound, for a segment no model fits.
 pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
     /// `fte`, `fte2`, `mvd1` and the stream count.
@@ -322,7 +322,7 @@ pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
     out
 }
 
-/// FORMAT.md section 8 rule 2.
+/// FORMAT.md 8 rule 2.
 pub(crate) fn cut_points(src: &[u8]) -> Vec<usize> {
     let max_segment = MAX_SEGMENT_RAW as usize;
     let mut cuts = vec![0];
@@ -562,7 +562,7 @@ mod tests {
     /// `USERCMD_ANGLE` only where a segment has one.
     #[test]
     fn usercmd_round_trip() -> anyhow::Result<()> {
-        // FORMAT.md section 4.3: player, dropnum, msec, grid, three 2-byte moves, buttons, impulse
+        // FORMAT.md 4.3: player, dropnum, msec, grid, three 2-byte moves, buttons, impulse
         const USERCMD_MIN_SYMBOLS: usize = 12;
         let mut src = demo();
         let odd = [-0.0f32, f32::NAN, 180.0, -180.0, 1.2345, 359.99];

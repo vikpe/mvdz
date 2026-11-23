@@ -25,7 +25,7 @@ pub fn encode(bytes: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     compress(bytes, thread_count(max_threads))
 }
 
-/// FORMAT.md section 8 rule 1: a damaged demo with an intact start passes.
+/// FORMAT.md 8 rule 1: a damaged demo with an intact start passes.
 pub(crate) fn check_demo(demo: &[u8]) -> Result<()> {
     const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
     if demo.is_empty() {
@@ -103,7 +103,7 @@ fn count_segment(raw: &[u8], start_protocol: ProtocolState) -> Counted {
     }
 }
 
-/// Pass 1 (FORMAT.md section 8) keeps only counts; pass 2 walks again. A segment starts in
+/// Pass 1 (FORMAT.md 8) keeps only counts; pass 2 walks again. A segment starts in
 /// the protocol the one before ends in, so the segments of a batch are walked in parallel from
 /// the end protocol of the batch before, and the few that start in another protocol walked again.
 fn run_first_pass<'a>(segments: &[&'a [u8]], threads: usize) -> FirstPass<'a> {
@@ -189,7 +189,7 @@ pub(crate) fn compress(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// FORMAT.md section 8 rule 5: transform-coded, else all tail, else stored.
+/// FORMAT.md 8 rule 5: transform-coded, else all tail, else stored.
 fn code_segments(first_pass: &FirstPass, threads: usize) -> Vec<Body> {
     let file_models = &first_pass.file_models;
     par_map(threads, &first_pass.segments, |plan| {

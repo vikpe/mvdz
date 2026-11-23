@@ -26,7 +26,7 @@ use crate::streams::{
     TEMP_ENTITY_ORIGIN, TEMP_ENTITY_TYPE, TIME, TYPE, USERCMD, USERCMD_ANGLE,
 };
 
-/// Every `context` fits in 16 bits, the rANS table key (FORMAT.md section 6.2).
+/// Every `context` fits in 16 bits, the rANS table key (FORMAT.md 6.2).
 pub(crate) trait SymbolIo {
     /// `None`: the stream is absent or the context has an empty table.
     fn symbol(&mut self, stream: usize, context: u32, value: u8) -> Option<u8>;
@@ -50,13 +50,13 @@ struct PlayerState {
     flags: u16,
     frame: u8,
     weapon_frame: u8,
-    origins: [AxisTrack; 3], // FORMAT.md section 5.3
-    angles: [AxisTrack; 3],  // FORMAT.md section 5.4
+    origins: [AxisTrack; 3], // FORMAT.md 5.3
+    angles: [AxisTrack; 3],  // FORMAT.md 5.4
     frame_times: (u32, u32),
-    float_origins: [FloatTrack; 3], // FORMAT.md section 5.2
+    float_origins: [FloatTrack; 3], // FORMAT.md 5.2
 }
 
-/// The previous usercmd fields of one player (FORMAT.md section 4.11).
+/// The previous usercmd fields of one player (FORMAT.md 4.11).
 #[derive(Debug, Clone, Copy, Default)]
 struct UsercmdState {
     drop: u8,
@@ -65,7 +65,7 @@ struct UsercmdState {
     buttons: u8,
     impulse: u8,
     moves: [u16; 3],
-    angles: [AxisTrack; 3], // FORMAT.md section 5.6
+    angles: [AxisTrack; 3], // FORMAT.md 5.6
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -76,8 +76,8 @@ struct EntityState {
     model: u8,
     bits: u8,
     last_packet: u32,
-    origins: [AxisTrack; 3],        // FORMAT.md section 5.5
-    float_origins: [FloatTrack; 3], // FORMAT.md section 5.2
+    origins: [AxisTrack; 3],        // FORMAT.md 5.5
+    float_origins: [FloatTrack; 3], // FORMAT.md 5.2
 }
 
 #[derive(Debug)]
@@ -199,7 +199,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
             .then(|| self.players[entity - 1].origins.map(AxisTrack::last))
     }
 
-    /// A 16-bit numeric field and its residual (FORMAT.md section 5.1).
+    /// A 16-bit numeric field and its residual (FORMAT.md 5.1).
     #[inline(always)]
     fn code_u16(&mut self, stream: usize, context: u32, prediction: u16) -> (u16, i32) {
         if IS_ENCODE {
@@ -230,7 +230,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         }
     }
 
-    /// FORMAT.md section 5.2.
+    /// FORMAT.md 5.2.
     #[inline(always)]
     fn float_origin(&mut self, stream: usize, axis: usize, is_sent: bool, track: &mut FloatTrack) {
         if !is_sent {
@@ -664,7 +664,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         self.players[number as usize] = player;
     }
 
-    /// FORMAT.md sections 5.3 and 5.4.
+    /// FORMAT.md 5.3 and 5.4.
     fn player_origins_and_angles(&mut self, player: &mut PlayerState, flags: u16) {
         let time_deltas = time_deltas(&mut player.frame_times, self.time);
         if self.protocol.has_float_coords {
@@ -1047,7 +1047,7 @@ impl<'a, const IS_ENCODE: bool, IO: SymbolIo> SegmentWalker<'a, IS_ENCODE, IO> {
         self.usercmds[player as usize] = state;
     }
 
-    /// FORMAT.md section 5.6.
+    /// FORMAT.md 5.6.
     fn usercmd_grid_angle(&mut self, axis: usize, track: &mut AxisTrack) {
         let context = clamped_bucket(track.residual(), 23)
             | clamped_bucket(track.velocity(), 23) << 5

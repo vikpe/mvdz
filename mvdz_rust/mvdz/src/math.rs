@@ -179,7 +179,7 @@ pub(crate) fn normalize(weights: &[u64], total: u32) -> Vec<u32> {
 }
 
 /// log2 of `value` (at least 1) with 16 fraction bits, rounded down: integer arithmetic,
-/// so every encoder selects the same tables (FORMAT.md section 8).
+/// so every encoder selects the same tables (FORMAT.md 8).
 pub(crate) fn log2_fixed(value: u64) -> u64 {
     const FRACTION_BITS: u32 = 16;
     const ONE: u64 = 1 << 30;

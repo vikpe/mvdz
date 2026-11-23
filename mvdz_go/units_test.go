@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// FORMAT.md section 1
+// FORMAT.md 1
 func TestCrc32CheckValue(test *testing.T) {
 	if checksum := crc32.ChecksumIEEE([]byte("123456789")); checksum != 0xCBF43926 {
 		test.Errorf("got %#x", checksum)
@@ -82,7 +82,7 @@ func TestDivRound(test *testing.T) {
 	}
 }
 
-// FORMAT.md section 6.4: the widest buckets wrap, and section 6.5: the
+// FORMAT.md 6.4: the widest buckets wrap, and 6.5: the
 // mantissa bits end within the last byte.
 func TestGridAngles(test *testing.T) {
 	// 0.0, 45/8192, 91 * 45/8192, 45.0, 90.0, 32767 * 45/8192, -180.0, -45/8192
@@ -140,7 +140,7 @@ func TestNumericValue(test *testing.T) {
 	}
 }
 
-// The check values of FORMAT.md section 8 rule 4.
+// The check values of FORMAT.md 8 rule 4.
 func TestLog2Fixed(test *testing.T) {
 	values := map[uint64]uint64{
 		1: 0, 2: 65536, 3: 103872, 10: 217705, 1000: 653117, 4097: 786455,

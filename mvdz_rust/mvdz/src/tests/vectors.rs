@@ -349,7 +349,7 @@ fn hostile(vectors: &mut Vec<Vector>) -> anyhow::Result<()> {
     models_block(&mut add)
 }
 
-/// One-segment files whose stream table breaks a rule of FORMAT.md section 3.1.
+/// One-segment files whose stream table breaks a rule of FORMAT.md 3.1.
 fn stream_table(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> {
     let demo = synthetic(&[(1, "{\"a\":"), (0, "1}")], false);
     let file_parts = parts(&compress(&demo)?)?;
@@ -712,7 +712,7 @@ fn mvd1_float_demo_is_walked() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Every frame type, every command the sizer knows (FORMAT.md section 4.2 and section 8
+/// Every frame type, every command the sizer knows (FORMAT.md 4.2 and 8
 /// rule 12) and the playerinfo, packet-entity, sound and temp-entity forms, first without
 /// and then with FTE extensions. The walk escapes nothing.
 fn commands_demo() -> Vec<u8> {
@@ -1250,7 +1250,7 @@ fn vectors_reproduce() -> anyhow::Result<()> {
             }
         }
         let mut manifest_text = String::from(
-            "# file\tdecoded_sha256 or \"error: <message>\"\tdecoded_size\thow it was made\n# Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (the Error variants; FORMAT.md section 7), in its own words.\n",
+            "# file\tdecoded_sha256 or \"error: <message>\"\tdecoded_size\thow it was made\n# Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (the Error variants; FORMAT.md 7), in its own words.\n",
         );
         for (name, file, demo, how) in &vectors {
             std::fs::write(dir().join(name), file)?;
@@ -1283,7 +1283,7 @@ fn vectors_reproduce() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The canonical parse (FORMAT.md section 8) on fixed inputs, for an encoder in another
+/// The canonical parse (FORMAT.md 8) on fixed inputs, for an encoder in another
 /// language to check its parser before it compares whole files.
 fn lz_tokens_text() -> String {
     use crate::lz::Token;

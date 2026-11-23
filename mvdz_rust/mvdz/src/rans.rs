@@ -146,7 +146,7 @@ impl Tally {
         self.model_at(TABLE_COST)
     }
 
-    /// The model the models block codes the other models with (FORMAT.md section 2.2).
+    /// The model the models block codes the other models with (FORMAT.md 2.2).
     fn meta_model(&self) -> FileModel {
         /// A table of the meta model is stored as it is, a byte per symbol.
         const TABLE_COST: TableCost = TableCost {
@@ -165,7 +165,7 @@ impl Tally {
     }
 }
 
-/// What an own table costs in the models block, in bits (FORMAT.md section 8).
+/// What an own table costs in the models block, in bits (FORMAT.md 8).
 #[derive(Debug, Clone, Copy)]
 struct TableCost {
     base: u64,
@@ -242,7 +242,7 @@ fn build_model(counts: &Counts) -> Model {
     }
 }
 
-/// FORMAT.md section 6.2: the count of own contexts, the own contexts (u16 each, ascending)
+/// FORMAT.md 6.2: the count of own contexts, the own contexts (u16 each, ascending)
 /// and the quantized counts of every table, the fallback first.
 fn raw_model(model: &Model) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -300,7 +300,7 @@ fn count_le(table: &[u16], chunks: usize, slot: u32) -> usize {
 /// Own contexts, quantized counts of every table (the fallback first).
 type ModelHeader = (Vec<u32>, Vec<u8>);
 
-/// FORMAT.md section 6.2.
+/// FORMAT.md 6.2.
 fn read_model_header(raw_model: &[u8], alphabet_size: usize) -> Result<ModelHeader> {
     let corrupt = Error::Corrupt("model");
     let mut rest = raw_model;
@@ -648,7 +648,7 @@ pub(crate) struct ModelsBlock {
     pub(crate) raw_len: usize,
 }
 
-/// FORMAT.md section 2.2: the meta model as it is, then every raw model (by stream id,
+/// FORMAT.md 2.2: the meta model as it is, then every raw model (by stream id,
 /// ascending) coded under it.
 pub(crate) fn write_models_block(raw_models: &[(usize, &[u8])]) -> ModelsBlock {
     let mut tally = Tally::new(256);

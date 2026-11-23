@@ -107,7 +107,7 @@ pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
     Ok(total)
 }
 
-/// The transform header and bodies of a segment (FORMAT.md section 3.1).
+/// The transform header and bodies of a segment (FORMAT.md 3.1).
 #[derive(Clone)]
 pub(crate) struct StreamTable {
     /// fte, fte2, mvd1
@@ -471,7 +471,7 @@ pub(crate) fn readers_agree(file: &[u8], what: &str) -> Option<Vec<u8>> {
     first.as_ref().ok().cloned()
 }
 
-/// One entry of a models block (FORMAT.md section 2.2).
+/// One entry of a models block (FORMAT.md 2.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelEntry {
     pub stream: usize,

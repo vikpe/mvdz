@@ -7,7 +7,7 @@ const (
 	hiddenUsercmdSize = 23
 )
 
-// segmentWalker walks a segment field by field, FORMAT.md sections 4 and 5.
+// segmentWalker walks a segment field by field, FORMAT.md 4 and 5.
 // After the first error every primitive does nothing and every loop stops.
 //
 // The walk is the same in both directions. Decoding writes the segment from
@@ -23,7 +23,7 @@ type segmentWalker struct {
 	protocol   protocolState
 	err        error
 
-	// FORMAT.md section 4.3
+	// FORMAT.md 4.3
 	time                   uint32
 	target                 uint8
 	lastType               uint8
@@ -47,15 +47,15 @@ type playerState struct {
 	flags           uint16
 	frame           uint8
 	weaponFrame     uint8
-	origins, angles [3]axisTrack // FORMAT.md sections 5.3 and 5.4
+	origins, angles [3]axisTrack // FORMAT.md 5.3 and 5.4
 	times           frameTimes
-	floatOrigins    [3]floatTrack // FORMAT.md section 5.2
+	floatOrigins    [3]floatTrack // FORMAT.md 5.2
 }
 
 type usercmdState struct {
 	drop, msec, grid, buttons, impulse uint8
 	moves                              [3]uint16
-	angles                             [3]axisTrack // FORMAT.md section 5.6
+	angles                             [3]axisTrack // FORMAT.md 5.6
 }
 
 type entityState struct {
@@ -65,8 +65,8 @@ type entityState struct {
 	model          uint8
 	bits           uint8
 	lastPacket     uint32
-	origins        [3]axisTrack  // FORMAT.md section 5.5
-	floatOrigins   [3]floatTrack // FORMAT.md section 5.2
+	origins        [3]axisTrack  // FORMAT.md 5.5
+	floatOrigins   [3]floatTrack // FORMAT.md 5.2
 }
 
 func newWalker(segment []byte, streams *segmentStreams) *segmentWalker {
@@ -79,7 +79,7 @@ func newWalker(segment []byte, streams *segmentStreams) *segmentWalker {
 	}
 }
 
-// FORMAT.md section 4.4
+// FORMAT.md 4.4
 func (walker *segmentWalker) run(tail uint32) {
 	if tail > uint32(len(walker.segment)) {
 		walker.fail("tail longer than the segment")
@@ -138,7 +138,7 @@ func (walker *segmentWalker) lengthPrefixed(frameType uint8, isHidden bool) {
 	binary.LittleEndian.PutUint32(walker.segment[lengthOffset:], walker.position-lengthOffset-4)
 }
 
-// FORMAT.md section 4.5
+// FORMAT.md 4.5
 func (walker *segmentWalker) payload(frameType uint8) {
 	walker.previousCommand = 0
 	walker.statPreviousIndex = 255
@@ -217,7 +217,7 @@ func (walker *segmentWalker) escape() {
 	walker.copyBlob(streamRaw, length)
 }
 
-// FORMAT.md section 4.6
+// FORMAT.md 4.6
 func (walker *segmentWalker) command(command uint8) {
 	switch command {
 	case svcPlayerInfo:
@@ -251,7 +251,7 @@ func (walker *segmentWalker) updateStat() {
 	stats[index] = value
 }
 
-// FORMAT.md section 4.7
+// FORMAT.md 4.7
 func (walker *segmentWalker) playerInfo() {
 	number := walker.codeBlobByte(streamPlayerNumber)
 	player := &walker.players[number]
@@ -300,7 +300,7 @@ func (walker *segmentWalker) playerInfoFlags(previous uint16) uint16 {
 	return flags
 }
 
-// FORMAT.md section 4.8
+// FORMAT.md 4.8
 func (walker *segmentWalker) packetEntities(command uint8) {
 	if command == svcDeltaPacketEntities {
 		walker.lastHeader = walker.codeBlobResidual(streamEntityHeader, walker.lastHeader)
@@ -413,7 +413,7 @@ func (walker *segmentWalker) entityAngle(entity *entityState, axis int) {
 	entity.angles[axis] = angle
 }
 
-// FORMAT.md section 4.9
+// FORMAT.md 4.9
 func (walker *segmentWalker) sound() {
 	low := walker.codeSymbol(streamSoundChannel, uint16(walker.previousCommand))
 	high := walker.codeSymbol(streamSoundChannel, 0x100|uint16(low))
@@ -438,7 +438,7 @@ func (walker *segmentWalker) sound() {
 	}
 }
 
-// FORMAT.md section 4.10
+// FORMAT.md 4.10
 func (walker *segmentWalker) tempEntity() {
 	context := uint16(walker.previousTempEntity)
 	if walker.previousCommand == svcTempEntity {
@@ -471,7 +471,7 @@ func (walker *segmentWalker) tempEntity() {
 	walker.tempEntityOrigins(kind, isBeam, beamOrigin)
 }
 
-// FORMAT.md section 4.11
+// FORMAT.md 4.11
 func (walker *segmentWalker) hiddenPayload() {
 	for walker.err == nil {
 		switch walker.blobByte(streamHiddenTag, walker.sourceHiddenTag()) {
@@ -537,7 +537,7 @@ func (walker *segmentWalker) usercmd() {
 	state.impulse = walker.codeSymbol(streamUsercmd, 8<<12|uint16(state.impulse))
 }
 
-// sourceCommand is the CMD symbol of the source, FORMAT.md section 4.5: 255 at
+// sourceCommand is the CMD symbol of the source, FORMAT.md 4.5: 255 at
 // the payload end, 0 (an escape) before a command that cannot be walked.
 func (walker *segmentWalker) sourceCommand() uint8 {
 	rest := walker.payloadRest()
@@ -550,7 +550,7 @@ func (walker *segmentWalker) sourceCommand() uint8 {
 	return rest[0]
 }
 
-// sourceHiddenTag is the hidden-block tag of the source, FORMAT.md section
+// sourceHiddenTag is the hidden-block tag of the source, FORMAT.md
 // 4.11: 2 at the payload end, 0 (an escape) before a block that cannot be
 // walked, else 1.
 func (walker *segmentWalker) sourceHiddenTag() uint8 {
@@ -599,7 +599,7 @@ func (walker *segmentWalker) peek32(offset uint32) uint32 {
 	return value
 }
 
-// Walker primitives, FORMAT.md section 4. The streams are the only part that
+// Walker primitives, FORMAT.md 4. The streams are the only part that
 // depends on the direction.
 
 func (walker *segmentWalker) fail(rule string) {
