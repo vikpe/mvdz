@@ -521,15 +521,14 @@ for index = 0, 1, 2, ...:
         ctx = class | (min(index, 15) << 4) | (first_class << 8) | (ti << 12)
     c = symbol(COMMAND, ctx)
     if c == 255: return                // end of payload
-    if c == 0:   escape(); return      // the rest of the payload is raw
-    write c at dst[p]; p += 1
-    command(c)
+    if c == 0:   escape()              // raw bytes; the loop goes on
+    else:        write c at dst[p]; p += 1; command(c)
     previous_command = c
 ```
 
-The COMMAND symbol 255 and 0 are not written. After a payload with at least
-one command `first_command_by_type[ti]` holds its first command; after an
-empty one (an immediate 255 or 0) it holds 255. `command_class(255)` is 15;
+The COMMAND symbol 255 and 0 are not written. An escape counts as a command,
+0. After a payload with at least one command `first_command_by_type[ti]` holds
+its first command; after an empty one (an immediate 255) it holds 255. `command_class(255)` is 15;
 initially `first_command_by_type` is 0, class 0.
 
 The COMMAND context is split by bit 15:
@@ -568,7 +567,11 @@ for k in 0..4: n |= blob_byte(ESCAPE_LENGTH) << (8*k)      // u32, low byte firs
 copy_blob(RAW, n)
 ```
 
-The escaped part runs to the end of the payload.
+A payload ends at COMMAND 255 only (a hidden payload at tag 2, 4.11): a decoder
+reads on after an escape. The reference encoder escapes to the end of the
+payload, since it cannot size what it does not walk, and then codes the end.
+An encoder that can size such a command may escape it alone; the commands
+after it are then walked as usual, and no decoder needs to know the command.
 
 ### 4.6 Commands (`SegmentWalker::command`)
 
@@ -746,7 +749,7 @@ bytes]`:
 loop:
     if error: return
     tag = blob_byte(HIDDEN_TAG)
-    if tag == 0: escape(); return
+    if tag == 0: escape(); continue
     if tag == 2: return
     if tag != 1: error; return
     len  = code_blob_bytes(HIDDEN_LENGTH, 4)
@@ -1407,7 +1410,7 @@ its blob parser (rule 10) on its own.
 
     * **Escape** (section 4.5): when the next command byte is 0, unknown to the sizer, or
       its body does not fit before the payload end. `n` is the length of the rest of the
-      payload.
+      payload; the end (255) follows.
     * **Player flags** (section 4.7): bit 7 of `a` is set exactly when `x & ~0x43f != 0`;
       `b2` is 0 or 1.
     * **Entity gap** (section 4.8): `d = ((e - prev - 1) & 511) + 1` (1..512), coded
@@ -1416,8 +1419,8 @@ its blob parser (rule 10) on its own.
       escaped, so the last branch of section 4.10 sees only types 0, 1, 3, 4, 7, 8, 10, 11
       and 13.
     * **Hidden payload** (section 4.11): tag 2 at the end of the payload; tag 0 (an escape
-      of the rest) when fewer than 6 bytes remain or the block length is 0 or runs past
-      the payload. The grid bits of a usercmd block are `math.rs:grid_from_f32_bits`.
+      of the rest, then tag 2) when fewer than 6 bytes remain or the block length is 0 or
+      runs past the payload. The grid bits of a usercmd block are `math.rs:grid_from_f32_bits`.
 13. **Residuals** (section 5): `(v - pred) as i16 as i32` for a 16-bit field of value `v`,
     `(v - pred) as i32` for a 32-bit field, and `(g - pred) as i16 as i32` for a usercmd
     angle of grid value `g` (`math.rs:grid_from_f32_bits`). Appendix A has their buckets and

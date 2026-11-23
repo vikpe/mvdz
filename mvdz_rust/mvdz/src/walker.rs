@@ -138,7 +138,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
         self.io.end_payload(len_offset);
     }
 
-    /// The rest of a payload, which the walk does not model.
+    /// Bytes the walk does not model: for the encoder the rest of the payload.
     fn escape(&mut self) {
         let source_len = self.io.payload_rest().len() as u32;
         let mut len = 0u32;
@@ -178,14 +178,12 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             let command = self.io.symbol(COMMAND, context, source_command);
             match command {
                 255 => return,
-                0 => {
-                    self.escape();
-                    return;
+                0 => self.escape(),
+                _ => {
+                    self.io.write(command);
+                    self.command(command);
                 }
-                _ => {}
             }
-            self.io.write(command);
-            self.command(command);
             self.previous_command = command;
             command_index += 1;
         }
@@ -519,7 +517,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
     }
 
     /// `dem_multiple` with mask 0: blocks of [u32 len][u16 type][len bytes].
-    /// Tags: 1 block, 2 end, 0 escape (rest raw).
+    /// Tags: 1 block, 2 end, 0 escape (raw bytes).
     fn hidden_payload(&mut self) {
         const MVD_HIDDEN_USERCMD: u32 = 1;
         while !self.io.has_error {
@@ -527,7 +525,7 @@ impl<'a, const IS_ENCODE: bool> SegmentWalker<'a, IS_ENCODE> {
             match self.io.blob_byte(HIDDEN_TAG, source_tag) {
                 0 => {
                     self.escape();
-                    return;
+                    continue;
                 }
                 1 => {}
                 2 => return,

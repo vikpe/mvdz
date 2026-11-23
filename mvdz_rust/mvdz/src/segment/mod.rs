@@ -600,7 +600,9 @@ pub(crate) fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streams::{ENTITY_BITS, USERCMD, USERCMD_ANGLE, is_numeric, is_structural};
+    use crate::streams::{
+        COMMAND, ENTITY_BITS, ESCAPE_LENGTH, USERCMD, USERCMD_ANGLE, is_numeric, is_structural,
+    };
     use anyhow::Context as _;
     use pretty_assertions::assert_eq;
 
@@ -729,6 +731,33 @@ mod tests {
         assert!(dst == src);
         Ok(())
     }
+    /// FORMAT.md 4.5: one command escaped, as an encoder that sizes it would; the next is
+    /// walked.
+    #[test]
+    fn walk_goes_on_after_an_escape() -> anyhow::Result<()> {
+        const SVC_NOP: u8 = 1;
+        const DEM_ALL: u8 = 6;
+        let payload = [SVC_NOP, SVC_NOP];
+        let payload_len = (payload.len() as u32).to_le_bytes();
+        let src = [&[0, DEM_ALL][..], &payload_len, &payload].concat();
+        let (mut walked, _) = walk(&src, ProtocolState::default()).context("the demo walks")?;
+        let command_after_escape_context = 1 << 4 | u16::from(DEM_ALL) << 12;
+        walked.streams[COMMAND].symbols[0] = 0;
+        walked.streams[COMMAND].contexts[1] = command_after_escape_context;
+        walked.blobs[ESCAPE_LENGTH] = 1u32.to_le_bytes().to_vec();
+        walked.blobs[RAW] = vec![SVC_NOP];
+        let blob_bytes: Vec<u8> = walked.blobs.iter().flatten().copied().collect();
+        let tokens = lz::tokens(&blob_bytes);
+        walked.streams[LZ_LITERAL] = tokens.literals;
+        walked.streams[LZ_LENGTH] = tokens.lens;
+        walked.streams[LZ_DISTANCE] = tokens.dists;
+        let (body, file_models) = coded_walked(&walked)?;
+        let transform_header = parse_transform_header(&body, src.len())?;
+        let dst = decoded(&body, &transform_header, src.len(), Some(&file_models))?;
+        assert_eq!(dst, src);
+        Ok(())
+    }
+
     /// usercmd blocks on and off the grid, other lengths, two in one payload; streams `USERCMD` and
     /// `USERCMD_ANGLE` only where a segment has one.
     #[test]

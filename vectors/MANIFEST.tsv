@@ -1,5 +1,5 @@
 # file	decoded_sha256 or "error: <message>"	decoded_size	how it was made
-# Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (the Error variants; FORMAT.md section 7), in its own words.
+# Valid files must decode to the SHA-256; hostile files must be refused. The message is the reference's: another decoder should report the same category (the Error variants; FORMAT.md 7), in its own words.
 duel.normal.mvdz	3fe477dc5e4c050fc411d82be87a24c5ec04d6f18b3c6bc0561789a4c4561416	2027927	duel = sample8 demo 3fe477dc...1416; compress
 duel-truncated.normal.mvdz	48f06f54646ee88cb73fe09331b65d3d7c759262ae4c73d3b0c3fada39dda154	150000	the first 150000 bytes of duel (ends inside a frame)
 float-mvd1.normal.mvdz	987a33fe15b8a28516d14d408bb65e93c2560929d6324187be4a13aeadd2cdcf	8435	synthetic demo with MVD1 float coordinates (two players, sounds)
