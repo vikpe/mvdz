@@ -1,6 +1,6 @@
 # mvdz
 
-**mvdz** is a lossless compressor and file format for QuakeWorld MVD demos (`.mvd`).
+> Lossless compression of QuakeWorld MVD demos
 
 - **Small**: a fifth of the raw demo, a third of its gzip.
 - **Lossless**: exact original bytes, checked by CRC-32.
@@ -25,21 +25,21 @@
 
 Details in [BENCHMARKS.md](BENCHMARKS.md).
 
-| format | size / raw | decode |
-|---|---|---|
-| mvdz, `-j 1` | 0.19 | 97 MB/s |
-| mvdz, `-j 4` | 0.19 | 237 MB/s |
-| gzip -9 | 0.57 | 194 MB/s |
-| xz -9e | 0.43 | 56 MB/s |
-| zstd -19 | 0.51 | 508 MB/s |
+| format       | size / raw | decode   |
+| ------------ | ---------- | -------- |
+| mvdz, `-j 1` | 0.19       | 97 MB/s  |
+| mvdz, `-j 4` | 0.19       | 237 MB/s |
+| gzip -9      | 0.57       | 194 MB/s |
+| xz -9e       | 0.43       | 56 MB/s  |
+| zstd -19     | 0.51       | 508 MB/s |
 
 ## Implementations
 
-| | encode | decode |
-|---|---|---|
-| [Rust](mvdz_rust/README.md) | yes | yes |
-| [Go](mvdz_go/README.md) | yes | yes |
-| [C](mvdz_c/README.md) | no | yes |
+|                             | encode | decode |
+| --------------------------- | ------ | ------ |
+| [Rust](mvdz_rust/README.md) | yes    | yes    |
+| [Go](mvdz_go/README.md)     | yes    | yes    |
+| [C](mvdz_c/README.md)       | no     | yes    |
 
 ## FAQ
 
