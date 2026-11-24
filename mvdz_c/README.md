@@ -3,6 +3,24 @@
 MVDZ decoder in C99 for QuakeWorld clients and servers. Decoder only, whole buffers, one
 thread, no dependencies beyond the C library. Files are written with the Rust or Go tool.
 
+## API
+
+```c
+#include "mvdz.h"
+
+/* *demo is freed with free(); it is NULL after an error and for an empty demo */
+mvdz_error mvdz_decode(uint8_t **demo, size_t *demo_size, const uint8_t *file, size_t file_len);
+
+typedef struct mvdz_error {
+    mvdz_error_kind kind;
+    const char *message; /* static; NULL for MVDZ_OK */
+} mvdz_error;
+
+typedef enum mvdz_error_kind {
+    MVDZ_OK, MVDZ_CORRUPT, MVDZ_MEMORY_LIMIT, MVDZ_NOT_MVDZ, MVDZ_UNSUPPORTED_VERSION
+} mvdz_error_kind;
+```
+
 ## Use
 
 Add the directory to the project and compile `mvdz.c`: it includes the other `.c` files

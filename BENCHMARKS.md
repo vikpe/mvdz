@@ -1,197 +1,179 @@
-# mvdz benchmarks
+# Benchmarks
 
-Compression ratios, speeds, memory and round trips of mvdz (format version 3), and of
-rc.4 (`master`, format version 1) under the same premise: 256 KiB segments
-(`-s 256K`), compression with its self-check, decompression with CRC checks only (rc.4's
-`--trusted`: this version never recomputes the SHA-256). MB = 10^6
-bytes of **raw demo**; speeds are MB/s of raw demo, so a codec's speed does not depend
-on how well it compresses.
+mvdz (format version 3) against rc.4 (`master`, format version 1) and general-purpose
+compressors, with the Rust tool; then the Rust, Go and C implementations side by side.
 
-## Machine
+- Ratio: compressed size / raw `.mvd` size.
+- Speed: MB/s of raw demo, MB = 10^6 bytes.
+- Memory: peak resident memory, MiB (`/usr/bin/time -f %M`).
 
-An Intel Core i5-12400F (6 cores, 12 threads; AVX2 and SHA extensions), 62 GB of
-memory, Linux 6.8, Rust 1.100, `cargo build --release` (glibc, system allocator,
-portable `x86-64`). Speeds ran pinned to four physical cores (`taskset -c 0,2,4,6`)
-on a quiet machine (load 1.4 to 1.9). rc.4 was built from `master` and measured in the
-same session, 2026-11-23. Figures are the median over rounds, with [min-max].
+## Setup
 
-## Samples
+| | |
+|---|---|
+| CPU | AMD Ryzen 5 5600X, 6 cores, 12 threads |
+| Memory | 62 GB |
+| OS | Linux 7.0 |
+| Build | Rust 1.100, `cargo build --release`, baseline `x86-64`; Go 1.27; C: gcc 13.3 `-O2` |
+| Pinning | four physical cores, `taskset -c 2,3,4,5` |
+| Date | 2026-11-24 |
 
-The archive: 50,951 gzip-compressed demos, 72.0 GB as gzip, about 112 GB raw, from
-QuakeWorld servers between about 2000 and 2026, named by the SHA-256 of the raw demo.
+One process per file, files on tmpfs, the median of 5 rounds (3 for
+`scripts/bench_cli.sh`). An editor took about half a core during the runs (load 0.9 to
+1.7).
 
-| sample | n | raw | used for |
+rc.4 is `master` at 0bc8817, measured in the same session with the same feature set:
+normal level, `-s 256K` segments, the compress self-check, and `--trusted` (CRC checks
+only, as this version).
+
+## Data
+
+The archive: 50,951 demos from QuakeWorld servers, about 2000 to 2026, 72.0 GB as gzip,
+about 112 GB raw.
+
+| sample | demos | raw | used for |
 |---|---|---|---|
-| stratified | 379 of 585 | 969 MB | ratios: stratified by era x gzip-size tercile, weighted to the archive |
-| sample8 | 8 | 53.2 MB | speeds: 7 demos of sample40 from 0.79 to 6.2 MB and one usercmd demo of 35.5 MB |
-| sample40 | 32 of 40 | 200 MB | development; includes two usercmd demos |
+| stratified | 379 | 969 MB | ratios; by era and size, weighted to the archive |
+| sample8 | 8 | 53.2 MB | speeds; 0.79 to 6.2 MB, and one of 35.5 MB with usercmd blocks |
+| sample40 | 32 | 200 MB | single demos by size |
 
-The lists (the SHA-256 of each raw demo; for stratified also the cells and weights)
-are in [`benchmarks/samples/`](benchmarks/samples). `scripts/fetch_samples.sh <set>
-<dir>` downloads a set from `https://dev.quake.world/mvdz/<set>.tar.gz`, unpacks it
-and checks every SHA-256. Not every demo of the original samples could be found again:
-stratified and sample40 have 379 and 32 of their demos; sample8 is complete (two of its
-demos were replaced by the sample40 demos nearest in size).
+The lists are in [`benchmarks/samples/`](benchmarks/samples);
+`scripts/fetch_samples.sh <set> <dir>` downloads a set and checks every SHA-256.
 
-## Ratios
+## Ratio
 
-Ratio = compressed bytes / raw bytes, weighted to the archive (each stratified demo
-counts for the archive demos of its cell; the weights are rescaled to the demos
-present), with 95 % intervals from a bootstrap within the cells. On the 379 stratified
-demos:
+The 379 stratified demos, weighted to the archive:
 
-| format | size / raw | size / archive gzip |
-|---|---|---|
-| **mvdz** | **0.194** [0.191-0.198] | 0.328 |
-| mvdz rc.4, `-s 256K` | 0.192 [0.189-0.195] | 0.324 |
-| archive gzip | 0.593 [0.581-0.603] | 1 |
-| gzip -9 | 0.566 [0.554-0.577] | 0.956 |
-| xz -9e | 0.429 [0.422-0.435] | 0.724 |
-| zstd -19 | 0.508 [0.498-0.517] | 0.858 |
+| format | size / raw |
+|---|---|
+| **mvdz** | **0.19** |
+| gzip -9 | 0.57 |
+| xz -9e | 0.43 |
+| zstd -19 | 0.51 |
+| the archive's gzip | 0.59 |
 
-Projected onto the whole archive (72.0 GB as gzip): 23.6 GB. Unweighted, the 379
-demos (968,979,765 bytes raw) compress to 212,808,429 bytes (0.2196); the median demo
-to 0.244. mvdz files are 2.6 times smaller than zstd -19 and 2.2 times smaller than xz
--9e.
+The whole archive would take about 23.6 GB as mvdz.
 
-Against rc.4 at the same segment size: +1.4 % (the blob streams as LZ77 tokens coded
-with rANS instead of zstd, fixed-width integers, and a length for every command without
-a layout, FORMAT.md 4.2, so that a decoder sizes no command). The gzip, xz and zstd
-columns are from the earlier run: same demos, same tools.
+By year of the demo:
 
-**By era** (year of the demo; weighted, 95 % intervals):
-
-| era | n | mvdz | gzip -9 | xz -9e | zstd -19 |
+| era | demos | mvdz | gzip -9 | xz -9e | zstd -19 |
 |---|---|---|---|---|---|
-| up to 2006 | 127 | 0.265 [0.261-0.269] | 0.611 | 0.508 | 0.554 |
-| 2007-2010 | 95 | 0.240 [0.234-0.245] | 0.609 | 0.492 | 0.552 |
-| 2011-2020 | 49 | 0.253 [0.243-0.266] | 0.622 | 0.508 | 0.566 |
-| 2021-2022 | 19 | 0.180 [0.176-0.184] | 0.610 | 0.442 | 0.546 |
-| 2023-2024 | 43 | 0.180 [0.176-0.185] | 0.599 | 0.433 | 0.536 |
-| 2025-2026 | 45 | 0.156 [0.147-0.164] | 0.493 | 0.359 | 0.439 |
+| up to 2006 | 127 | 0.27 | 0.61 | 0.51 | 0.55 |
+| 2007-2010 | 95 | 0.24 | 0.61 | 0.49 | 0.55 |
+| 2011-2020 | 49 | 0.25 | 0.62 | 0.51 | 0.57 |
+| 2021-2022 | 19 | 0.18 | 0.61 | 0.44 | 0.55 |
+| 2023-2024 | 43 | 0.18 | 0.60 | 0.43 | 0.54 |
+| 2025-2026 | 45 | 0.16 | 0.49 | 0.36 | 0.44 |
 
-(One undated demo is not listed.) Current mvdsv records a snapshot every server frame
-(`sv_demofps 77`; about 62 a second in practice) where older demos mostly hold 20-27;
-the smaller time step makes each snapshot easier to predict.
+Recent demos hold about 62 snapshots a second where older ones hold 20 to 27: a smaller
+time step is easier to predict.
 
-**Demos with usercmd blocks.** mvdsv can record every player input as a hidden block
-(type 1, 23 bytes, `SV_DebugClientCommand`; about 77 a second per player). Such demos
-are rare: none in the archive, none on the public QTV servers checked in November 2026,
-but one server records them. On 10 such 4on4 demos of October 2026 (36 MB raw each, the
-blocks 60 % of it; two of them are in sample40, one of those in sample8) the blocks are
-coded field by field (FORMAT.md 4.11, 5.6):
+Demos that record player inputs (usercmd blocks; 10 demos of 36 MB): mvdz 0.11, gzip
+0.40.
 
-| | size / raw | / gzip |
-|---|---|---|
-| gzip (the hub's `.mvd.gz`) | 0.402 | 1 |
-| mvdz | 0.107 (0.104 to 0.111 per demo) | 0.266 |
+## Speed
 
-The usercmd layout codes the blocks at 0.058 of their raw bytes; with the blocks stored
-as generic hidden blocks instead, the files are 90 % larger (0.203 of raw). This table
-is from the earlier run: of the 10 demos only the two of sample40 are at hand, 0.108 and
-0.111 of raw now.
+sample8, decoding against general-purpose tools (`scripts/bench_cli.sh`; batch: 4
+processes at once, one thread each):
 
-## Speeds
-
-`mvdz compress` and `mvdz decompress`, one process per file over the 8 demos of sample8,
-the output written to tmpfs; 5 rounds. `-j 4` encodes and decodes up to 4 segments at
-once.
-
-| | rc.4 `-s 256K` | **this version** |
-|---|---|---|
-| size / raw (sample8) | 0.1476 | 0.1483 |
-| compress, `-j 1` | 30.6 [29.5-30.8] | **34.6** [33.8-35.2] |
-| compress, `-j 4` | 56.6 [55.5-57.2] | **94.6** [74.0-96.0] |
-| decompress, `-j 1` | 93.1 [90.6-94.1] | **102.2** [101.5-103.8] |
-| decompress, `-j 4` | 222.7 [222.0-222.8] | **295.0** [289.7-301.4] |
-
-Compression is 1.1 times faster on one thread and 1.7 times on four (segments encode
-in parallel). Decompression is 1.1 times faster on one thread and 1.3 times on four
-(segments decode in parallel). Two thirds of sample8 is one 35.5 MB demo, so these
-figures lean on a large file; on one 14.2 MB 4on4 this version compresses at 96.5 MB/s
-and decompresses at 294 MB/s with `-j 4`.
-
-**Against general-purpose decompressors** (`scripts/bench_cli.sh`, same files, one
-process per file; "batch" = 4 processes in parallel, one thread each; 3 rounds):
-
-| format | size / raw | decode, 1 process | decode, batch of 4 |
+| decoder | size / raw | 1 process | batch of 4 |
 |---|---|---|---|
-| mvdz, `-j 1` | 0.148 | 102.8 [102.2-102.8] | 171.6 [171.1-174.3] |
-| mvdz, `-j 4` | 0.148 | 297.0 [291.7-299.0] | 427.2 [415.3-434.9] |
-| gzip -9 (`gzip -dc`) | 0.469 | 165.9 [157.5-171.2] | 272.6 [267.8-273.7] |
-| xz -9 (`xz -dc`) | 0.362 | 52.1 [51.8-52.1] | 90.9 [90.8-91.3] |
-| zstd -19 (`zstd -dc`) | 0.417 | 532.1 [475.0-553.3] | 844.0 [729.7-878.7] |
+| mvdz, `-j 1` | 0.15 | 96.5 | 156.1 |
+| mvdz, `-j 4` | 0.15 | 236.8 | 258.2 |
+| gzip -9 | 0.47 | 193.5 | 316.8 |
+| xz -9 | 0.36 | 56.1 | 100.5 |
+| zstd -19 | 0.42 | 508.4 | 782.6 |
 
-**The C decoder** (`mvdz_c/`, one thread; `scripts/bench_cli.sh` with
-`MVDZ=mvdz_c/mvdz_bench`, gcc 13.3 `-O2`), against the Rust tool in the same session:
-2026-11-24, Linux 7.0, load 1.2 to 1.5, so not comparable with the table above.
+Single demos by size. The 199.5 MB file is the 32 demos of sample40 joined; the 2.0 MB
+figures include starting the process.
 
-| decoder | decode, 1 process | decode, batch of 4 |
-|---|---|---|
-| Rust, `-j 1` | 96.9 [96.1-97.1] | 152.2 [146.1-155.4] |
-| C | 88.5 [88.2-89.3] | 149.4 [146.9-150.5] |
+| | 2.0 MB | 14.2 MB | 199.5 MB |
+|---|---|---|---|
+| compress, `-j 1` | 29.5 | 33.5 | 35.7 |
+| compress, `-j 4` | 58.4 | 86.0 | 100.1 |
+| decompress, `-j 1` | 82.1 | 89.4 | 93.0 |
+| decompress, `-j 4` | 155.5 | 224.5 | 228.0 |
 
 ## Memory
 
-Peak resident memory of the command line (`/usr/bin/time -f %M`), rc.4 `-s 256K` ->
-this version:
+The same three files:
 
-| demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
-|---|---|---|---|---|
-| 14.2 MB (sample40) | 93 -> **16** MiB | 102 -> **21** MiB | 23 -> **6.9** MiB | 24 -> **9.0** MiB |
-| 6.2 MB (sample8) | 48 -> **15** MiB | 57 -> **19** MiB | 13 -> **5.7** MiB | 15 -> **7.9** MiB |
-| 2.0 MB (sample8) | 23 -> **10** MiB | 29 -> **14** MiB | 7.9 -> **4.8** MiB | 8.6 -> **6.4** MiB |
+| | 2.0 MB | 14.2 MB | 199.5 MB |
+|---|---|---|---|
+| compress, `-j 1` | 10.0 | 15.8 | 37.9 |
+| compress, `-j 4` | 14.2 | 21.2 | 45.6 |
+| decompress, `-j 1` | 4.8 | 6.8 | 15.9 |
+| decompress, `-j 4` | 6.7 | 8.9 | 18.9 |
 
-Neither direction holds the demo: compression reads the file twice (counts, then codes)
-and writes each segment as it is coded; decompression streams. The memory is the models
-plus the segments worked on at once, so it follows the models a demo needs, not its
-length. One 14.2 MB demo repeated, this version:
+The tool holds the models and the segments in flight, not the demo.
 
-| demo | compress `-j 1` | compress `-j 4` | decompress `-j 1` | decompress `-j 4` |
-|---|---|---|---|---|
-| 14 MB | 16 MiB | 21 MiB | 6.9 MiB | 9.3 MiB |
-| 57 MB (4 times) | 22 MiB | 29 MiB | 9.9 MiB | 13 MiB |
-| 227 MB (16 times) | 27 MiB | 36 MiB | 12 MiB | 14 MiB |
-| 567 MB (40 times) | 29 MiB | 38 MiB | 12 MiB | 15 MiB |
+## Against rc.4
 
-A longer demo earns more tables (FORMAT.md 8 rule 4), up to the contexts it has: the
-figures level off. 50 different 4on4 demos joined (575 MB), the most models seen: 42 and
-54 MiB to compress, 20 and 23 MiB to decompress. rc.4's memory grows with the demo in
-both directions: 3.2 GiB to compress that file and 682 MiB to decompress it.
+Size: mvdz files are 1.4 % larger than rc.4's on the stratified sample (both 0.19 of
+raw).
 
-`-M` (`Encoder::max_memory`, `Decoder::max_memory`) lowers the segments worked on at
-once to stay within a figure, approximately; the least is one segment (32 MiB to
-compress, 14 MiB to decompress). The 36 MB usercmd demo at `-j 8`: 18, 26 and 30 MiB to
-compress with `-M` 32, 48 and none; 7.7, 12 and 12 MiB to decompress with `-M` 14, 24
-and none. Compression from standard input holds the demo, since it is read twice.
+Speed on sample8:
 
-## Correctness
+| | rc.4 | **mvdz** | change |
+|---|---|---|---|
+| compress, `-j 1` | 28.6 | **35.7** | +25 % |
+| compress, `-j 4` | 48.1 | **79.1** | +64 % |
+| decompress, `-j 1` | 91.0 | **96.7** | +6 % |
+| decompress, `-j 4` | 189.8 | **229.0** | +21 % |
 
-* Round trips (`examples/sweep.rs`): every demo of stratified (379) and sample8 (8),
-  1,022 MB raw, compressed and decoded by both the whole-buffer decoder and the streaming
-  `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
-* The Go encoder (`mvdz_go/`) writes the same bytes as the Rust one for all 387, and each
-  reads the other's files (`TestEncodeAgainstReference`).
-* The test suite (`cargo nextest run`, 65 tests) with the sample8 demos and the FTE float
-  demo in `MVDZ_TEST_DATA`: all pass. The golden vectors in
-  `vectors/` are refused or decoded as `MANIFEST.tsv` records.
-* Fuzzing, 10 minutes per target on 2026-11-23, no failure: Rust
-  (`mvdz_rust/mvdz/fuzz/`) `decode` (15k runs, seeded with the vectors), `stream_reader`
-  (15k), `compress_rt` (89k), `gen_rt` (58k); Go `FuzzDecode` (8.9M); `FuzzEncode` was
-  stopped after 5 minutes (124k). These ran before the length rule of FORMAT.md 4.2. The
-  runs of an hour per target predate the two-pass encoder and the escape rule.
+Memory on the 14.2 MB demo:
+
+| | rc.4 | **mvdz** | change |
+|---|---|---|---|
+| compress, `-j 1` | 93.5 | **15.6** | -83 % |
+| compress, `-j 4` | 103.2 | **21.1** | -80 % |
+| decompress, `-j 1` | 22.4 | **6.9** | -69 % |
+| decompress, `-j 4` | 24.2 | **9.1** | -62 % |
+
+Memory on the 199.5 MB file:
+
+| | rc.4 | **mvdz** | change |
+|---|---|---|---|
+| compress, `-j 1` | 1,225.9 | **37.5** | -97 % |
+| compress, `-j 4` | 1,236.8 | **46.5** | -96 % |
+| decompress, `-j 1` | 236.7 | **16.0** | -93 % |
+| decompress, `-j 4` | 238.9 | **19.0** | -92 % |
+
+rc.4's memory grows with the demo; mvdz holds the models and the segments in flight.
+
+## Implementations
+
+Rust (`mvdz`), Go (`Encoder`, `Reader`, file to file) and C (`mvdz_decode`, whole
+buffers, one thread), measured in one run. Speed on sample8; memory on the 14.2 MB
+demo. The Go and Rust encoders write the same bytes.
+
+Speed:
+
+| | Rust | Go | C |
+|---|---|---|---|
+| compress, 1 thread | 36.1 | 19.9 | - |
+| compress, 4 threads | 77.7 | 44.4 | - |
+| decompress, 1 thread | 95.4 | 61.9 | 87.6 |
+| decompress, 4 threads | 211.9 | 138.2 | - |
+
+Memory:
+
+| | Rust | Go | C |
+|---|---|---|---|
+| compress, 1 thread | 15.8 | 27.2 | - |
+| compress, 4 threads | 20.4 | 40.9 | - |
+| decompress, 1 thread | 6.9 | 12.9 | 19.7 |
+| decompress, 4 threads | 9.1 | 19.0 | - |
+
+The C figure includes the file and the demo, which it holds in memory.
 
 ## Reproducing
 
 ```
-# the demos: sample8 for speeds, stratified for ratios
 scripts/fetch_samples.sh sample8 demos/sample8
 scripts/fetch_samples.sh stratified demos/stratified
 
-# library speeds over every *.mvd in a directory, 4 threads and 1, with criterion
-MVDZ_BENCH_DEMOS=$PWD/demos/sample8 cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
-
-# command-line decode speed against gzip, xz and zstd (one process per file)
+# decode speed against gzip, xz and zstd
 ls demos/sample8/*.mvd > demos/sample8.list
 scripts/bench_cli.sh demos/cli-bench demos/sample8.list
 
@@ -199,10 +181,9 @@ scripts/bench_cli.sh demos/cli-bench demos/sample8.list
 make -C mvdz_c mvdz_bench
 MVDZ=mvdz_c/mvdz_bench scripts/bench_cli.sh demos/cli-bench demos/sample8.list
 
-# round trips: every demo through the whole-buffer and the streaming decoder
+# library speeds with criterion
+MVDZ_BENCH_DEMOS=$PWD/demos/sample8 cargo bench --manifest-path mvdz_rust/Cargo.toml --bench codec
+
+# round trips of every demo
 cargo run --manifest-path mvdz_rust/Cargo.toml --release --example sweep -- demos/stratified/*.mvd
 ```
-
-For the confidence intervals, draw the sample at random from the whole collection
-(stratify by era and size if the collection is skewed), weight each demo by how many it
-stands for, and bootstrap within the strata.
