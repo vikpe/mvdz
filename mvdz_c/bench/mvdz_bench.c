@@ -1,5 +1,6 @@
-/* Decodes a file with the library, for scripts/bench_cli.sh and make test-demos.
- * Usage: mvdz_bench decompress [-j N] INPUT OUTPUT (-j is ignored: one thread) */
+/* Decodes a file with the library, a segment at a time, for scripts/bench_cli.sh and
+ * make test-demos. Usage: mvdz_bench decompress [-j N] INPUT OUTPUT (-j is ignored:
+ * one thread) */
 #include "../mvdz.h"
 
 #include <stdbool.h>
@@ -8,7 +9,7 @@
 #include <string.h>
 
 static bool read_file(const char *path, uint8_t **data, size_t *len);
-static bool write_file(const char *path, const uint8_t *data, size_t len);
+static bool write_segment(void *context, const uint8_t *segment, size_t segment_len);
 
 int main(int argument_count, char **arguments) {
     int first_path = 2;
@@ -31,17 +32,20 @@ int main(int argument_count, char **arguments) {
         fprintf(stderr, "mvdz_bench: cannot read %s\n", input);
         return 1;
     }
-    uint8_t *demo;
-    size_t demo_size;
-    mvdz_error error = mvdz_decode(&demo, &demo_size, file, file_len);
+    FILE *stream = fopen(output, "wb");
+    if (stream == NULL) {
+        fprintf(stderr, "mvdz_bench: cannot write %s\n", output);
+        free(file);
+        return 1;
+    }
+    mvdz_error error = mvdz_decode_segments(write_segment, stream, file, file_len, 0);
     free(file);
+    bool is_closed = fclose(stream) == 0;
     if (error.kind != MVDZ_OK) {
         fprintf(stderr, "mvdz_bench: %s: error %d: %s\n", input, (int)error.kind, error.message);
         return 1;
     }
-    bool is_written = write_file(output, demo, demo_size);
-    free(demo);
-    if (!is_written) {
+    if (!is_closed) {
         fprintf(stderr, "mvdz_bench: cannot write %s\n", output);
         return 1;
     }
@@ -77,11 +81,6 @@ static bool read_file(const char *path, uint8_t **data, size_t *len) {
     return is_read;
 }
 
-static bool write_file(const char *path, const uint8_t *data, size_t len) {
-    FILE *stream = fopen(path, "wb");
-    if (stream == NULL) {
-        return false;
-    }
-    bool is_written = len == 0 || fwrite(data, 1, len, stream) == len;
-    return fclose(stream) == 0 && is_written;
+static bool write_segment(void *context, const uint8_t *segment, size_t segment_len) {
+    return fwrite(segment, 1, segment_len, context) == segment_len;
 }

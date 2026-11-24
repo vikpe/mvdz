@@ -77,8 +77,8 @@ static bool bit_reader_is_done(const bit_reader *reader);
 
 /* FORMAT.md 2.2. models has FIRST_BLOB_STREAM entries, by stream id; they are freed
  * with free_models, after an error too. A file whose decoder tables take more than
- * max_memory is refused. */
-static mvdz_error read_models_block(const uint8_t *body, uint32_t body_len, uint64_t max_memory,
+ * memory allows is refused. */
+static mvdz_error read_models_block(const uint8_t *body, uint32_t body_len, table_memory *memory,
                                     decoder_model *models) {
     if (body_len < OWN_COUNT_SIZE) {
         return corrupt("tables");
@@ -93,15 +93,15 @@ static mvdz_error read_models_block(const uint8_t *body, uint32_t body_len, uint
     if (fields.is_short) {
         return corrupt("tables");
     }
-    table_memory memory = {0, max_memory};
+
     decoder_model meta = {false, NULL, 0, 0, NULL, NULL};
     mvdz_error error =
-        new_decoder_model(meta_raw, meta_raw_len, STRUCTURAL_ALPHABET_SIZE, &memory, &meta);
+        new_decoder_model(meta_raw, meta_raw_len, STRUCTURAL_ALPHABET_SIZE, memory, &meta);
     if (error.kind != MVDZ_OK) {
         return error;
     }
 
-    error = read_listed_models(&fields, &meta, meta_raw_len, &memory, models);
+    error = read_listed_models(&fields, &meta, meta_raw_len, memory, models);
     free(meta.entry_of);
     return error;
 }
