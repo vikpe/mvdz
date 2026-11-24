@@ -130,25 +130,29 @@ type modelBuilder struct {
 	tallies [firstBlobStream]streamTally
 }
 
-func (builder *modelBuilder) add(streams *segmentStreams) {
-	for stream, values := range streams.collected {
-		if len(values) == 0 {
-			continue
+// add counts the segments; the streams are independent: in parallel.
+func (builder *modelBuilder) add(segments []*segmentStreams) {
+	inParallel(len(builder.tallies), func(stream int) {
+		for _, streams := range segments {
+			values := streams.collected[stream]
+			if len(values) == 0 {
+				continue
+			}
+			if builder.tallies[stream] == nil {
+				builder.tallies[stream] = streamTally{}
+			}
+			builder.tallies[stream].add(values, streamAlphabetSize(stream), stream >= firstNumericStream)
 		}
-		if builder.tallies[stream] == nil {
-			builder.tallies[stream] = streamTally{}
-		}
-		builder.tallies[stream].add(values, streamAlphabetSize(stream), stream >= firstNumericStream)
-	}
+	})
 }
 
 func (builder *modelBuilder) models() (*fileModels, error) {
 	models := new(fileModels)
-	for stream, tally := range builder.tallies {
-		if len(tally) != 0 {
+	inParallel(len(builder.tallies), func(stream int) {
+		if tally := builder.tallies[stream]; len(tally) != 0 {
 			models[stream] = tally.model(streamAlphabetSize(stream), streamTableCost)
 		}
-	}
+	})
 	return models, fitModelsBlock(models)
 }
 

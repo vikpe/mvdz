@@ -94,6 +94,43 @@ func TestEncodeSelfCheck(test *testing.T) {
 	}
 }
 
+// Every segment starts in the protocol the one before it ends in, whatever
+// the batches of the first pass.
+func TestFirstPassProtocols(test *testing.T) {
+	demos := map[string][]byte{}
+	for _, vector := range readVectors(test) {
+		if !vector.isValid {
+			continue
+		}
+		demo, err := Decode(vector.file)
+		if err != nil {
+			test.Fatal(err)
+		}
+		demos[vector.name] = demo
+	}
+	hasChangeInBatch := false
+	for name, demo := range demos {
+		segments := cutSegments(demo)
+		_, startProtocols, err := firstPass(segments)
+		if err != nil {
+			test.Fatal(err)
+		}
+		var protocol protocolState
+		for index, segment := range segments {
+			if startProtocols[index] != protocol {
+				test.Errorf("%s: segment %d starts in %v, want %v", name, index, startProtocols[index], protocol)
+			}
+			if index >= 2 && protocol != startProtocols[index-1] {
+				hasChangeInBatch = true
+			}
+			_, protocol = firstPassWalk(segment, protocol)
+		}
+	}
+	if !hasChangeInBatch {
+		test.Error("no demo changes protocol after its second segment")
+	}
+}
+
 // With MVDZ_TEST_DATA=<directory>, every *.mvd in its sample directory round-trips.
 func TestEncodeDemos(test *testing.T) {
 	for _, path := range testDemos(test, true) {

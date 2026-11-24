@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash/crc32"
+	"runtime"
 )
 
 // Encode codes an MVD demo as an MVDZ file, FORMAT.md 8.
@@ -50,27 +51,52 @@ func encodeSegments(demo []byte, segments [][]byte) ([]byte, error) {
 	return append(file, codedSegments...), nil
 }
 
-// FORMAT.md 8 rules 3 and 4
+// FORMAT.md 8 rules 3 and 4: a batch is walked in parallel from the end
+// protocol of the batch before; the few segments that start in another
+// protocol are walked again.
 func firstPass(segments [][]byte) (*fileModels, []protocolState, error) {
 	const maxSegmentCount = 1 << 16
 	if len(segments) > maxSegmentCount {
 		return nil, nil, ErrDemoTooLarge
 	}
 	var builder modelBuilder
-	startProtocols := make([]protocolState, len(segments))
+	startProtocols := make([]protocolState, 0, len(segments))
 	var protocol protocolState
-	for index, segment := range segments {
-		startProtocols[index] = protocol
-		streams, endProtocol, isWalked := walkSegment(segment, protocol)
-		if isWalked {
-			protocol = endProtocol
-		} else {
-			streams = walkTail(segment, protocol)
+	for len(startProtocols) < len(segments) {
+		// the first segment alone: it sets the protocol of most demos
+		batchLen := 1
+		if len(startProtocols) > 0 {
+			batchLen = runtime.GOMAXPROCS(0)
 		}
-		builder.add(streams)
+		batch := segments[len(startProtocols):]
+		batch = batch[:min(batchLen, len(batch))]
+		walked := make([]*segmentStreams, len(batch))
+		endProtocols := make([]protocolState, len(batch))
+		batchProtocol := protocol
+		inParallel(len(batch), func(index int) {
+			walked[index], endProtocols[index] = firstPassWalk(batch[index], batchProtocol)
+		})
+		for index, segment := range batch {
+			if protocol != batchProtocol {
+				walked[index], endProtocols[index] = firstPassWalk(segment, protocol)
+			}
+			startProtocols = append(startProtocols, protocol)
+			protocol = endProtocols[index]
+		}
+		builder.add(walked)
 	}
 	models, err := builder.models()
 	return models, startProtocols, err
+}
+
+// firstPassWalk is all tail when the segment does not walk; it returns the
+// protocol state at the segment's end.
+func firstPassWalk(segment []byte, protocol protocolState) (*segmentStreams, protocolState) {
+	streams, endProtocol, isWalked := walkSegment(segment, protocol)
+	if !isWalked {
+		streams = walkTail(segment, protocol)
+	}
+	return streams, endProtocol
 }
 
 // FORMAT.md 8 rules 5 and 9
