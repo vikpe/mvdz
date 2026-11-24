@@ -33,14 +33,15 @@ typedef enum mvdz_error_kind {
 } mvdz_error_kind;
 ```
 
-## Use
+## Example
 
-Add the directory to the project and compile `mvdz.c`: it includes the other `.c` files
-(unity build) and exports only the names of `mvdz.h`.
-
-File to file:
+`hello.mvdz` to `hello.mvd`:
 
 ```c
+#include "mvdz.h"
+
+#include <stdio.h>
+
 static size_t read_file(void *context, uint8_t *buffer, size_t len) {
     return fread(buffer, 1, len, context);
 }
@@ -49,17 +50,30 @@ static bool write_segment(void *context, const uint8_t *segment, size_t segment_
     return fwrite(segment, 1, segment_len, context) == segment_len;
 }
 
-FILE *input = fopen("hello.mvdz", "rb");
-FILE *output = fopen("hello.mvd", "wb");
-mvdz_error error = mvdz_decode(read_file, input, write_segment, output, 0);
-if (error.kind != MVDZ_OK) {
-    printf("%s\n", error.message);
+int main(void) {
+    FILE *input = fopen("hello.mvdz", "rb");
+    FILE *output = fopen("hello.mvd", "wb");
+    if (input == NULL || output == NULL) {
+        return 1;
+    }
+    mvdz_error error = mvdz_decode(read_file, input, write_segment, output, 0);
+    fclose(input);
+    fclose(output);
+    if (error.kind != MVDZ_OK) {
+        fprintf(stderr, "hello.mvdz: %s\n", error.message);
+        remove("hello.mvd"); /* segments written before the error are not a demo */
+        return 1;
+    }
+    return 0;
 }
 ```
 
-A file already in memory is read by a callback that copies from it; a demo wanted in
-memory is collected by a callback that appends to a buffer. `tests/test.c` has both
-(`read_bytes_from`, `collect_segment`).
+Build it with the library: `cc -std=c99 -Imvdz_c hello.c mvdz_c/mvdz.c -o hello`.
+`mvdz.c` includes the other `.c` files (unity build) and exports only the names of
+`mvdz.h`.
+
+In memory: a `read` that copies from a buffer, a `write` that appends to one.
+`tests/test.c` has both (`read_bytes_from`, `collect_segment`).
 
 - `write` receives a segment after its CRC-32 is checked. The whole-demo checks come
   after the last segment, so an error can follow segments already written: discard them.

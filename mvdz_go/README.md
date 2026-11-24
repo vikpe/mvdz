@@ -37,20 +37,50 @@ var (
 
 ## Example
 
+`hello.mvd` to `hello.mvdz` and back:
+
 ```go
-// file to file
-err := mvdz.Encoder{}.Encode(output, input)
+package main
 
-reader, err := mvdz.NewReader(input)
-fmt.Println(reader.Header().Duration) // before decoding
-_, err = io.Copy(output, reader)
+import (
+	"io"
+	"log"
+	"os"
 
-// in memory
-var file bytes.Buffer
-err = mvdz.Encoder{}.Encode(&file, bytes.NewReader(demo))
-reader, err = mvdz.NewReader(bytes.NewReader(file.Bytes()))
-demo2, err := io.ReadAll(reader)
+	mvdz "github.com/vikpe/mvdz/mvdz_go"
+)
+
+func main() {
+	// hello.mvd -> hello.mvdz
+	demo, err := os.Open("hello.mvd")
+	check(err)
+	file, err := os.Create("hello.mvdz")
+	check(err)
+	check(mvdz.Encoder{}.Encode(file, demo))
+	check(file.Close())
+
+	// hello.mvdz -> hello.mvd
+	file, err = os.Open("hello.mvdz")
+	check(err)
+	reader, err := mvdz.NewReader(file)
+	check(err)
+	output, err := os.Create("hello.mvd")
+	check(err)
+	_, err = io.Copy(output, reader)
+	check(err)
+	check(output.Close())
+}
+
+func check(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
+}
 ```
+
+In memory: encode from a `bytes.Reader` into a `bytes.Buffer`, and decode with
+`io.ReadAll` on a `Reader` over a `bytes.Reader`. `reader.Header()` gives the size,
+duration and hashes before any decoding.
 
 Errors are matched with `errors.Is`. Threads follow `GOMAXPROCS`. `Reader` delivers a
 segment only after its CRC-32 is checked.

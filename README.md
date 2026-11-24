@@ -6,7 +6,7 @@
 - **Lossless**: exact original bytes, checked by CRC-32.
 - **Streaming**: decodes in order as it arrives, segments in parallel.
 - **Self-describing**: size, duration and SHA-256 in a 60-byte header.
-- **Low memory**: never holds the whole demo (Rust, Go).
+- **Low memory**: never holds the whole demo.
 - **Specified**: [FORMAT.md](FORMAT.md), with test vectors in `vectors/`.
 - **Implementations**: [Rust](mvdz_rust/README.md), [Go](mvdz_go/README.md), [C](mvdz_c/README.md).
 
@@ -45,8 +45,8 @@ Details in [BENCHMARKS.md](BENCHMARKS.md).
 
 **Q1. Why not just compress the `.mvd` with zstd or xz?**
 
-On the same stratified sample, `zstd -19` gives 0.508 of raw and `xz -9e`
-0.429, against 0.194 for mvdz: mvdz files are about 2.6 times smaller than
+On the same stratified sample, `zstd -19` gives 0.51 of raw and `xz -9e`
+0.43, against 0.19 for mvdz: mvdz files are about 2.6 times smaller than
 zstd -19 and 2.2 times smaller than xz -9e ([BENCHMARKS.md](BENCHMARKS.md)).
 A general-purpose compressor sees bytes; mvdz parses the demo, puts each
 field in its own stream and codes positions and angles as residuals against

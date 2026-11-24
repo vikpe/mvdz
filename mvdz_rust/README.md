@@ -39,23 +39,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 ## Example
 
+`hello.mvd` to `hello.mvdz` and back:
+
 ```rust
-// file to file
-mvdz::Encoder::new()
-    .max_threads(4)
-    .max_memory(64 << 20)
-    .encode(std::fs::File::open("game.mvd")?, std::fs::File::create("game.mvdz")?)?;
+use std::fs::File;
 
-let mut decoder = mvdz::Decoder::new(std::fs::File::open("game.mvdz")?)?;
-eprintln!("{:?}", decoder.header().duration());            // before decoding
-std::io::copy(&mut decoder, &mut std::io::stdout())?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // hello.mvd -> hello.mvdz
+    mvdz::Encoder::new().encode(File::open("hello.mvd")?, File::create("hello.mvdz")?)?;
 
-// in memory
-let mut file = Vec::new();
-mvdz::Encoder::new().encode(std::io::Cursor::new(&demo), &mut file)?;
-let mut demo2 = Vec::new();
-mvdz::Decoder::new(&file[..])?.read_to_end(&mut demo2)?;
+    // hello.mvdz -> hello.mvd
+    let mut decoder = mvdz::Decoder::new(File::open("hello.mvdz")?)?;
+    std::io::copy(&mut decoder, &mut File::create("hello.mvd")?)?;
+    Ok(())
+}
 ```
+
+In memory: give `encode` a `std::io::Cursor` over the demo and a `Vec` to write to, and
+call `read_to_end` on a `Decoder` over a slice. Settings chain:
+`Encoder::new().max_threads(4).max_memory(64 << 20)`, and the same two on a `Decoder`.
+`decoder.header()` gives the size, duration and hashes before any decoding.
 
 Decoders never panic on corrupt input; they return an error. `Decoder` yields only
 checked bytes: each segment's CRC-32 is checked before its bytes are returned, the

@@ -25,6 +25,8 @@ scope, variable lifespan, `1 << N` bit constants, `_` between words of constant 
   (`memcpy`, `snprintf`); a struct that is filled in last (`localtime_r`). A function
   takes its own struct before both.
 - No global mutable state.
+- The library holds neither the file nor the demo: the file comes in through
+  `mvdz_read`, the demo goes out through `mvdz_write`, a segment at a time.
 
 ## Safety
 
@@ -38,7 +40,7 @@ scope, variable lifespan, `1 << N` bit constants, `_` between words of constant 
   `byte_cursor`, writes through `walker_write` and `copy_blob`, which fail sticky.
 - Format quantities in `uint32_t`/`uint64_t`, memory lengths in `size_t`; sums a file
   declares are compared in 64 bits (FORMAT.md 9.2). 32-bit targets must work.
-- Every allocation goes through `allocate`, `calloc` or `realloc` and is checked:
+- Every allocation goes through `allocate` or `calloc` and is checked:
   `out_of_memory()`. One exit path per function that owns memory.
 - No `memcpy` with a NULL pointer, also for a length of 0.
 - `qsort` only with a total order, so the result does not depend on the libc.

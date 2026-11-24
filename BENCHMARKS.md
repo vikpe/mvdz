@@ -153,8 +153,10 @@ Speed:
 |---|---|---|---|
 | compress, 1 thread | 36.1 | 19.9 | - |
 | compress, 4 threads | 77.7 | 44.4 | - |
-| decompress, 1 thread | 95.4 | 61.9 | 92.7 |
+| decompress, 1 thread | 95.4 | 61.9 | 95.4 |
 | decompress, 4 threads | 211.9 | 138.2 | - |
+
+The C figure is from a later run, in which Rust did 98.6.
 
 Memory:
 
