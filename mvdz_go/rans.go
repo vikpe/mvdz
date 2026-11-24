@@ -204,12 +204,16 @@ func readModelsBlock(body []byte) (*fileModels, error) {
 	}
 
 	models := new(fileModels)
-	for _, entry := range entries {
+	errs := make([]error, len(entries))
+	inParallel(len(entries), func(index int) {
+		entry := entries[index]
 		raw, err := decodeRawModel(entry.coded, entry.rawLen, meta)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			models[entry.id], err = newStreamModel(raw, streamAlphabetSize(int(entry.id)))
 		}
-		models[entry.id], err = newStreamModel(raw, streamAlphabetSize(int(entry.id)))
+		errs[index] = err
+	})
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
