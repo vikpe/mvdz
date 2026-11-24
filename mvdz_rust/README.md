@@ -15,7 +15,7 @@ pub fn decode(file: &[u8], max_threads: u8) -> Result<Vec<u8>>
 impl Encoder {
     pub fn new() -> Self
     pub fn max_threads(self, max_threads: u8) -> Self
-    pub fn max_memory(self, max_memory: u64) -> Self      // bytes, approximate
+    pub fn max_memory(self, max_memory: u64) -> Self      // bytes, approximate; default none
     pub fn encode(&self, input: impl Read + Seek, output: impl Write) -> Result<()>
 }
 
@@ -23,7 +23,7 @@ impl Encoder {
 impl<R: Read> Decoder<R> {
     pub fn new(input: R) -> Result<Self>                  // reads the header
     pub fn max_threads(self, max_threads: u8) -> Self
-    pub fn max_memory(self, max_memory: u64) -> Self
+    pub fn max_memory(self, max_memory: u64) -> Self      // default 64 MiB, at least 14 MiB
     pub fn header(&self) -> &Header
 }
 
@@ -59,7 +59,8 @@ std::io::copy(&mut decoder, &mut std::io::stdout())?;
 
 Decoders never panic on corrupt input; they return an error. `Decoder` yields only
 checked bytes: each segment's CRC-32 is checked before its bytes are returned, the
-whole demo's before the end. Whole-buffer `decode` refuses a demo of more than 1 GiB.
+whole demo's before the end. Whole-buffer `decode` refuses a demo of more than 64 MiB:
+read that one with a `Decoder`.
 
 ## Command line
 

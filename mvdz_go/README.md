@@ -20,7 +20,7 @@ func (encoder Encoder) Encode(output io.Writer, input io.ReadSeeker) error
 
 // streaming: implements io.Reader
 type Reader struct {
-    MaxMemory int64 // bytes, approximate; 0: no limit
+    MaxMemory int64 // bytes, approximate; 0: 64 MiB; at least 14 MiB
 }
 func NewReader(input io.Reader) (*Reader, error) // reads the header
 func (reader *Reader) Header() Header
@@ -54,7 +54,7 @@ _, err = io.Copy(output, reader)
 
 Errors are matched with `errors.Is`. Threads follow `GOMAXPROCS`. `Reader` delivers a
 segment only after its CRC-32 is checked. Whole-buffer `Decode` refuses a demo of more
-than 1 GiB.
+than 64 MiB: read that one with a `Reader`.
 
 ## Tests
 

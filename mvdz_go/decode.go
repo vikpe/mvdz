@@ -9,23 +9,21 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"math"
 	"runtime"
 )
 
 // Decode decodes a whole MVDZ file to the demo it holds. A demo of more than
-// 1 GiB is refused with ErrMemoryLimit: read that one with a Reader.
+// 64 MiB is refused with ErrMemoryLimit: read that one with a Reader.
 func Decode(file []byte) ([]byte, error) {
-	const defaultMaxMemory = 1 << 30
 	return decodeWithMaxMemory(file, defaultMaxMemory)
 }
 
 // Reader decodes an MVDZ file to the demo it holds.
 type Reader struct {
 	// MaxMemory, in bytes and approximate, lowers the segments decoded at once
-	// to stay within it, never below one (14 MiB). A file whose models need
-	// more is refused (ErrMemoryLimit). 0, the default, is no limit: a
-	// segment per CPU.
+	// to stay within it, never below one. A file whose models need more is
+	// refused (ErrMemoryLimit). 0, the default, is 64 MiB; less than 14 MiB
+	// counts as 14 MiB.
 	MaxMemory int64
 
 	input       io.Reader
@@ -75,10 +73,7 @@ func (reader *Reader) Read(buffer []byte) (int, error) {
 // nextSegment returns io.EOF after the last segment if the whole-demo checks pass.
 func (reader *Reader) nextSegment() ([]byte, error) {
 	if reader.models == nil {
-		maxModelsMemory := int64(math.MaxInt64)
-		if reader.MaxMemory > 0 {
-			maxModelsMemory = max(reader.MaxMemory, decodeBaseMemory+decodeSegmentMemory)
-		}
+		maxModelsMemory := max(reader.maxMemory(), decodeBaseMemory+decodeSegmentMemory)
 		models, err := readModels(reader.input, maxModelsMemory)
 		if err != nil {
 			return nil, err
@@ -173,7 +168,7 @@ func (reader *Reader) readSegment() (codedSegment, error) {
 // that fails are still delivered.
 func (reader *Reader) decodeBatch() {
 	var batch []codedSegment
-	batchLen := segmentsInFlight(reader.MaxMemory, runtime.GOMAXPROCS(0), decodeBaseMemory, decodeSegmentMemory)
+	batchLen := segmentsInFlight(reader.maxMemory(), runtime.GOMAXPROCS(0), decodeBaseMemory, decodeSegmentMemory)
 	for len(batch) < batchLen && reader.rawTotal < uint64(reader.header.Size) {
 		segment, err := reader.readSegment()
 		if err != nil {
@@ -234,6 +229,15 @@ func decodeWithMaxMemory(file []byte, maxMemory int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: demo size", ErrMemoryLimit)
 	}
 	return demo, nil
+}
+
+const defaultMaxMemory = 64 << 20
+
+func (reader *Reader) maxMemory() int64 {
+	if reader.MaxMemory <= 0 {
+		return defaultMaxMemory
+	}
+	return reader.MaxMemory
 }
 
 // ponytail: measured on sample demos, not a bound; count the buffers if it must hold

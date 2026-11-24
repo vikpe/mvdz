@@ -215,7 +215,7 @@ fn large_models_block() -> anyhow::Result<()> {
     let error = crate::decode::decode_with_max_memory(&file_parts.build(), 1, max_memory).err();
     assert_eq!(error, Some(Error::MemoryLimit("models")));
     let start = Instant::now();
-    read_models(crate::memory::DEFAULT_MAX_MEMORY)?;
+    read_models(1 << 30)?;
     assert!(
         start.elapsed().as_secs_f64() < 10.0,
         "reading the models took {:?}",

@@ -17,7 +17,7 @@ use std::io::{self, Read};
 /// # Errors
 ///
 /// [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for another file type or version,
-/// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] for a demo of more than 1 GiB:
+/// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] for a demo of more than 64 MiB:
 /// read that one with [`Decoder`].
 pub fn decode(file: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     decode_with_max_memory(file, max_threads, DEFAULT_MAX_MEMORY)
@@ -75,8 +75,8 @@ impl<R: Read> Decoder<R> {
     }
 
     /// In bytes, approximate: fewer segments are decoded at once to stay within it, never
-    /// fewer than one (14 MiB). A file whose models need more is refused
-    /// ([`Error::MemoryLimit`]).
+    /// fewer than one. A file whose models need more is refused ([`Error::MemoryLimit`]).
+    /// The default is 64 MiB; less than 14 MiB counts as 14 MiB.
     #[must_use]
     pub fn max_memory(mut self, max_memory: u64) -> Self {
         self.max_memory = max_memory;

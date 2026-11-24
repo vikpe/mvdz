@@ -45,7 +45,8 @@ settings: the demo is cut into independently decodable segments of 256 KiB.
 Both work on up to -j segments at once. -j is 0 to 255, at most the logical
 cores; 0 (the default) is all of them. -M is the memory to stay within for
 each file, approximately: fewer segments are worked on at once, never fewer
-than one. The memory does not grow with the demo, except for compress from
+than one. Without -M, decompress stays within 64 MiB and compress has no
+limit. The memory does not grow with the demo, except for compress from
 standard input, which holds the demo."
     );
     ExitCode::from(2)

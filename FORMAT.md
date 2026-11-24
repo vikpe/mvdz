@@ -1210,9 +1210,9 @@ least one blob byte, and every blob token gives at least one byte. Every decoder
 these limits, so all decoders accept the same files.
 
 A decoder may cap its memory on top and refuse a file that needs more with `MemoryLimit`.
-The reference (`memory.rs:DEFAULT_MAX_MEMORY`) refuses models whose decoder tables take
-more than 1 GiB, and whole-buffer decoding refuses a demo of more than 1 GiB; the
-streaming decoder holds a few segments at a time whatever the demo's size. A decoder must never
+The reference (`memory.rs:DEFAULT_MAX_MEMORY`) by default refuses models whose decoder
+tables take more than 64 MiB, and whole-buffer decoding refuses a demo of more than
+64 MiB; the streaming decoder holds a few segments at a time whatever the demo's size. A decoder must never
 abort the process on a declared size.
 
 **Not checked.** The header's SHA-256 (section 10) and `duration_ms`, and the segments'
