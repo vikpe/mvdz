@@ -6,22 +6,17 @@ package mvdz
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"runtime"
 )
 
-// Decode decodes a whole MVDZ file to the demo it holds.
+// Decode decodes a whole MVDZ file to the demo it holds. A demo of more than
+// 1 GiB is refused with ErrMemoryLimit: read that one with a Reader.
 func Decode(file []byte) ([]byte, error) {
-	reader, err := NewReader(bytes.NewReader(file))
-	if err != nil {
-		return nil, err
-	}
-	demo, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-	return demo, nil
+	const defaultMaxMemory = 1 << 30
+	return decodeWithMaxMemory(file, defaultMaxMemory)
 }
 
 // Reader decodes an MVDZ file to the demo it holds.
@@ -210,6 +205,22 @@ func (segment codedSegment) decode(models *fileModels) ([]byte, error) {
 		return nil, corrupt("segment checksum")
 	}
 	return decoded, nil
+}
+
+func decodeWithMaxMemory(file []byte, maxMemory int64) ([]byte, error) {
+	reader, err := NewReader(bytes.NewReader(file))
+	if err != nil {
+		return nil, err
+	}
+	// one byte past the limit tells a demo over it from one that fits
+	demo, err := io.ReadAll(io.LimitReader(reader, maxMemory+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(demo)) > maxMemory {
+		return nil, fmt.Errorf("%w: demo size", ErrMemoryLimit)
+	}
+	return demo, nil
 }
 
 func readUint32(input io.Reader) (uint32, error) {

@@ -69,6 +69,31 @@ func TestEncodeVectors(test *testing.T) {
 	}
 }
 
+// A segment that does not decode to its input is refused, FORMAT.md 8 rule 7:
+// here the decoder has no models.
+func TestEncodeSelfCheck(test *testing.T) {
+	file, err := os.ReadFile(filepath.Join(vectorsDirectory, "float-mvd1.normal.mvdz"))
+	if err != nil {
+		test.Fatal(err)
+	}
+	demo, err := Decode(file)
+	if err != nil {
+		test.Fatal(err)
+	}
+	segments := cutSegments(demo)
+	models, startProtocols, err := firstPass(segments)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if _, err := encodeSegment(segments[0], startProtocols[0], models, models); err != nil {
+		test.Errorf("with the models: %v", err)
+	}
+	_, err = encodeSegment(segments[0], startProtocols[0], models, new(fileModels))
+	if !errors.Is(err, ErrInternal) {
+		test.Errorf("without the models: got %v, want %v", err, ErrInternal)
+	}
+}
+
 // With MVDZ_TEST_DATA=<directory>, every *.mvd in its sample directory round-trips.
 func TestEncodeDemos(test *testing.T) {
 	for _, path := range testDemos(test, true) {

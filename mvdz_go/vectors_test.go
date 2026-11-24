@@ -74,6 +74,26 @@ func TestReaderErrorIsSticky(test *testing.T) {
 	}
 }
 
+// Whole-file decoding stops at the limit.
+func TestDecodeMemoryLimit(test *testing.T) {
+	file, err := os.ReadFile(filepath.Join(vectorsDirectory, "float-mvd1.normal.mvdz"))
+	if err != nil {
+		test.Fatal(err)
+	}
+	demo, err := Decode(file)
+	if err != nil {
+		test.Fatal(err)
+	}
+	size := int64(len(demo))
+	if _, err := decodeWithMaxMemory(file, size); err != nil {
+		test.Errorf("at the limit: %v", err)
+	}
+	_, err = decodeWithMaxMemory(file, size-1)
+	if !errors.Is(err, ErrMemoryLimit) || err.Error() != "mvdz: memory limit: demo size" {
+		test.Errorf("a byte over the limit: got %v", err)
+	}
+}
+
 func FuzzDecode(fuzzer *testing.F) {
 	for _, vector := range readVectors(fuzzer) {
 		fuzzer.Add(vector.file)

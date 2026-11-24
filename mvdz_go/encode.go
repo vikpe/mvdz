@@ -30,7 +30,14 @@ func encodeSegments(demo []byte, segments [][]byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	codedSegments, durationMs := secondPass(segments, startProtocols, models)
+	decoderModels, err := readModels(bytes.NewReader(appendModels(nil, modelsBody)))
+	if err != nil {
+		return nil, fmt.Errorf("%w: the encoder's models do not read back", ErrInternal)
+	}
+	codedSegments, durationMs, err := secondPass(segments, startProtocols, models, decoderModels)
+	if err != nil {
+		return nil, err
+	}
 
 	header := Header{
 		Size:       uint64(len(demo)),
@@ -40,17 +47,7 @@ func encodeSegments(demo []byte, segments [][]byte) ([]byte, error) {
 	}
 	file := appendHeader(nil, header)
 	file = appendModels(file, modelsBody)
-	file = append(file, codedSegments...)
-
-	// FORMAT.md 8 rule 7
-	decoded, err := Decode(file)
-	if err != nil {
-		return nil, fmt.Errorf("%w: the file does not decode: %w", ErrInternal, err)
-	}
-	if !bytes.Equal(decoded, demo) {
-		return nil, fmt.Errorf("%w: the file decodes to another demo", ErrInternal)
-	}
-	return file, nil
+	return append(file, codedSegments...), nil
 }
 
 // FORMAT.md 8 rules 3 and 4
@@ -77,33 +74,54 @@ func firstPass(segments [][]byte) (*fileModels, []protocolState, error) {
 }
 
 // FORMAT.md 8 rules 5 and 9
-func secondPass(segments [][]byte, startProtocols []protocolState, models *fileModels) ([]byte, uint64) {
+func secondPass(segments [][]byte, startProtocols []protocolState, models, decoderModels *fileModels) ([]byte, uint64, error) {
 	coded := make([][]byte, len(segments))
+	errs := make([]error, len(segments))
 	inParallel(len(segments), func(index int) {
-		coded[index] = encodeSegment(segments[index], startProtocols[index], models)
+		coded[index], errs[index] = encodeSegment(segments[index], startProtocols[index], models, decoderModels)
 	})
 	var codedSegments []byte
 	durationMs := uint64(0)
 	for index, segment := range segments {
+		if errs[index] != nil {
+			return nil, 0, errs[index]
+		}
 		segmentMs := segmentDurationMs(segment)
 		durationMs += uint64(segmentMs)
 		codedSegments = appendSegment(codedSegments, segment, segmentMs, coded[index])
 	}
-	return codedSegments, durationMs
+	return codedSegments, durationMs, nil
 }
 
 // encodeSegment writes a segment the first way that works, FORMAT.md 8
-// rule 5: transform-coded, all tail, stored.
-func encodeSegment(segment []byte, protocol protocolState, models *fileModels) []byte {
+// rule 5: transform-coded, all tail, stored; rule 7: it decodes to segment.
+func encodeSegment(segment []byte, protocol protocolState, models, decoderModels *fileModels) ([]byte, error) {
+	rawLen := uint32(len(segment))
+	var coded []byte
+	isCoded := false
 	if walked, _, isWalked := walkSegment(segment, protocol); isWalked {
-		if coded, isCoded := encodeTransform(walked, uint32(len(segment)), models); isCoded {
-			return coded
-		}
+		coded, isCoded = encodeTransform(walked, rawLen, models)
 	}
-	if coded, isCoded := encodeTransform(walkTail(segment, protocol), uint32(len(segment)), models); isCoded {
-		return coded
+	if !isCoded {
+		coded, isCoded = encodeTransform(walkTail(segment, protocol), rawLen, models)
 	}
-	return storedSegment(segment, protocol)
+	if !isCoded {
+		coded = storedSegment(segment, protocol)
+	}
+	if !decodesTo(coded, segment, decoderModels) {
+		return nil, fmt.Errorf("%w: the encoder's output does not decode to its input", ErrInternal)
+	}
+	return coded, nil
+}
+
+func decodesTo(coded []byte, segment []byte, decoderModels *fileModels) bool {
+	rawLen := uint32(len(segment))
+	header, err := parseTransformHeader(coded, rawLen)
+	if err != nil {
+		return false
+	}
+	decoded, err := decodeTransform(coded, header, rawLen, decoderModels)
+	return err == nil && bytes.Equal(decoded, segment)
 }
 
 // startsLikeMVD is the input check on the first segment, FORMAT.md 8 rule 1.

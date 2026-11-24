@@ -11,6 +11,7 @@ var (
 	ErrNotMVDZ            = errors.New("mvdz: not an MVDZ file")
 	ErrUnsupportedVersion = errors.New("mvdz: unsupported MVDZ version")
 	ErrCorrupt            = errors.New("mvdz: corrupt")
+	ErrMemoryLimit        = errors.New("mvdz: memory limit")
 	ErrNotMVD             = errors.New("mvdz: not an MVD demo")
 	ErrDemoTooLarge       = errors.New("mvdz: demo too large")
 	ErrInternal           = errors.New("mvdz: internal error")
