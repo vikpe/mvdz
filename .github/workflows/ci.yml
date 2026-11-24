@@ -5,6 +5,14 @@ on:
     branches: [master, feature/simplify]
   pull_request:
 
+permissions:
+  contents: read
+
+# a new push to a branch or pull request cancels its run in progress
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -19,10 +27,13 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mvdz_rust
       - run: cargo fmt --check
       - run: cd mvdz/fuzz && cargo fmt --check
       - run: cargo clippy --profile fast --all-targets -- -D warnings
@@ -30,11 +41,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mvdz_rust
       - uses: taiki-e/install-action@nextest
       # the tests that need real demos read $MVDZ_TEST_DATA/sample
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: sample8
         with:
           path: testdata/sample
@@ -50,10 +64,13 @@ jobs:
   wasm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mvdz_rust
       - run: cargo build --lib --target wasm32-unknown-unknown
 
   go:
@@ -62,10 +79,12 @@ jobs:
       run:
         working-directory: mvdz_go
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: mvdz_go/go.mod
+          # standard library only: no go.sum, nothing to cache
+          cache: false
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
@@ -76,11 +95,13 @@ jobs:
       run:
         working-directory: mvdz_c
     strategy:
+      fail-fast: false
       matrix:
         compiler: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
-      - run: make format-check
+      - uses: actions/checkout@v7
+      - if: matrix.compiler == 'clang'
+        run: make format-check
       # warnings are errors (Makefile)
       - run: make test CC=${{ matrix.compiler }}
       - run: make test SANITIZE=1 CC=${{ matrix.compiler }}
@@ -98,7 +119,7 @@ jobs:
       run:
         working-directory: mvdz_c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: make test
       - run: make test SANITIZE=1
 
@@ -109,7 +130,7 @@ jobs:
         working-directory: mvdz_c
         shell: cmd
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ilammy/msvc-dev-cmd@v1
       - run: cl /nologo /W3 tests\test.c /Fe:test.exe
       - run: test.exe ..\vectors
