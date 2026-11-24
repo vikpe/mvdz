@@ -1,6 +1,9 @@
 package mvdz
 
-import "math/bits"
+import (
+	"encoding/binary"
+	"math/bits"
+)
 
 const (
 	protocolVersion     = 28
@@ -357,31 +360,61 @@ func (protocol *protocolState) skipEntityDelta(fields *byteCursor) {
 // frameLen includes the frame header; false if data does not start with a
 // whole frame of at most a segment, FORMAT.md 8 rule 11.
 func frameLen(data []byte) (int, bool) {
-	fields := byteCursor{data: data}
-	fields.skip(1)
-	switch fields.readUint8() & 7 {
-	case demSet:
-		fields.skip(8)
-	case demMultiple:
-		fields.skip(4)
-		fields.skip(fields.readUint32())
-	case demRead, demSingle, demStats, demAll:
-		fields.skip(fields.readUint32())
-	default:
-		return 0, false
-	}
-	return fields.position, !fields.isShort && fields.position <= maxRawLen
+	length, match := frameAt(data)
+	return length, match == frameYes
 }
 
-// hasFrameRun tells frames from bytes that frame by chance.
-func hasFrameRun(data []byte) bool {
+// frameMatch tells whether bytes start with frames.
+type frameMatch uint8
+
+const (
+	frameNo         frameMatch = iota
+	frameIncomplete            // more bytes could make it frameYes
+	frameYes
+)
+
+// frameAt gives the length of the frame data starts with: a frame is at most
+// a segment long.
+func frameAt(data []byte) (int, frameMatch) {
+	if len(data) < 2 {
+		return 0, frameIncomplete
+	}
+	headerSize, payloadLenOffset := 6, 2
+	switch data[1] & 7 {
+	case demSet:
+		headerSize, payloadLenOffset = 10, -1
+	case demMultiple:
+		headerSize, payloadLenOffset = 10, 6
+	case demRead, demSingle, demStats, demAll:
+	default:
+		return 0, frameNo
+	}
+	if len(data) < headerSize {
+		return 0, frameIncomplete
+	}
+	payloadLen := uint32(0)
+	if payloadLenOffset >= 0 {
+		payloadLen = binary.LittleEndian.Uint32(data[payloadLenOffset:])
+	}
+	if payloadLen > maxRawLen-uint32(headerSize) {
+		return 0, frameNo
+	}
+	length := headerSize + int(payloadLen)
+	if len(data) < length {
+		return 0, frameIncomplete
+	}
+	return length, frameYes
+}
+
+// frameRun tells frames from bytes that frame by chance.
+func frameRun(data []byte) frameMatch {
 	const frameRunLen = 16
 	for range frameRunLen {
-		length, isFrame := frameLen(data)
-		if !isFrame {
-			return false
+		length, match := frameAt(data)
+		if match != frameYes {
+			return match
 		}
 		data = data[length:]
 	}
-	return true
+	return frameYes
 }

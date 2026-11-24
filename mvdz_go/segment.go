@@ -3,6 +3,8 @@ package mvdz
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
+	"slices"
 )
 
 const segmentTargetLen = 1 << 18
@@ -260,52 +262,86 @@ func appendTransformFields(coded []byte, protocol protocolState, entryCount uint
 	return binary.LittleEndian.AppendUint32(coded, entryCount)
 }
 
-// FORMAT.md 8 rule 2
-func cutSegments(demo []byte) [][]byte {
-	var segments [][]byte
-	framesEnd := 0
-	for framesEnd < len(demo) {
-		length, isFrame := frameLen(demo[framesEnd:])
-		frameEnd := framesEnd + length
-		isWalkable := isFrame && frameEnd <= maxRawLen
-		if isWalkable {
-			framesEnd = frameEnd
-			isCut := framesEnd >= segmentTargetLen && framesEnd < len(demo)
-			if isCut {
-				segments = append(segments, demo[:framesEnd])
-				demo = demo[framesEnd:]
-				framesEnd = 0
+// segmentReader cuts the segments of a demo as it is read, FORMAT.md 8 rule 2.
+type segmentReader struct {
+	input       io.Reader
+	isInputDone bool
+	unread      []byte // read, not yet in a segment
+	framedLen   int    // the whole frames at the start of unread
+	// While the bytes after them do not frame: where the search for frames goes on.
+	isSearchingFrameRun  bool
+	frameRunSearchOffset int
+}
+
+// nextSegment returns io.EOF at the end of the demo.
+func (reader *segmentReader) nextSegment() ([]byte, error) {
+	const readLen = 64 * 1024
+	for {
+		if length, isCut := reader.nextSegmentLen(); isCut {
+			segment := bytes.Clone(reader.unread[:length])
+			reader.unread = append(reader.unread[:0], reader.unread[length:]...)
+			reader.framedLen = 0
+			return segment, nil
+		}
+		if reader.isInputDone {
+			return nil, io.EOF
+		}
+		unreadLen := len(reader.unread)
+		reader.unread = slices.Grow(reader.unread, readLen)[:unreadLen+readLen]
+		count, err := io.ReadFull(reader.input, reader.unread[unreadLen:])
+		reader.unread = reader.unread[:unreadLen+count]
+		reader.isInputDone = err == io.EOF || err == io.ErrUnexpectedEOF
+		if err != nil && !reader.isInputDone {
+			return nil, err
+		}
+	}
+}
+
+// nextSegmentLen is false if the next cut needs more of the input, or
+// nothing is left.
+func (reader *segmentReader) nextSegmentLen() (int, bool) {
+	for {
+		if !reader.isSearchingFrameRun {
+			length, match := frameAt(reader.unread[reader.framedLen:])
+			switch {
+			case match == frameYes && reader.framedLen+length <= maxRawLen:
+				reader.framedLen += length
+				if reader.framedLen >= segmentTargetLen {
+					return reader.framedLen, true
+				}
+			case match == frameIncomplete && !reader.isInputDone:
+				return 0, false
+			case len(reader.unread) == 0:
+				return 0, false
+			default:
+				// not before the target length: a break in the frames makes no segment short
+				reader.isSearchingFrameRun = true
+				reader.frameRunSearchOffset = segmentTargetLen
 			}
 			continue
 		}
-		resumeOffset := nextFrameRun(demo, framesEnd)
-		for resumeOffset > maxRawLen {
-			segments = append(segments, demo[:maxRawLen])
-			demo = demo[maxRawLen:]
-			resumeOffset -= maxRawLen
+		search := reader.frameRunSearchOffset
+		if search >= maxRawLen {
+			reader.frameRunSearchOffset = search - maxRawLen
+			return maxRawLen, true
 		}
-		if resumeOffset == len(demo) {
-			break
+		if search >= len(reader.unread) {
+			isLastSegment := reader.isInputDone && len(reader.unread) > 0
+			return len(reader.unread), isLastSegment
 		}
-		segments = append(segments, demo[:resumeOffset])
-		demo = demo[resumeOffset:]
-		framesEnd = 0
-	}
-	if len(demo) > 0 {
-		segments = append(segments, demo)
-	}
-	return segments
-}
-
-// nextFrameRun is where frames follow the unframed bytes of a segment.
-func nextFrameRun(segment []byte, unframedStart int) int {
-	// not before the target length: a break in the frames makes no segment short
-	for offset := max(unframedStart+1, segmentTargetLen); offset < len(segment); offset++ {
-		if hasFrameRun(segment[offset:]) {
-			return offset
+		match := frameRun(reader.unread[search:])
+		switch {
+		case match == frameYes:
+			reader.isSearchingFrameRun = false
+			if search > 0 {
+				return search, true
+			}
+		case match == frameIncomplete && !reader.isInputDone:
+			return 0, false
+		default:
+			reader.frameRunSearchOffset = search + 1
 		}
 	}
-	return len(segment)
 }
 
 // FORMAT.md 8 rule 9

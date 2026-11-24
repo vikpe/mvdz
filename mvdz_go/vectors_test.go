@@ -107,7 +107,7 @@ func TestSegmentsInFlight(test *testing.T) {
 		baseMemory + 3*segmentMemory:   3,
 		baseMemory + 100*segmentMemory: threads,
 	} {
-		if count := segmentsInFlight(maxMemory, threads); count != expected {
+		if count := segmentsInFlight(maxMemory, threads, baseMemory, segmentMemory); count != expected {
 			test.Errorf("%d bytes: got %d, want %d", maxMemory, count, expected)
 		}
 	}

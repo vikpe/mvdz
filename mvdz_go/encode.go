@@ -5,135 +5,221 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"math"
 	"runtime"
+	"slices"
 )
 
 // Encode codes an MVD demo as an MVDZ file, FORMAT.md 8.
 func Encode(demo []byte) ([]byte, error) {
-	segments := cutSegments(demo)
-	if len(segments) == 0 || !startsLikeMVD(segments[0]) {
-		return nil, ErrNotMVD
+	return Encoder{}.encodeBytes(demo)
+}
+
+// Encoder codes MVD demos as MVDZ files. The file written depends on the demo
+// only, not on the settings.
+type Encoder struct {
+	// MaxMemory, in bytes and approximate, lowers the segments coded at once
+	// to stay within it, never below one (32 MiB). 0, the default, is no
+	// limit: a segment per CPU.
+	MaxMemory int64
+
+	isInputUnchecked bool
+}
+
+// Encode reads the demo from input twice and writes the MVDZ file to output,
+// without holding either. It returns ErrNotMVD for input that is not an MVD
+// demo, ErrDemoTooLarge past 65536 segments, and ErrInputChanged when the
+// second pass reads other bytes than the first.
+func (encoder Encoder) Encode(output io.Writer, input io.ReadSeeker) error {
+	header, models, plans, err := encoder.firstPass(input)
+	if err != nil {
+		return err
 	}
-	return encodeSegments(demo, segments)
+	modelsBody, _, err := modelsBlock(models)
+	if err != nil {
+		return err
+	}
+	modelsBlock := appendModels(nil, modelsBody)
+	decoderModels, err := readModels(bytes.NewReader(modelsBlock), math.MaxInt64)
+	if err != nil {
+		return fmt.Errorf("%w: the encoder's models do not read back", ErrInternal)
+	}
+	if _, err := output.Write(append(appendHeader(nil, header), modelsBlock...)); err != nil {
+		return err
+	}
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	return encoder.secondPass(output, input, plans, models, decoderModels)
+}
+
+func (encoder Encoder) encodeBytes(demo []byte) ([]byte, error) {
+	var file bytes.Buffer
+	if err := encoder.Encode(&file, bytes.NewReader(demo)); err != nil {
+		return nil, err
+	}
+	return file.Bytes(), nil
 }
 
 // encodeAny is Encode without the input check.
 func encodeAny(demo []byte) ([]byte, error) {
-	return encodeSegments(demo, cutSegments(demo))
+	return Encoder{isInputUnchecked: true}.encodeBytes(demo)
 }
 
-func encodeSegments(demo []byte, segments [][]byte) ([]byte, error) {
-	models, startProtocols, err := firstPass(segments)
-	if err != nil {
-		return nil, err
-	}
-	modelsBody, _, err := modelsBlock(models)
-	if err != nil {
-		return nil, err
-	}
-	decoderModels, err := readModels(bytes.NewReader(appendModels(nil, modelsBody)), math.MaxInt64)
-	if err != nil {
-		return nil, fmt.Errorf("%w: the encoder's models do not read back", ErrInternal)
-	}
-	codedSegments, durationMs, err := secondPass(segments, startProtocols, models, decoderModels)
-	if err != nil {
-		return nil, err
-	}
-
-	header := Header{
-		Size:       uint64(len(demo)),
-		DurationMs: durationMs,
-		CRC32:      crc32.ChecksumIEEE(demo),
-		SHA256:     sha256.Sum256(demo),
-	}
-	file := appendHeader(nil, header)
-	file = appendModels(file, modelsBody)
-	return append(file, codedSegments...), nil
+// segmentPlan is what the second pass needs to code one segment, and to see
+// that it reads the bytes the first pass read.
+type segmentPlan struct {
+	len           int
+	crc32         uint32
+	startProtocol protocolState
+	isWalked      bool
 }
 
-// FORMAT.md 8 rules 3 and 4: a batch is walked in parallel from the end
+// FORMAT.md 8 rules 1 to 4: a batch is walked in parallel from the end
 // protocol of the batch before; the few segments that start in another
 // protocol are walked again.
-func firstPass(segments [][]byte) (*fileModels, []protocolState, error) {
+func (encoder Encoder) firstPass(input io.Reader) (Header, *fileModels, []segmentPlan, error) {
 	const maxSegmentCount = 1 << 16
-	if len(segments) > maxSegmentCount {
-		return nil, nil, ErrDemoTooLarge
-	}
+	segments := segmentReader{input: input}
 	var builder modelBuilder
-	startProtocols := make([]protocolState, 0, len(segments))
+	var plans []segmentPlan
 	var protocol protocolState
-	for len(startProtocols) < len(segments) {
+	var header Header
+	demoSHA256 := sha256.New()
+	for {
 		// the first segment alone: it sets the protocol of most demos
 		batchLen := 1
-		if len(startProtocols) > 0 {
-			batchLen = runtime.GOMAXPROCS(0)
+		if len(plans) > 0 {
+			batchLen = encoder.segmentsInFlight()
 		}
-		batch := segments[len(startProtocols):]
-		batch = batch[:min(batchLen, len(batch))]
-		walked := make([]*segmentStreams, len(batch))
-		endProtocols := make([]protocolState, len(batch))
+		var batch [][]byte
+		for len(batch) < batchLen {
+			segment, err := segments.nextSegment()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return Header{}, nil, nil, err
+			}
+			batch = append(batch, segment)
+		}
+		isFirstBatch := len(plans) == 0
+		if isFirstBatch && !encoder.isInputUnchecked {
+			if len(batch) == 0 || !startsLikeMVD(batch[0]) {
+				return Header{}, nil, nil, ErrNotMVD
+			}
+		}
+		if len(batch) == 0 {
+			break
+		}
+
+		walks := make([]firstPassWalk, len(batch))
 		batchProtocol := protocol
 		inParallel(len(batch), func(index int) {
-			walked[index], endProtocols[index] = firstPassWalk(batch[index], batchProtocol)
+			walks[index] = newFirstPassWalk(batch[index], batchProtocol)
 		})
+		walked := make([]*segmentStreams, len(batch))
 		for index, segment := range batch {
 			if protocol != batchProtocol {
-				walked[index], endProtocols[index] = firstPassWalk(segment, protocol)
+				walks[index] = newFirstPassWalk(segment, protocol)
 			}
-			startProtocols = append(startProtocols, protocol)
-			protocol = endProtocols[index]
+			walked[index] = walks[index].streams
+			plans = append(plans, segmentPlan{
+				len:           len(segment),
+				crc32:         crc32.ChecksumIEEE(segment),
+				startProtocol: protocol,
+				isWalked:      walks[index].isWalked,
+			})
+			protocol = walks[index].endProtocol
+			header.Size += uint64(len(segment))
+			header.DurationMs += uint64(segmentDurationMs(segment))
+			header.CRC32 = crc32.Update(header.CRC32, crc32.IEEETable, segment)
+			demoSHA256.Write(segment)
+		}
+		if len(plans) > maxSegmentCount {
+			return Header{}, nil, nil, ErrDemoTooLarge
 		}
 		builder.add(walked)
 	}
+	demoSHA256.Sum(header.SHA256[:0])
 	models, err := builder.models()
-	return models, startProtocols, err
+	return header, models, plans, err
 }
 
-// firstPassWalk is all tail when the segment does not walk; it returns the
-// protocol state at the segment's end.
-func firstPassWalk(segment []byte, protocol protocolState) (*segmentStreams, protocolState) {
+// firstPassWalk is the walk of one segment in the first pass.
+type firstPassWalk struct {
+	streams     *segmentStreams // all tail when the segment does not walk
+	endProtocol protocolState
+	isWalked    bool
+}
+
+func newFirstPassWalk(segment []byte, protocol protocolState) firstPassWalk {
 	streams, endProtocol, isWalked := walkSegment(segment, protocol)
 	if !isWalked {
 		streams = walkTail(segment, protocol)
 	}
-	return streams, endProtocol
+	return firstPassWalk{streams, endProtocol, isWalked}
 }
 
-// FORMAT.md 8 rules 5 and 9
-func secondPass(segments [][]byte, startProtocols []protocolState, models *fileModels, decoderModels *ransModels) ([]byte, uint64, error) {
-	coded := make([][]byte, len(segments))
-	errs := make([]error, len(segments))
-	inParallel(len(segments), func(index int) {
-		coded[index], errs[index] = encodeSegment(segments[index], startProtocols[index], models, decoderModels)
-	})
-	var codedSegments []byte
-	durationMs := uint64(0)
-	for index, segment := range segments {
-		if errs[index] != nil {
-			return nil, 0, errs[index]
+// secondPass writes the segments as the first pass cut them, each once it
+// decodes to its input; FORMAT.md 8 rules 5, 7 and 9.
+func (encoder Encoder) secondPass(output io.Writer, input io.Reader, plans []segmentPlan, models *fileModels, decoderModels *ransModels) error {
+	for batch := range slices.Chunk(plans, encoder.segmentsInFlight()) {
+		segments := make([][]byte, len(batch))
+		for index, plan := range batch {
+			segments[index] = make([]byte, plan.len)
+			if _, err := io.ReadFull(input, segments[index]); err != nil {
+				return err
+			}
 		}
-		segmentMs := segmentDurationMs(segment)
-		durationMs += uint64(segmentMs)
-		codedSegments = appendSegment(codedSegments, segment, segmentMs, coded[index])
+		coded := make([][]byte, len(batch))
+		errs := make([]error, len(batch))
+		inParallel(len(batch), func(index int) {
+			coded[index], errs[index] = encodeSegment(segments[index], batch[index], models, decoderModels)
+		})
+		for index, segment := range segments {
+			if errs[index] != nil {
+				return errs[index]
+			}
+			block := appendSegment(nil, segment, segmentDurationMs(segment), coded[index])
+			if _, err := output.Write(block); err != nil {
+				return err
+			}
+		}
 	}
-	return codedSegments, durationMs, nil
+	return nil
+}
+
+func (encoder Encoder) segmentsInFlight() int {
+	// ponytail: measured on sample demos, not a bound; count the buffers if it must hold
+	const (
+		baseMemory    = 20 << 20
+		segmentMemory = 12 << 20
+	)
+	return segmentsInFlight(encoder.MaxMemory, runtime.GOMAXPROCS(0), baseMemory, segmentMemory)
 }
 
 // encodeSegment writes a segment the first way that works, FORMAT.md 8
 // rule 5: transform-coded, all tail, stored; rule 7: it decodes to segment.
-func encodeSegment(segment []byte, protocol protocolState, models *fileModels, decoderModels *ransModels) ([]byte, error) {
+func encodeSegment(segment []byte, plan segmentPlan, models *fileModels, decoderModels *ransModels) ([]byte, error) {
+	isInputUnchanged := crc32.ChecksumIEEE(segment) == plan.crc32
+	if !isInputUnchanged {
+		return nil, ErrInputChanged
+	}
 	rawLen := uint32(len(segment))
 	var coded []byte
 	isCoded := false
-	if walked, _, isWalked := walkSegment(segment, protocol); isWalked {
-		coded, isCoded = encodeTransform(walked, rawLen, models)
+	if plan.isWalked {
+		if walked, _, isWalked := walkSegment(segment, plan.startProtocol); isWalked {
+			coded, isCoded = encodeTransform(walked, rawLen, models)
+		}
 	}
 	if !isCoded {
-		coded, isCoded = encodeTransform(walkTail(segment, protocol), rawLen, models)
+		coded, isCoded = encodeTransform(walkTail(segment, plan.startProtocol), rawLen, models)
 	}
 	if !isCoded {
-		coded = storedSegment(segment, protocol)
+		coded = storedSegment(segment, plan.startProtocol)
 	}
 	if !decodesTo(coded, segment, decoderModels) {
 		return nil, fmt.Errorf("%w: the encoder's output does not decode to its input", ErrInternal)
@@ -171,5 +257,5 @@ func startsLikeMVD(firstSegment []byte) bool {
 	if isWalked && !streams.hasEscape() {
 		return true
 	}
-	return hasFrameRun(firstSegment[firstLen:])
+	return frameRun(firstSegment[firstLen:]) == frameYes
 }

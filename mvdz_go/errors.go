@@ -15,6 +15,7 @@ var (
 	ErrNotMVD             = errors.New("mvdz: not an MVD demo")
 	ErrDemoTooLarge       = errors.New("mvdz: demo too large")
 	ErrInternal           = errors.New("mvdz: internal error")
+	ErrInputChanged       = errors.New("mvdz: the input changed between the passes")
 )
 
 func corrupt(rule string) error {

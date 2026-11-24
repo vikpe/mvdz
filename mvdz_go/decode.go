@@ -77,7 +77,7 @@ func (reader *Reader) nextSegment() ([]byte, error) {
 	if reader.models == nil {
 		maxModelsMemory := int64(math.MaxInt64)
 		if reader.MaxMemory > 0 {
-			maxModelsMemory = max(reader.MaxMemory, baseMemory+segmentMemory)
+			maxModelsMemory = max(reader.MaxMemory, decodeBaseMemory+decodeSegmentMemory)
 		}
 		models, err := readModels(reader.input, maxModelsMemory)
 		if err != nil {
@@ -173,7 +173,7 @@ func (reader *Reader) readSegment() (codedSegment, error) {
 // that fails are still delivered.
 func (reader *Reader) decodeBatch() {
 	var batch []codedSegment
-	batchLen := segmentsInFlight(reader.MaxMemory, runtime.GOMAXPROCS(0))
+	batchLen := segmentsInFlight(reader.MaxMemory, runtime.GOMAXPROCS(0), decodeBaseMemory, decodeSegmentMemory)
 	for len(batch) < batchLen && reader.rawTotal < reader.header.Size {
 		segment, err := reader.readSegment()
 		if err != nil {
@@ -238,13 +238,13 @@ func decodeWithMaxMemory(file []byte, maxMemory int64) ([]byte, error) {
 
 // ponytail: measured on sample demos, not a bound; count the buffers if it must hold
 const (
-	baseMemory    = 12 << 20
-	segmentMemory = 2 << 20
+	decodeBaseMemory    = 12 << 20
+	decodeSegmentMemory = 2 << 20
 )
 
-// segmentsInFlight is as many segments as maxMemory holds, at least one, at
-// most threads; 0 or less is no limit.
-func segmentsInFlight(maxMemory int64, threads int) int {
+// segmentsInFlight is as many segments as maxMemory holds beside baseMemory,
+// at least one, at most threads; 0 or less is no limit.
+func segmentsInFlight(maxMemory int64, threads int, baseMemory, segmentMemory int64) int {
 	if maxMemory <= 0 {
 		return threads
 	}

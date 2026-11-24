@@ -3,6 +3,7 @@ package mvdz
 import (
 	"bytes"
 	"errors"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -51,6 +52,14 @@ func TestEncodeVectors(test *testing.T) {
 			if err != nil || !bytes.Equal(decoded, demo) {
 				test.Fatalf("round trip: %v", err)
 			}
+			// FORMAT.md 8 rule 8: the same file however the input is read
+			// and whatever the memory limit
+			var streamed bytes.Buffer
+			encoder := Encoder{MaxMemory: 1, isInputUnchecked: true}
+			err = encoder.Encode(&streamed, &smallReadSeeker{bytes.NewReader(demo)})
+			if err != nil || !bytes.Equal(streamed.Bytes(), file) {
+				test.Errorf("in small reads, a segment at a time: %v", err)
+			}
 
 			isDemo, isCompressed := compressedVectors[vector.name]
 			if !isCompressed {
@@ -81,11 +90,11 @@ func TestEncodeSelfCheck(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	segments := cutSegments(demo)
-	models, startProtocols, err := firstPass(segments)
+	_, models, plans, err := Encoder{}.firstPass(bytes.NewReader(demo))
 	if err != nil {
 		test.Fatal(err)
 	}
+	segment := demo[:plans[0].len]
 	modelsBody, _, err := modelsBlock(models)
 	if err != nil {
 		test.Fatal(err)
@@ -94,10 +103,10 @@ func TestEncodeSelfCheck(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	if _, err := encodeSegment(segments[0], startProtocols[0], models, decoderModels); err != nil {
+	if _, err := encodeSegment(segment, plans[0], models, decoderModels); err != nil {
 		test.Errorf("with the models: %v", err)
 	}
-	_, err = encodeSegment(segments[0], startProtocols[0], models, new(ransModels))
+	_, err = encodeSegment(segment, plans[0], models, new(ransModels))
 	if !errors.Is(err, ErrInternal) {
 		test.Errorf("without the models: got %v, want %v", err, ErrInternal)
 	}
@@ -119,25 +128,68 @@ func TestFirstPassProtocols(test *testing.T) {
 	}
 	hasChangeInBatch := false
 	for name, demo := range demos {
-		segments := cutSegments(demo)
-		_, startProtocols, err := firstPass(segments)
+		_, _, plans, err := Encoder{isInputUnchecked: true}.firstPass(bytes.NewReader(demo))
 		if err != nil {
 			test.Fatal(err)
 		}
 		var protocol protocolState
-		for index, segment := range segments {
-			if startProtocols[index] != protocol {
-				test.Errorf("%s: segment %d starts in %v, want %v", name, index, startProtocols[index], protocol)
+		rest := demo
+		for index, plan := range plans {
+			if plan.startProtocol != protocol {
+				test.Errorf("%s: segment %d starts in %v, want %v", name, index, plan.startProtocol, protocol)
 			}
-			if index >= 2 && protocol != startProtocols[index-1] {
+			if index >= 2 && protocol != plans[index-1].startProtocol {
 				hasChangeInBatch = true
 			}
-			_, protocol = firstPassWalk(segment, protocol)
+			protocol = newFirstPassWalk(rest[:plan.len], protocol).endProtocol
+			rest = rest[plan.len:]
+		}
+		if len(rest) != 0 {
+			test.Errorf("%s: the segments leave %d bytes", name, len(rest))
 		}
 	}
 	if !hasChangeInBatch {
 		test.Error("no demo changes protocol after its second segment")
 	}
+}
+
+// The second pass refuses bytes the first pass did not read.
+func TestEncodeInputChanged(test *testing.T) {
+	file, err := os.ReadFile(filepath.Join(vectorsDirectory, "duel.normal.mvdz"))
+	if err != nil {
+		test.Fatal(err)
+	}
+	demo, err := Decode(file)
+	if err != nil {
+		test.Fatal(err)
+	}
+	changed := bytes.Clone(demo)
+	changed[len(changed)/2] ^= 1
+	input := &changingInput{Reader: bytes.NewReader(demo), afterSeek: changed}
+	err = Encoder{}.Encode(io.Discard, input)
+	if !errors.Is(err, ErrInputChanged) {
+		test.Errorf("got %v, want %v", err, ErrInputChanged)
+	}
+}
+
+// changingInput serves other bytes once it is rewound.
+type changingInput struct {
+	*bytes.Reader
+	afterSeek []byte
+}
+
+func (input *changingInput) Seek(offset int64, whence int) (int64, error) {
+	input.Reader = bytes.NewReader(input.afterSeek)
+	return input.Reader.Seek(offset, whence)
+}
+
+// smallReadSeeker delivers a demo at most 1000 bytes per Read.
+type smallReadSeeker struct {
+	*bytes.Reader
+}
+
+func (reads *smallReadSeeker) Read(buffer []byte) (int, error) {
+	return reads.Reader.Read(buffer[:min(len(buffer), 1000)])
 }
 
 // With MVDZ_TEST_DATA=<directory>, every *.mvd in its sample directory round-trips.
