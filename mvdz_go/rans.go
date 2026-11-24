@@ -20,9 +20,9 @@ const (
 
 // streamModel is the model of one stream, FORMAT.md 6.2.
 type streamModel struct {
-	raw         []byte
-	ownContexts []uint16    // strictly increasing
-	tables      []ransTable // the fallback, then one per own context
+	raw     []byte
+	tableOf []uint32    // by context: the index into tables; contexts past its end use the fallback
+	tables  []ransTable // the fallback, then one per own context
 }
 
 // fileModels is by stream id; nil where the models block has none.
@@ -74,15 +74,26 @@ func newStreamModel(raw []byte, alphabetSize int) (*streamModel, error) {
 			return nil, corrupt("model")
 		}
 	}
-	return &streamModel{raw, ownContexts, newRansTables(quantizedTables, alphabetSize)}, nil
+	return &streamModel{raw, newTableOf(ownContexts), newRansTables(quantizedTables, alphabetSize)}, nil
 }
 
 func (model *streamModel) table(context uint16) *ransTable {
-	index, isOwn := slices.BinarySearch(model.ownContexts, context)
-	if !isOwn {
-		return &model.tables[0]
+	if int(context) < len(model.tableOf) {
+		return &model.tables[model.tableOf[context]]
 	}
-	return &model.tables[index+1]
+	return &model.tables[0]
+}
+
+// newTableOf takes the own contexts in ascending order.
+func newTableOf(ownContexts []uint16) []uint32 {
+	if len(ownContexts) == 0 {
+		return nil
+	}
+	tableOf := make([]uint32, int(ownContexts[len(ownContexts)-1])+1)
+	for index, context := range ownContexts {
+		tableOf[context] = uint32(index + 1)
+	}
+	return tableOf
 }
 
 func newRansTables(quantizedTables []byte, alphabetSize int) []ransTable {
@@ -296,7 +307,7 @@ func (tally streamTally) model(alphabetSize int, cost tableCost) *streamModel {
 		raw = appendQuantized(raw, tally[context])
 	}
 	quantizedTables := raw[ownCountSize+2*len(ownContexts):]
-	return &streamModel{raw, ownContexts, newRansTables(quantizedTables, alphabetSize)}
+	return &streamModel{raw, newTableOf(ownContexts), newRansTables(quantizedTables, alphabetSize)}
 }
 
 // ownContexts are those cheaper with a table of their own, or that the
