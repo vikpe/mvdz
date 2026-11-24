@@ -4,14 +4,18 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"hash/crc32"
+	"math"
+	"time"
 )
 
 // Header describes the original demo.
 type Header struct {
-	Size       uint64
-	DurationMs uint64
-	CRC32      uint32
-	SHA256     [sha256.Size]byte // a claim of the encoder: not checked by decoding
+	// Size is negative for a file that declares 2^63 bytes or more; such a
+	// file does not decode.
+	Size     int64
+	Duration time.Duration // whole milliseconds; the largest Duration for a longer one
+	CRC32    uint32
+	SHA256   [sha256.Size]byte // a claim of the encoder: not checked by decoding
 }
 
 const (
@@ -39,9 +43,13 @@ func parseHeader(block []byte) (Header, error) {
 		return Header{}, corrupt("truncated header")
 	}
 	header := Header{
-		Size:       binary.LittleEndian.Uint64(block[8:]),
-		DurationMs: binary.LittleEndian.Uint64(block[16:]),
-		CRC32:      binary.LittleEndian.Uint32(block[24:]),
+		Size:     int64(binary.LittleEndian.Uint64(block[8:])),
+		Duration: math.MaxInt64,
+		CRC32:    binary.LittleEndian.Uint32(block[24:]),
+	}
+	const maxDurationMs = uint64(math.MaxInt64 / time.Millisecond)
+	if durationMs := binary.LittleEndian.Uint64(block[16:]); durationMs <= maxDurationMs {
+		header.Duration = time.Duration(durationMs) * time.Millisecond
 	}
 	copy(header.SHA256[:], block[28:])
 	return header, nil
@@ -51,8 +59,8 @@ func parseHeader(block []byte) (Header, error) {
 func appendHeader(file []byte, header Header) []byte {
 	file = append(file, magic...)
 	file = binary.LittleEndian.AppendUint32(file, formatVersion)
-	file = binary.LittleEndian.AppendUint64(file, header.Size)
-	file = binary.LittleEndian.AppendUint64(file, header.DurationMs)
+	file = binary.LittleEndian.AppendUint64(file, uint64(header.Size))
+	file = binary.LittleEndian.AppendUint64(file, uint64(header.Duration.Milliseconds()))
 	file = binary.LittleEndian.AppendUint32(file, header.CRC32)
 	return append(file, header.SHA256[:]...)
 }

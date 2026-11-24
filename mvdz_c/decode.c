@@ -6,25 +6,24 @@ typedef struct demo_buffer {
     size_t capacity;
 } demo_buffer;
 
-static mvdz_error decode_with_max_memory(const uint8_t *file, size_t file_len, uint64_t max_memory,
-                                         uint8_t **demo, size_t *demo_size);
+static mvdz_error decode_with_max_memory(uint8_t **demo, size_t *demo_size, const uint8_t *file,
+                                         size_t file_len, uint64_t max_memory);
 static mvdz_error read_models(byte_cursor *file_fields, decoder_model *models);
 static mvdz_error decode_segments(byte_cursor *file_fields, const mvdz_header *header,
                                   const decoder_model *models, uint64_t max_memory,
                                   demo_buffer *demo, uint32_t *demo_crc32);
 static mvdz_error grow(demo_buffer *demo, uint32_t raw_len, uint64_t demo_size,
                        uint64_t max_memory);
-static mvdz_error decode_segment(const uint8_t *coded, uint32_t coded_len,
-                                 const decoder_model *models, uint8_t *destination,
-                                 uint32_t raw_len);
+static mvdz_error decode_segment(uint8_t *destination, uint32_t raw_len, const uint8_t *coded,
+                                 uint32_t coded_len, const decoder_model *models);
 
-mvdz_error mvdz_decode(const uint8_t *file, size_t file_len, uint8_t **demo, size_t *demo_size) {
-    return decode_with_max_memory(file, file_len, DEFAULT_MAX_MEMORY, demo, demo_size);
+mvdz_error mvdz_decode(uint8_t **demo, size_t *demo_size, const uint8_t *file, size_t file_len) {
+    return decode_with_max_memory(demo, demo_size, file, file_len, DEFAULT_MAX_MEMORY);
 }
 
 /* max_memory limits the demo; the decoder tables have the default limit. */
-static mvdz_error decode_with_max_memory(const uint8_t *file, size_t file_len, uint64_t max_memory,
-                                         uint8_t **demo, size_t *demo_size) {
+static mvdz_error decode_with_max_memory(uint8_t **demo, size_t *demo_size, const uint8_t *file,
+                                         size_t file_len, uint64_t max_memory) {
     *demo = NULL;
     *demo_size = 0;
     mvdz_header header;
@@ -114,7 +113,7 @@ static mvdz_error decode_segments(byte_cursor *file_fields, const mvdz_header *h
             return error;
         }
         uint8_t *segment = demo->data + demo->len;
-        error = decode_segment(coded, coded_len, models, segment, raw_len);
+        error = decode_segment(segment, raw_len, coded, coded_len, models);
         if (error.kind != MVDZ_OK) {
             return error;
         }
@@ -158,13 +157,12 @@ static mvdz_error grow(demo_buffer *demo, uint32_t raw_len, uint64_t demo_size,
 }
 
 /* FORMAT.md 3.3 */
-static mvdz_error decode_segment(const uint8_t *coded, uint32_t coded_len,
-                                 const decoder_model *models, uint8_t *destination,
-                                 uint32_t raw_len) {
+static mvdz_error decode_segment(uint8_t *destination, uint32_t raw_len, const uint8_t *coded,
+                                 uint32_t coded_len, const decoder_model *models) {
     transform_header header;
     mvdz_error error = parse_transform_header(coded, coded_len, raw_len, &header);
     if (error.kind != MVDZ_OK) {
         return error;
     }
-    return decode_transform(coded, &header, models, destination, raw_len);
+    return decode_transform(destination, raw_len, coded, &header, models);
 }

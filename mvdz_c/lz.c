@@ -6,7 +6,7 @@ static uint32_t lz_bucket_context(uint32_t value);
 
 /* lz_expand decodes the blob_total blob bytes of a segment from its tokens;
  * decoders are the segment's, by stream id. */
-static mvdz_error lz_expand(stream_decoder *decoders, uint8_t *blob_bytes, uint32_t blob_total) {
+static mvdz_error lz_expand(uint8_t *blob_bytes, uint32_t blob_total, stream_decoder *decoders) {
     uint32_t position = 0;
     uint32_t previous_len = 0;
     while (position < blob_total) {

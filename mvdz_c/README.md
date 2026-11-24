@@ -13,7 +13,7 @@ Add the directory to the project and compile `mvdz.c`: it includes the other `.c
 
 uint8_t *demo;
 size_t demo_size;
-mvdz_error error = mvdz_decode(file, file_len, &demo, &demo_size);
+mvdz_error error = mvdz_decode(&demo, &demo_size, file, file_len);
 if (error.kind != MVDZ_OK) {
     printf("%s\n", error.message);
     return;

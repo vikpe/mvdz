@@ -9,10 +9,10 @@
 int LLVMFuzzerTestOneInput(const uint8_t *file, size_t file_len) {
     uint8_t *demo;
     size_t demo_size;
-    mvdz_error error = mvdz_decode(file, file_len, &demo, &demo_size);
+    mvdz_error error = mvdz_decode(&demo, &demo_size, file, file_len);
     uint8_t *again;
     size_t again_size;
-    mvdz_error again_error = mvdz_decode(file, file_len, &again, &again_size);
+    mvdz_error again_error = mvdz_decode(&again, &again_size, file, file_len);
     bool is_same = error.kind == again_error.kind && demo_size == again_size &&
                    (demo_size == 0 || memcmp(demo, again, demo_size) == 0);
     if (!is_same) {

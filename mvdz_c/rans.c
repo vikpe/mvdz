@@ -68,8 +68,8 @@ static void new_rans_table(const uint8_t *quantized, uint32_t alphabet_size, uin
 static uint32_t write_search_table(const uint16_t *table, uint32_t alphabet_size, uint32_t *ranges);
 static int compare_ranges(const void *a, const void *b);
 static uint32_t write_lookup_table(const uint16_t *table, uint32_t alphabet_size, uint32_t *ranges);
-static mvdz_error decode_raw_model(const uint8_t *coded, uint32_t coded_len,
-                                   const decoder_model *meta, uint8_t *raw, uint32_t raw_len);
+static mvdz_error decode_raw_model(uint8_t *raw, uint32_t raw_len, const uint8_t *coded,
+                                   uint32_t coded_len, const decoder_model *meta);
 static uint32_t stream_alphabet_size(uint32_t stream);
 static uint32_t read_word(stream_decoder *decoder);
 static uint32_t read_bits(bit_reader *reader, uint32_t count);
@@ -235,7 +235,7 @@ static mvdz_error read_listed_models(byte_cursor *fields, const decoder_model *m
         if (raw == NULL) {
             return out_of_memory();
         }
-        mvdz_error error = decode_raw_model(coded, coded_len, meta, raw, raw_len);
+        mvdz_error error = decode_raw_model(raw, raw_len, coded, coded_len, meta);
         if (error.kind == MVDZ_OK) {
             error = new_decoder_model(raw, raw_len, stream_alphabet_size(id), memory, &models[id]);
         }
@@ -443,8 +443,8 @@ static uint32_t write_lookup_table(const uint16_t *table, uint32_t alphabet_size
     return count;
 }
 
-static mvdz_error decode_raw_model(const uint8_t *coded, uint32_t coded_len,
-                                   const decoder_model *meta, uint8_t *raw, uint32_t raw_len) {
+static mvdz_error decode_raw_model(uint8_t *raw, uint32_t raw_len, const uint8_t *coded,
+                                   uint32_t coded_len, const decoder_model *meta) {
     stream_decoder decoder;
     mvdz_error error = new_stream_decoder(meta, coded, coded_len, &decoder);
     if (error.kind != MVDZ_OK) {

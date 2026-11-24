@@ -213,7 +213,7 @@ static void test_header(const char *vectors_directory) {
     /* the header's SHA-256 is of the demo */
     uint8_t *demo;
     size_t demo_size;
-    error = mvdz_decode(file.data, file.len, &demo, &demo_size);
+    error = mvdz_decode(&demo, &demo_size, file.data, file.len);
     uint8_t digest[SHA256_SIZE];
     sha256(demo, demo_size, digest);
     expect(error.kind == MVDZ_OK && memcmp(digest, header.sha256, SHA256_SIZE) == 0,
@@ -231,7 +231,7 @@ static void test_not_mvdz(void) {
         uint8_t *demo;
         size_t demo_size;
         mvdz_error error =
-            mvdz_decode((const uint8_t *)cases[index].file, cases[index].len, &demo, &demo_size);
+            mvdz_decode(&demo, &demo_size, (const uint8_t *)cases[index].file, cases[index].len);
         expect(error.kind == MVDZ_NOT_MVDZ && demo == NULL, "not MVDZ, case %d: kind %d",
                (int)index, (int)error.kind);
     }
@@ -274,7 +274,7 @@ static void test_vector(const char *vectors_directory, char *line) {
     file_bytes file = read_file(vectors_directory, name);
     uint8_t *demo;
     size_t demo_size;
-    mvdz_error error = mvdz_decode(file.data, file.len, &demo, &demo_size);
+    mvdz_error error = mvdz_decode(&demo, &demo_size, file.data, file.len);
 
     static const char error_prefix[] = "error: ";
     bool is_hostile = strncmp(outcome, error_prefix, strlen(error_prefix)) == 0;
@@ -303,17 +303,17 @@ static void test_decode_memory_limit(const char *vectors_directory) {
     file_bytes file = read_file(vectors_directory, "float-mvd1.normal.mvdz");
     uint8_t *demo;
     size_t demo_size;
-    mvdz_error error = mvdz_decode(file.data, file.len, &demo, &demo_size);
+    mvdz_error error = mvdz_decode(&demo, &demo_size, file.data, file.len);
     expect(error.kind == MVDZ_OK, "memory limit: decode");
     free(demo);
 
     size_t limited_size;
-    error = decode_with_max_memory(file.data, file.len, demo_size, &demo, &limited_size);
+    error = decode_with_max_memory(&demo, &limited_size, file.data, file.len, demo_size);
     expect(error.kind == MVDZ_OK && limited_size == demo_size, "at the limit: kind %d",
            (int)error.kind);
     free(demo);
 
-    error = decode_with_max_memory(file.data, file.len, demo_size - 1, &demo, &limited_size);
+    error = decode_with_max_memory(&demo, &limited_size, file.data, file.len, demo_size - 1);
     bool is_refused = error.kind == MVDZ_MEMORY_LIMIT && demo == NULL;
     expect(is_refused, "a byte over the limit: kind %d", (int)error.kind);
     free(file.data);

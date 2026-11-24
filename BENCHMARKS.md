@@ -168,7 +168,7 @@ and none. Compression from standard input holds the demo, since it is read twice
 ## Correctness
 
 * Round trips (`examples/sweep.rs`): every demo of stratified (379) and sample8 (8),
-  1,022 MB raw, compressed and decoded by both the whole-file decoder and the streaming
+  1,022 MB raw, compressed and decoded by both the whole-buffer decoder and the streaming
   `Decoder`: 774 round trips, 0 failures, byte-identical by SHA-256.
 * The Go encoder (`mvdz_go/`) writes the same bytes as the Rust one for all 387, and each
   reads the other's files (`TestEncodeAgainstReference`).
@@ -199,7 +199,7 @@ scripts/bench_cli.sh demos/cli-bench demos/sample8.list
 make -C mvdz_c mvdz_bench
 MVDZ=mvdz_c/mvdz_bench scripts/bench_cli.sh demos/cli-bench demos/sample8.list
 
-# round trips: every demo through the whole-file and the streaming decoder
+# round trips: every demo through the whole-buffer and the streaming decoder
 cargo run --manifest-path mvdz_rust/Cargo.toml --release --example sweep -- demos/stratified/*.mvd
 ```
 

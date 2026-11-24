@@ -3,14 +3,17 @@ package mvdz
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const vectorsDirectory = "../vectors"
@@ -74,7 +77,7 @@ func TestReaderErrorIsSticky(test *testing.T) {
 	}
 }
 
-// Whole-file decoding stops at the limit.
+// Whole-buffer decoding stops at the limit.
 func TestDecodeMemoryLimit(test *testing.T) {
 	file, err := os.ReadFile(filepath.Join(vectorsDirectory, "float-mvd1.normal.mvdz"))
 	if err != nil {
@@ -163,6 +166,23 @@ func TestHeader(test *testing.T) {
 	const expectedSHA256 = "987a33fe15b8a28516d14d408bb65e93c2560929d6324187be4a13aeadd2cdcf"
 	if header.Size != 8435 || hex.EncodeToString(header.SHA256[:]) != expectedSHA256 {
 		test.Errorf("got size %d and SHA-256 %x", header.Size, header.SHA256)
+	}
+}
+
+// The header's milliseconds as a Duration; more than a Duration holds is the largest.
+func TestHeaderDuration(test *testing.T) {
+	cases := map[uint64]time.Duration{
+		0:              0,
+		1500:           1500 * time.Millisecond,
+		math.MaxUint64: math.MaxInt64,
+	}
+	for durationMs, expected := range cases {
+		block := appendHeader(nil, Header{})
+		binary.LittleEndian.PutUint64(block[16:], durationMs)
+		header, err := parseHeader(block)
+		if err != nil || header.Duration != expected {
+			test.Errorf("%d ms: got %v and %v, want %v", durationMs, header.Duration, err, expected)
+		}
 	}
 }
 

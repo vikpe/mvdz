@@ -170,7 +170,7 @@ early (`mvdz info *.mvdz | head`), the tool stops quietly.
   and the demo's size, checked on every decode.
 
 Files from elsewhere are untrusted input: decoders bound their memory
-(a few segments at a time when streaming; whole-file decoding refuses a
+(a few segments at a time when streaming; whole-buffer decoding refuses a
 demo of more than 1 GiB), and the
 format bounds their work by the input's size; demos can carry console commands (`svc_stufftext`) that players
 must filter.
@@ -186,15 +186,15 @@ user builds no command-line code. Not on crates.io yet: depend on it by git
 let file = mvdz::encode(&demo, 0)?;
 let demo2 = mvdz::decode(&file, 4)?;
 
-// file to file without holding the demo: the input is read twice
+// two-pass, from a seekable input, without holding the demo
 mvdz::Encoder::new()
     .max_threads(4)
     .max_memory(64 << 20)                                  // approximate, optional
     .encode(std::fs::File::open("game.mvd")?, std::fs::File::create("game.mvdz")?)?;
 
-// in order from any io::Read, up to `max_threads` segments decoded at once
+// streaming from any io::Read, up to `max_threads` segments decoded at once
 let mut decoder = mvdz::Decoder::new(std::fs::File::open("game.mvdz")?)?;
-eprintln!("{} ms", decoder.header().duration_ms());       // before decoding, as gzip
+eprintln!("{:?}", decoder.header().duration());            // before decoding, as gzip
 std::io::copy(&mut decoder, &mut std::io::stdout())?;
 ```
 
@@ -222,7 +222,7 @@ includes the other files) and calls one function; see
 ```c
 uint8_t *demo;
 size_t demo_size;
-mvdz_error error = mvdz_decode(file, file_len, &demo, &demo_size);   /* free(demo) */
+mvdz_error error = mvdz_decode(&demo, &demo_size, file, file_len);   /* free(demo) */
 ```
 
 Errors (`error.kind`): `MVDZ_NOT_MVDZ`, `MVDZ_UNSUPPORTED_VERSION`, `MVDZ_CORRUPT` and

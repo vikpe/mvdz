@@ -5,6 +5,7 @@ use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
 use std::assert_matches;
 use std::io::Cursor;
+use std::time::Duration;
 
 #[test]
 fn header_describes_the_demo() -> anyhow::Result<()> {
@@ -16,17 +17,15 @@ fn header_describes_the_demo() -> anyhow::Result<()> {
         let header = parse_header(&file)?;
         assert_eq!(&file[..4], b"MVDZ");
         assert_eq!(header.size(), demo.len() as u64);
-        assert_eq!(
-            header.duration_ms(),
-            u64::from(crate::segment::duration_ms(&demo))
-        );
+        let duration = Duration::from_millis(u64::from(crate::segment::duration_ms(&demo)));
+        assert_eq!(header.duration(), duration);
         let segment_durations: u64 = parts(&file)?
             .segments
             .iter()
             .filter_map(|segment| crate::fields::read_u32(&mut &segment[DURATION_OFFSET..]))
             .map(u64::from)
             .sum();
-        assert_eq!(segment_durations, header.duration_ms());
+        assert_eq!(Duration::from_millis(segment_durations), header.duration());
         assert_eq!(header.crc32(), crc32fast::hash(&demo));
         assert_eq!(*header.sha256(), <[u8; 32]>::from(Sha256::digest(&demo)));
         assert_eq!(header_bytes(&header), file[..HEADER_SIZE]);

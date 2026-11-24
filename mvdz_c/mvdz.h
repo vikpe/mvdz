@@ -28,7 +28,7 @@ typedef struct mvdz_error {
 /* Decodes a whole MVDZ file to the demo it holds. *demo is freed with free(); it is
  * NULL after an error and for an empty demo. A demo of more than 1 GiB is refused
  * with MVDZ_MEMORY_LIMIT. */
-mvdz_error mvdz_decode(const uint8_t *file, size_t file_len, uint8_t **demo, size_t *demo_size);
+mvdz_error mvdz_decode(uint8_t **demo, size_t *demo_size, const uint8_t *file, size_t file_len);
 
 #ifdef __cplusplus
 }

@@ -3,6 +3,7 @@
 use crate::error::{Error, Result, corrupt};
 use crate::fields::{read_array, read_u32, read_u64, write_u32, write_usize};
 use crate::rans::Models;
+use std::time::Duration;
 
 pub(crate) const MAGIC: &[u8; 4] = b"MVDZ";
 pub(crate) const FORMAT_VERSION: u32 = 3;
@@ -39,8 +40,9 @@ impl Header {
         self.size
     }
 
-    pub fn duration_ms(&self) -> u64 {
-        self.duration_ms
+    /// In whole milliseconds.
+    pub fn duration(&self) -> Duration {
+        Duration::from_millis(self.duration_ms)
     }
 
     pub fn crc32(&self) -> u32 {

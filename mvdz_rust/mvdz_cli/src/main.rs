@@ -326,7 +326,7 @@ fn header_json(header: &mvdz::Header) -> String {
     let mut json = format!(
         "{{\"size_bytes\":{},\"duration_ms\":{},\"crc32\":\"{:08x}\",\"sha256\":\"",
         header.size(),
-        header.duration_ms(),
+        header.duration().as_millis(),
         header.crc32(),
     );
     for byte in header.sha256() {

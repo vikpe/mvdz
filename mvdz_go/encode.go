@@ -9,6 +9,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"time"
 )
 
 // Encode codes an MVD demo as an MVDZ file, FORMAT.md 8.
@@ -132,8 +133,8 @@ func (encoder Encoder) firstPass(input io.Reader) (Header, *fileModels, []segmen
 				isWalked:      walks[index].isWalked,
 			})
 			protocol = walks[index].endProtocol
-			header.Size += uint64(len(segment))
-			header.DurationMs += uint64(segmentDurationMs(segment))
+			header.Size += int64(len(segment))
+			header.Duration += time.Duration(segmentDurationMs(segment)) * time.Millisecond
 			header.CRC32 = crc32.Update(header.CRC32, crc32.IEEETable, segment)
 			demoSHA256.Write(segment)
 		}

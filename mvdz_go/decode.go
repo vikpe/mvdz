@@ -162,7 +162,7 @@ func (reader *Reader) readSegment() (codedSegment, error) {
 	if segment.rawLen > maxRawLen {
 		return codedSegment{}, corrupt("segment too large")
 	}
-	if uint64(segment.rawLen) > reader.header.Size-reader.rawTotal {
+	if uint64(segment.rawLen) > uint64(reader.header.Size)-reader.rawTotal {
 		return codedSegment{}, corrupt("segment sizes")
 	}
 	reader.rawTotal += uint64(segment.rawLen)
@@ -174,7 +174,7 @@ func (reader *Reader) readSegment() (codedSegment, error) {
 func (reader *Reader) decodeBatch() {
 	var batch []codedSegment
 	batchLen := segmentsInFlight(reader.MaxMemory, runtime.GOMAXPROCS(0), decodeBaseMemory, decodeSegmentMemory)
-	for len(batch) < batchLen && reader.rawTotal < reader.header.Size {
+	for len(batch) < batchLen && reader.rawTotal < uint64(reader.header.Size) {
 		segment, err := reader.readSegment()
 		if err != nil {
 			reader.deferredErr = err

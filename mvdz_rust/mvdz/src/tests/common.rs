@@ -6,15 +6,19 @@ use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 
 pub(crate) fn with_size(header: &Header, size: u64) -> Header {
-    Header::new(size, header.duration_ms(), header.crc32(), *header.sha256())
+    Header::new(size, duration_ms(header), header.crc32(), *header.sha256())
 }
 
 pub(crate) fn with_crc32(header: &Header, crc32: u32) -> Header {
-    Header::new(header.size(), header.duration_ms(), crc32, *header.sha256())
+    Header::new(header.size(), duration_ms(header), crc32, *header.sha256())
 }
 
 pub(crate) fn with_sha256(header: &Header, sha256: [u8; 32]) -> Header {
-    Header::new(header.size(), header.duration_ms(), header.crc32(), sha256)
+    Header::new(header.size(), duration_ms(header), header.crc32(), sha256)
+}
+
+fn duration_ms(header: &Header) -> u64 {
+    u64::try_from(header.duration().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Every segment all tail: the encoder's fallback layout.

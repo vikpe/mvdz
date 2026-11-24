@@ -21,6 +21,9 @@ scope, variable lifespan, `1 << N` bit constants, `_` between words of constant 
   `walker_write`, `axis_track_push`, `bit_reader_is_done`.
 - Errors: every fallible function returns `mvdz_error` by value; `message` is a static
   string. Results go through out parameters, written only on success.
+- Parameter order as the C library: a destination buffer first, with its length
+  (`memcpy`, `snprintf`); a struct that is filled in last (`localtime_r`). A function
+  takes its own struct before both.
 - No global mutable state.
 
 ## Safety

@@ -25,9 +25,9 @@ typedef struct transform_header {
 } transform_header;
 
 static uint64_t max_blob_total(uint32_t raw_len);
-static mvdz_error decode_streams(const uint8_t *bodies, const transform_header *header,
-                                 const decoder_model *models, uint8_t *blob_bytes,
-                                 uint8_t *destination, uint32_t raw_len);
+static mvdz_error decode_streams(uint8_t *destination, uint32_t raw_len, const uint8_t *bodies,
+                                 const transform_header *header, const decoder_model *models,
+                                 uint8_t *blob_bytes);
 static mvdz_error walk(uint8_t *segment, uint32_t segment_len, segment_streams *streams);
 
 /* FORMAT.md 3.1 */
@@ -90,9 +90,8 @@ static mvdz_error parse_transform_header(const uint8_t *coded, uint32_t coded_le
 }
 
 /* FORMAT.md 3.3: writes the raw_len bytes of the segment to destination. */
-static mvdz_error decode_transform(const uint8_t *coded, const transform_header *header,
-                                   const decoder_model *models, uint8_t *destination,
-                                   uint32_t raw_len) {
+static mvdz_error decode_transform(uint8_t *destination, uint32_t raw_len, const uint8_t *coded,
+                                   const transform_header *header, const decoder_model *models) {
     const uint8_t *rest = coded + header->body_offset;
     bool is_stored = header->entry_count == 0;
     if (is_stored) {
@@ -103,7 +102,7 @@ static mvdz_error decode_transform(const uint8_t *coded, const transform_header 
     if (blob_bytes == NULL) {
         return out_of_memory();
     }
-    mvdz_error error = decode_streams(rest, header, models, blob_bytes, destination, raw_len);
+    mvdz_error error = decode_streams(destination, raw_len, rest, header, models, blob_bytes);
     free(blob_bytes);
     return error;
 }
@@ -129,9 +128,9 @@ static uint64_t max_blob_total(uint32_t raw_len) {
     return 2 * (uint64_t)raw_len;
 }
 
-static mvdz_error decode_streams(const uint8_t *bodies, const transform_header *header,
-                                 const decoder_model *models, uint8_t *blob_bytes,
-                                 uint8_t *destination, uint32_t raw_len) {
+static mvdz_error decode_streams(uint8_t *destination, uint32_t raw_len, const uint8_t *bodies,
+                                 const transform_header *header, const decoder_model *models,
+                                 uint8_t *blob_bytes) {
     segment_streams streams = {
         header->protocol, {{NULL, NULL, 0, 0, 0, {NULL, 0, 0}}}, {{NULL, 0}}};
     for (uint32_t index = 0; index < header->entry_count; index++) {
@@ -150,7 +149,7 @@ static mvdz_error decode_streams(const uint8_t *bodies, const transform_header *
         bodies += entry->len;
     }
 
-    mvdz_error error = lz_expand(streams.decoders, blob_bytes, header->blob_total);
+    mvdz_error error = lz_expand(blob_bytes, header->blob_total, streams.decoders);
     if (error.kind != MVDZ_OK) {
         return error;
     }

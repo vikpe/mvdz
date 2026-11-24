@@ -33,7 +33,7 @@ int main(int argument_count, char **arguments) {
     }
     uint8_t *demo;
     size_t demo_size;
-    mvdz_error error = mvdz_decode(file, file_len, &demo, &demo_size);
+    mvdz_error error = mvdz_decode(&demo, &demo_size, file, file_len);
     free(file);
     if (error.kind != MVDZ_OK) {
         fprintf(stderr, "mvdz_bench: %s: error %d: %s\n", input, (int)error.kind, error.message);
