@@ -8,7 +8,6 @@ import (
 const (
 	protocolVersion     = 28
 	protocolVersionFTE  = 0x58455446 // "FTEX"
-	protocolVersionFTE2 = 0x32455446 // "FTE2"
 	protocolVersionMVD1 = 0x3144564D // "MVD1"
 
 	ftePextTrans        = 1 << 3
@@ -132,7 +131,6 @@ var (
 // protocolState is the protocol extension state, FORMAT.md 4.1.
 type protocolState struct {
 	fte  uint32
-	fte2 uint32 // carried to the next segment's transform header; no rule reads it
 	mvd1 uint32
 }
 
@@ -183,8 +181,6 @@ func (protocol *protocolState) observeServerData(body []byte) {
 		switch version {
 		case protocolVersionFTE:
 			protocol.fte = extensions
-		case protocolVersionFTE2:
-			protocol.fte2 = extensions
 		case protocolVersionMVD1:
 			protocol.mvd1 = extensions
 		}

@@ -311,8 +311,8 @@ pub(crate) fn encode_transform(
 /// The segment as it is, behind a transform header without streams (FORMAT.md 3.1):
 /// the one layout with a size bound, for a segment no model fits.
 pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
-    /// `fte`, `fte2`, `mvd1` and the entry count.
-    const TRANSFORM_FIELDS_SIZE: usize = 4 * 4;
+    /// `fte`, `mvd1` and the entry count.
+    const TRANSFORM_FIELDS_SIZE: usize = 3 * 4;
     const NO_STREAMS: usize = 0;
     let mut out = Vec::with_capacity(TRANSFORM_FIELDS_SIZE + raw.len());
     write_transform_fields(&mut out, protocol, NO_STREAMS);
@@ -321,7 +321,7 @@ pub(crate) fn stored(raw: &[u8], protocol: ProtocolState) -> Vec<u8> {
 }
 
 fn write_transform_fields(out: &mut Vec<u8>, protocol: ProtocolState, entry_count: usize) {
-    for extensions in [protocol.fte(), protocol.fte2(), protocol.mvd1()] {
+    for extensions in [protocol.fte(), protocol.mvd1()] {
         out.extend_from_slice(&extensions.to_le_bytes());
     }
     write_usize(out, entry_count);
@@ -458,7 +458,6 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
     let header_error = Error::Corrupt("segment header");
     let mut rest = body;
     let fte = read_u32(&mut rest).ok_or(header_error)?;
-    let fte2 = read_u32(&mut rest).ok_or(header_error)?;
     let mvd1 = read_u32(&mut rest).ok_or(header_error)?;
     let entry_count = read_usize(&mut rest).ok_or(header_error)?;
     if entry_count > STREAM_COUNT {
@@ -500,7 +499,7 @@ pub(crate) fn parse_transform_header(body: &[u8], raw_len: usize) -> Result<Tran
         return corrupt("stream bodies");
     }
     Ok(TransformHeader {
-        protocol: ProtocolState::new(fte, fte2, mvd1),
+        protocol: ProtocolState::new(fte, mvd1),
         entries,
         blob_total,
         body_offset: body.len() - rest.len(),
@@ -802,10 +801,10 @@ mod tests {
     fn blob_streams_over_twice_the_segment_are_refused() {
         use crate::streams::SET;
         let raw_len = 100;
-        // fte, fte2, mvd1, the stream count; then (id, count) per blob stream
+        // fte, mvd1, the stream count; then (id, count) per blob stream
         let header = |blob_streams: &[(usize, usize)]| {
             let mut body = Vec::new();
-            for field in [0, 0, 0, blob_streams.len()] {
+            for field in [0, 0, blob_streams.len()] {
                 write_usize(&mut body, field);
             }
             for &(id, count) in blob_streams {

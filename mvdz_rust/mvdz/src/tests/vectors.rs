@@ -173,7 +173,7 @@ fn token_models(
         models[id] = Some(model);
     }
     let table = StreamTable {
-        fields: [0; 3],
+        fields: [0; 2],
         stream_count: entries.len(),
         entries,
         bodies,
@@ -509,7 +509,7 @@ fn blob_tokens(add: &mut impl FnMut(&str, Vec<u8>, &str)) -> anyhow::Result<()> 
         "a `TAIL` stream of raw_len + 1 bytes",
     );
     let stored = StreamTable {
-        fields: [0; 3],
+        fields: [0; 2],
         stream_count: 0,
         entries: Vec::new(),
         bodies: demo[..3].to_vec(),
@@ -968,7 +968,7 @@ fn protocol_change_demo() -> Vec<u8> {
     let server_data = message(
         crate::protocol::SVC_SERVER_DATA,
         &[
-            b"FTE2",
+            b"MVD1",
             &(1u32 << 30).to_le_bytes(),
             &crate::protocol::PROTOCOL_VERSION.to_le_bytes(),
             &1u32.to_le_bytes(),
@@ -1236,7 +1236,7 @@ fn all_vectors() -> anyhow::Result<Option<Vec<Vector>>> {
         "protocol-change.normal.mvdz",
         encode_any(&protocol_change)?,
         &protocol_change,
-        "synthetic demo whose second segment announces FTE2 extensions: later segments start from the changed protocol (rule 3)",
+        "synthetic demo whose second segment announces an MVD1 extension no rule reads: later segments start from the changed protocol (rule 3)",
     );
     let two_matches = two_matches_demo();
     add(

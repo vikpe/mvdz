@@ -441,7 +441,7 @@ fn protocol_change_mid_demo() -> anyhow::Result<()> {
     let server_data = message(
         crate::protocol::SVC_SERVER_DATA,
         &[
-            b"FTE2",
+            b"MVD1",
             &(1u32 << 30).to_le_bytes(),
             &crate::protocol::PROTOCOL_VERSION.to_le_bytes(),
             &1u32.to_le_bytes(),

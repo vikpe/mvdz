@@ -35,7 +35,6 @@ static mvdz_error parse_transform_header(const uint8_t *coded, uint32_t coded_le
                                          transform_header *header) {
     byte_cursor fields = {coded, coded_len, 0, false};
     header->protocol.fte = read_uint32(&fields);
-    header->protocol.fte_2 = read_uint32(&fields);
     header->protocol.mvd_1 = read_uint32(&fields);
     uint32_t entry_count = read_uint32(&fields);
     if (fields.is_short) {

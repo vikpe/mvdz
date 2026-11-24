@@ -366,7 +366,7 @@ mod tests {
             is_walked: false,
         };
         let body = encode_segment(demo, &plan, &[], None)?;
-        let stored_len = demo.len() + 16;
+        let stored_len = demo.len() + 12;
         assert!(body.ends_with(demo) && body.len() == SEGMENT_FIELDS_SIZE + stored_len);
         Ok(())
     }

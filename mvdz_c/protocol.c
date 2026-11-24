@@ -1,7 +1,6 @@
 enum {
     PROTOCOL_VERSION = 28,
     PROTOCOL_VERSION_FTE = 0x58455446,   /* "FTEX" */
-    PROTOCOL_VERSION_FTE_2 = 0x32455446, /* "FTE2" */
     PROTOCOL_VERSION_MVD_1 = 0x3144564D, /* "MVD1" */
 
     FTE_PEXT_TRANS = 1 << 3,
@@ -83,7 +82,6 @@ static const uint32_t entity_angle_bits[3] = {U_ANGLE_1, U_ANGLE_2, U_ANGLE_3};
 /* protocol_state is the protocol extension state, FORMAT.md 4.1. */
 typedef struct protocol_state {
     uint32_t fte;
-    uint32_t fte_2; /* carried in the transform header; no rule reads it */
     uint32_t mvd_1;
 } protocol_state;
 
@@ -98,7 +96,6 @@ static bool has_float_coords(const protocol_state *protocol) {
 /* A server data starts a match: an extension it does not announce is off. */
 static void observe_server_data(protocol_state *protocol, const uint8_t *body, uint32_t body_len) {
     protocol->fte = 0;
-    protocol->fte_2 = 0;
     protocol->mvd_1 = 0;
     byte_cursor fields = {body, body_len, 0, false};
     for (;;) {
@@ -112,8 +109,6 @@ static void observe_server_data(protocol_state *protocol, const uint8_t *body, u
         }
         if (version == PROTOCOL_VERSION_FTE) {
             protocol->fte = extensions;
-        } else if (version == PROTOCOL_VERSION_FTE_2) {
-            protocol->fte_2 = extensions;
         } else if (version == PROTOCOL_VERSION_MVD_1) {
             protocol->mvd_1 = extensions;
         }

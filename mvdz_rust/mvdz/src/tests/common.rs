@@ -106,8 +106,8 @@ pub(crate) fn unstructured_len(file: &[u8]) -> anyhow::Result<usize> {
 /// The transform header and bodies of a segment (FORMAT.md 3.1).
 #[derive(Clone)]
 pub(crate) struct StreamTable {
-    /// fte, fte2, mvd1
-    pub(crate) fields: [usize; 3],
+    /// fte, mvd1
+    pub(crate) fields: [usize; 2],
     pub(crate) stream_count: usize,
     /// (id, size)
     pub(crate) entries: Vec<(usize, usize)>,
@@ -119,7 +119,7 @@ impl StreamTable {
         use crate::fields::read_usize;
         let mut rest = transform;
         let mut next = || read_usize(&mut rest).context("a transform header field");
-        let fields = [next()?, next()?, next()?];
+        let fields = [next()?, next()?];
         let stream_count = next()?;
         let mut entries = Vec::new();
         for _ in 0..stream_count {

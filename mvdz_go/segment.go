@@ -247,7 +247,7 @@ func encodeTransform(streams *segmentStreams, rawLen uint32, models *fileModels)
 // storedSegment is the one layout with a size bound, FORMAT.md 3.1.
 func storedSegment(segment []byte, protocol protocolState) []byte {
 	const (
-		transformFieldsSize = 4 * 4
+		transformFieldsSize = 3 * 4
 		noStreams           = 0
 	)
 	coded := make([]byte, 0, transformFieldsSize+len(segment))
@@ -257,7 +257,6 @@ func storedSegment(segment []byte, protocol protocolState) []byte {
 
 func appendTransformFields(coded []byte, protocol protocolState, entryCount uint32) []byte {
 	coded = binary.LittleEndian.AppendUint32(coded, protocol.fte)
-	coded = binary.LittleEndian.AppendUint32(coded, protocol.fte2)
 	coded = binary.LittleEndian.AppendUint32(coded, protocol.mvd1)
 	return binary.LittleEndian.AppendUint32(coded, entryCount)
 }
@@ -375,7 +374,6 @@ func parseTransformHeader(coded []byte, rawLen uint32) (*transformHeader, error)
 	fields := byteCursor{data: coded}
 	header := new(transformHeader)
 	header.protocol.fte = fields.readUint32()
-	header.protocol.fte2 = fields.readUint32()
 	header.protocol.mvd1 = fields.readUint32()
 	entryCount := fields.readUint32()
 	if fields.isShort {

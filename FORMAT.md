@@ -194,13 +194,12 @@ beyond the rules above.
 ### 3.1 Transform header and stream table (`segment.rs:parse_transform_header`)
 
 ```
-coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
+coded := fte u32 | mvd1 u32 | n u32
          | n x { id u32 | len u32 }
          | stream bodies, in id order
 ```
 
-* `fte`, `fte2`, `mvd1`: the protocol extension state at the segment
-  start (4.1).
+* `fte`, `mvd1`: the protocol extension state at the segment start (4.1).
 * `n`: `n = 0` is a stored segment (below). Per entry:
   * `id`: a structural, numeric or blob stream id (3.2), the ids strictly
     increasing: so `n` is at most 315;
@@ -218,7 +217,7 @@ coded := fte u32 | fte2 u32 | mvd1 u32 | n u32
   bytes from it succeeds, reading more is an error.
 
 **Stored segment.** A transform header with `n = 0` is followed by the
-segment's bytes as they are: exactly `raw_len` bytes follow the 16 bytes
+segment's bytes as they are: exactly `raw_len` bytes follow the 12 bytes
 of the header. It is the one layout whose size is bounded, for a segment
 the models cannot code (section 8).
 
@@ -373,13 +372,13 @@ wide_coord = has_fte_float_coords ? 4 : 2   // SVC_INTERMISSION coords
 angle      = has_fte_float_coords ? 2 : 1
 ```
 
-A segment starts with the state in its transform header (`fte`, `fte2`,
-`mvd1`; section 3). `observe_server_data(body)` replaces it after an
+A segment starts with the state in its transform header (`fte`, `mvd1`;
+section 3). `observe_server_data(body)` replaces it after an
 `SVC_SERVER_DATA` body has been written. A server data starts a match: an
 extension it does not announce is off.
 
 ```
-fte = fte2 = mvd1 = 0
+fte = mvd1 = 0
 i = 0
 while i + 4 <= len(body):
     v = le32(body[i..]); i += 4
@@ -387,12 +386,11 @@ while i + 4 <= len(body):
     if i + 4 > len(body): break
     x = le32(body[i..]); i += 4
     if v == PROTOCOL_VERSION_FTE   ('FTEX', 0x58455446): fte  = x
-    if v == PROTOCOL_VERSION_FTE_2 ('FTE2', 0x32455446): fte2 = x
     if v == PROTOCOL_VERSION_MVD_1 ('MVD1', 0x3144564D): mvd1 = x
 re-derive has_float_coords, has_fte_float_coords
 ```
 
-`fte2` is carried but no rule reads it.
+Any other extension a server data announces (`FTE2`) is skipped: no rule reads it.
 
 ### 4.2 Command bodies without a layout (`SegmentWalker::copy_command_body`)
 
@@ -1218,8 +1216,7 @@ streaming decoder holds a few segments at a time whatever the demo's size. A dec
 abort the process on a declared size.
 
 **Not checked.** The header's SHA-256 (section 10) and `duration_ms`, and the segments'
-`duration_ms`: no reader recomputes them. Where the demo is cut into segments. The `fte2` field
-of a transform header beyond carrying it, and all three protocol fields of a stored
+`duration_ms`: no reader recomputes them. Where the demo is cut into segments. The protocol fields of a stored
 segment. Padding bits after a numeric stream's mantissa bits.
 
 ---------------------------------------------------------------------------
@@ -1254,7 +1251,7 @@ its blob parser (rule 10) on its own.
    The cuts need no more of the demo than 16 frames past a cut, so an encoder cuts while
    it reads.
 3. **Protocol state**: pass 1 walks the segments in order (section 4). Segment k's
-   `fte`, `fte2`, `mvd1` are the state at the end of the last segment before it whose
+   `fte`, `mvd1` are the state at the end of the last segment before it whose
    walk succeeded (0 for the first).
 4. **Models** (`segment.rs:ModelBuilder`, `rans.rs:Tally::file_model`): every
    structural and numeric stream gets one model, built from its symbol counts per

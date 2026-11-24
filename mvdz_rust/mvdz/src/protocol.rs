@@ -79,17 +79,15 @@ pub(crate) const DF_WEAPON_FRAME: u16 = 1 << 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct ProtocolState {
     fte: u32,
-    fte2: u32,
     mvd1: u32,
     has_float_coords: bool,
     has_fte_float_coords: bool,
 }
 
 impl ProtocolState {
-    pub(crate) fn new(fte: u32, fte2: u32, mvd1: u32) -> Self {
+    pub(crate) fn new(fte: u32, mvd1: u32) -> Self {
         let mut protocol = Self {
             fte,
-            fte2,
             mvd1,
             ..Default::default()
         };
@@ -100,11 +98,6 @@ impl ProtocolState {
     #[inline]
     pub(crate) fn fte(&self) -> u32 {
         self.fte
-    }
-
-    #[inline]
-    pub(crate) fn fte2(&self) -> u32 {
-        self.fte2
     }
 
     #[inline]
@@ -130,7 +123,6 @@ impl ProtocolState {
     /// A server data starts a match: an extension it does not announce is off.
     pub(crate) fn observe_server_data(&mut self, body: &[u8]) {
         const PROTOCOL_VERSION_FTE: u32 = u32::from_le_bytes(*b"FTEX");
-        const PROTOCOL_VERSION_FTE_2: u32 = u32::from_le_bytes(*b"FTE2");
         const PROTOCOL_VERSION_MVD_1: u32 = u32::from_le_bytes(*b"MVD1");
         *self = Self::default();
         let mut rest = body;
@@ -143,7 +135,6 @@ impl ProtocolState {
             };
             match protocol {
                 PROTOCOL_VERSION_FTE => self.fte = extensions,
-                PROTOCOL_VERSION_FTE_2 => self.fte2 = extensions,
                 PROTOCOL_VERSION_MVD_1 => self.mvd1 = extensions,
                 _ => {}
             }
