@@ -3,7 +3,6 @@ package mvdz
 import (
 	"encoding/binary"
 	"fmt"
-	"maps"
 	"math/bits"
 	"slices"
 )
@@ -143,11 +142,11 @@ type listedModel struct {
 // writeModelsBlock is the meta model as it is, then every raw model coded
 // under it, FORMAT.md 2.2; rawLen is what the format limits.
 func writeModelsBlock(models []listedModel) (body []byte, rawLen int, err error) {
-	metaTally := streamTally{}
+	metaTally := streamTally{alphabetSize: structuralAlphabetSize}
 	for _, listed := range models {
-		metaTally.add(previousBytes(listed.raw), structuralAlphabetSize, false)
+		metaTally.add(previousBytes(listed.raw), false)
 	}
-	meta := metaTally.model(structuralAlphabetSize, metaTableCost)
+	meta := metaTally.model(metaTableCost)
 	body = append(body, meta.raw...)
 	rawLen = len(meta.raw)
 	body = binary.LittleEndian.AppendUint32(body, uint32(len(models)))
@@ -255,22 +254,48 @@ func decodeRawModel(coded []byte, rawLen uint32, meta *streamModel) ([]byte, err
 
 // streamTally counts the symbols of one stream per context, over the
 // segments of a demo.
-type streamTally map[uint16][]uint32
+type streamTally struct {
+	alphabetSize int
+	rowOf        []uint32 // by context: 1 + the row of its counts; 0 for a context not counted
+	rows         []uint32 // alphabetSize counts per row
+}
 
 // add counts the symbols of a structural stream, the buckets of a numeric one.
-func (tally streamTally) add(values []codedValue, alphabetSize int, isNumeric bool) {
+func (tally *streamTally) add(values []codedValue, isNumeric bool) {
 	for _, coded := range values {
-		counts := tally[coded.context]
-		if counts == nil {
-			counts = make([]uint32, alphabetSize)
-			tally[coded.context] = counts
+		context := int(coded.context)
+		if context >= len(tally.rowOf) {
+			tally.rowOf = append(tally.rowOf, make([]uint32, context+1-len(tally.rowOf))...)
+		}
+		row := tally.rowOf[context]
+		if row == 0 {
+			tally.rows = append(tally.rows, make([]uint32, tally.alphabetSize)...)
+			row = uint32(len(tally.rows) / tally.alphabetSize)
+			tally.rowOf[context] = row
 		}
 		symbol := uint16(coded.value)
 		if isNumeric {
 			symbol = residualBucket(coded.value)
 		}
-		counts[symbol]++
+		tally.rows[int(row-1)*tally.alphabetSize+int(symbol)]++
 	}
+}
+
+// contexts are the counted ones, ascending.
+func (tally *streamTally) contexts() []uint16 {
+	var contexts []uint16
+	for context, row := range tally.rowOf {
+		if row != 0 {
+			contexts = append(contexts, uint16(context))
+		}
+	}
+	return contexts
+}
+
+// counts are of a counted context.
+func (tally *streamTally) counts(context uint16) []uint32 {
+	row := int(tally.rowOf[context] - 1)
+	return tally.rows[row*tally.alphabetSize:][:tally.alphabetSize]
 }
 
 // tableCost is of an own table in the models block, in bits, FORMAT.md 8.
@@ -287,14 +312,15 @@ var (
 )
 
 // FORMAT.md 8 rule 4
-func (tally streamTally) model(alphabetSize int, cost tableCost) *streamModel {
-	contexts := slices.Sorted(maps.Keys(tally))
-	ownContexts := tally.ownContexts(contexts, alphabetSize, cost)
+func (tally *streamTally) model(cost tableCost) *streamModel {
+	alphabetSize := tally.alphabetSize
+	contexts := tally.contexts()
+	ownContexts := tally.ownContexts(contexts, cost)
 
 	fallback := make([]uint32, alphabetSize)
 	for _, context := range contexts {
 		if _, isOwn := slices.BinarySearch(ownContexts, context); !isOwn {
-			addCounts(fallback, tally[context])
+			addCounts(fallback, tally.counts(context))
 		}
 	}
 	raw := make([]byte, 0, rawModelLen(len(ownContexts), alphabetSize))
@@ -304,7 +330,7 @@ func (tally streamTally) model(alphabetSize int, cost tableCost) *streamModel {
 	}
 	raw = appendQuantized(raw, fallback)
 	for _, context := range ownContexts {
-		raw = appendQuantized(raw, tally[context])
+		raw = appendQuantized(raw, tally.counts(context))
 	}
 	quantizedTables := raw[ownCountSize+2*len(ownContexts):]
 	return &streamModel{raw, newTableOf(ownContexts), newRansTables(quantizedTables, alphabetSize)}
@@ -312,17 +338,18 @@ func (tally streamTally) model(alphabetSize int, cost tableCost) *streamModel {
 
 // ownContexts are those cheaper with a table of their own, or that the
 // fallback table cannot code, FORMAT.md 8 rule 4.
-func (tally streamTally) ownContexts(contexts []uint16, alphabetSize int, cost tableCost) []uint16 {
+func (tally *streamTally) ownContexts(contexts []uint16, cost tableCost) []uint16 {
+	alphabetSize := tally.alphabetSize
 	fallback := make([]uint32, alphabetSize)
 	for _, context := range contexts {
-		addCounts(fallback, tally[context])
+		addCounts(fallback, tally.counts(context))
 	}
 	var ownContexts []uint16
 	for range 2 {
 		rebuiltFallback := make([]uint32, alphabetSize)
 		ownContexts = nil
 		for _, context := range contexts {
-			counts := tally[context]
+			counts := tally.counts(context)
 			presentCount := uint64(0)
 			for _, count := range counts {
 				if count > 0 {

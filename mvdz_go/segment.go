@@ -138,10 +138,9 @@ func (builder *modelBuilder) add(segments []*segmentStreams) {
 			if len(values) == 0 {
 				continue
 			}
-			if builder.tallies[stream] == nil {
-				builder.tallies[stream] = streamTally{}
-			}
-			builder.tallies[stream].add(values, streamAlphabetSize(stream), stream >= firstNumericStream)
+			tally := &builder.tallies[stream]
+			tally.alphabetSize = streamAlphabetSize(stream)
+			tally.add(values, stream >= firstNumericStream)
 		}
 	})
 }
@@ -149,8 +148,8 @@ func (builder *modelBuilder) add(segments []*segmentStreams) {
 func (builder *modelBuilder) models() (*fileModels, error) {
 	models := new(fileModels)
 	inParallel(len(builder.tallies), func(stream int) {
-		if tally := builder.tallies[stream]; len(tally) != 0 {
-			models[stream] = tally.model(streamAlphabetSize(stream), streamTableCost)
+		if tally := &builder.tallies[stream]; len(tally.rows) != 0 {
+			models[stream] = tally.model(streamTableCost)
 		}
 	})
 	return models, fitModelsBlock(models)
