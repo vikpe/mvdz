@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"runtime"
 )
 
@@ -22,13 +23,14 @@ func Decode(file []byte) ([]byte, error) {
 // Reader decodes an MVDZ file to the demo it holds.
 type Reader struct {
 	// MaxMemory, in bytes and approximate, lowers the segments decoded at once
-	// to stay within it, never below one (14 MiB). 0, the default, is no
-	// limit: a segment per CPU.
+	// to stay within it, never below one (14 MiB). A file whose models need
+	// more is refused (ErrMemoryLimit). 0, the default, is no limit: a
+	// segment per CPU.
 	MaxMemory int64
 
 	input       io.Reader
 	header      Header
-	models      *fileModels // nil until the models block is read
+	models      *ransModels // nil until the models block is read
 	rawTotal    uint64      // of the segments read
 	demoCRC32   uint32
 	ready       [][]byte // decoded and checked segments, in order
@@ -73,7 +75,11 @@ func (reader *Reader) Read(buffer []byte) (int, error) {
 // nextSegment returns io.EOF after the last segment if the whole-demo checks pass.
 func (reader *Reader) nextSegment() ([]byte, error) {
 	if reader.models == nil {
-		models, err := readModels(reader.input)
+		maxModelsMemory := int64(math.MaxInt64)
+		if reader.MaxMemory > 0 {
+			maxModelsMemory = max(reader.MaxMemory, baseMemory+segmentMemory)
+		}
+		models, err := readModels(reader.input, maxModelsMemory)
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +97,7 @@ func (reader *Reader) nextSegment() ([]byte, error) {
 }
 
 // FORMAT.md 2.2
-func readModels(input io.Reader) (*fileModels, error) {
+func readModels(input io.Reader, maxMemory int64) (*ransModels, error) {
 	length, err := readUint32(input)
 	if err != nil {
 		return nil, err
@@ -104,9 +110,9 @@ func readModels(input io.Reader) (*fileModels, error) {
 		return nil, err
 	}
 	if length == 0 {
-		return new(fileModels), nil
+		return new(ransModels), nil
 	}
-	return readModelsBlock(body)
+	return readModelsBlock(body, maxMemory)
 }
 
 // finish makes the whole-demo checks, FORMAT.md 3.4.
@@ -198,7 +204,7 @@ func (reader *Reader) decodeBatch() {
 }
 
 // FORMAT.md 3.3
-func (segment codedSegment) decode(models *fileModels) ([]byte, error) {
+func (segment codedSegment) decode(models *ransModels) ([]byte, error) {
 	header, err := parseTransformHeader(segment.coded, segment.rawLen)
 	if err != nil {
 		return nil, err
@@ -230,14 +236,15 @@ func decodeWithMaxMemory(file []byte, maxMemory int64) ([]byte, error) {
 	return demo, nil
 }
 
+// ponytail: measured on sample demos, not a bound; count the buffers if it must hold
+const (
+	baseMemory    = 12 << 20
+	segmentMemory = 2 << 20
+)
+
 // segmentsInFlight is as many segments as maxMemory holds, at least one, at
 // most threads; 0 or less is no limit.
 func segmentsInFlight(maxMemory int64, threads int) int {
-	// ponytail: measured on sample demos, not a bound; count the buffers if it must hold
-	const (
-		baseMemory    = 12 << 20
-		segmentMemory = 2 << 20
-	)
 	if maxMemory <= 0 {
 		return threads
 	}

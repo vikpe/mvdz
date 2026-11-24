@@ -392,7 +392,7 @@ func parseTransformHeader(coded []byte, rawLen uint32) (*transformHeader, error)
 }
 
 // FORMAT.md 3.3
-func decodeTransform(coded []byte, header *transformHeader, rawLen uint32, models *fileModels) ([]byte, error) {
+func decodeTransform(coded []byte, header *transformHeader, rawLen uint32, models *ransModels) ([]byte, error) {
 	rest := coded[header.bodyOffset:]
 	isStored := len(header.entries) == 0
 	if isStored {

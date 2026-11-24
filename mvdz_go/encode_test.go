@@ -3,6 +3,7 @@ package mvdz
 import (
 	"bytes"
 	"errors"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,10 +86,18 @@ func TestEncodeSelfCheck(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	if _, err := encodeSegment(segments[0], startProtocols[0], models, models); err != nil {
+	modelsBody, _, err := modelsBlock(models)
+	if err != nil {
+		test.Fatal(err)
+	}
+	decoderModels, err := readModelsBlock(modelsBody, math.MaxInt64)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if _, err := encodeSegment(segments[0], startProtocols[0], models, decoderModels); err != nil {
 		test.Errorf("with the models: %v", err)
 	}
-	_, err = encodeSegment(segments[0], startProtocols[0], models, new(fileModels))
+	_, err = encodeSegment(segments[0], startProtocols[0], models, new(ransModels))
 	if !errors.Is(err, ErrInternal) {
 		test.Errorf("without the models: got %v, want %v", err, ErrInternal)
 	}

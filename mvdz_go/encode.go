@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash/crc32"
+	"math"
 	"runtime"
 )
 
@@ -31,7 +32,7 @@ func encodeSegments(demo []byte, segments [][]byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	decoderModels, err := readModels(bytes.NewReader(appendModels(nil, modelsBody)))
+	decoderModels, err := readModels(bytes.NewReader(appendModels(nil, modelsBody)), math.MaxInt64)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the encoder's models do not read back", ErrInternal)
 	}
@@ -100,7 +101,7 @@ func firstPassWalk(segment []byte, protocol protocolState) (*segmentStreams, pro
 }
 
 // FORMAT.md 8 rules 5 and 9
-func secondPass(segments [][]byte, startProtocols []protocolState, models, decoderModels *fileModels) ([]byte, uint64, error) {
+func secondPass(segments [][]byte, startProtocols []protocolState, models *fileModels, decoderModels *ransModels) ([]byte, uint64, error) {
 	coded := make([][]byte, len(segments))
 	errs := make([]error, len(segments))
 	inParallel(len(segments), func(index int) {
@@ -121,7 +122,7 @@ func secondPass(segments [][]byte, startProtocols []protocolState, models, decod
 
 // encodeSegment writes a segment the first way that works, FORMAT.md 8
 // rule 5: transform-coded, all tail, stored; rule 7: it decodes to segment.
-func encodeSegment(segment []byte, protocol protocolState, models, decoderModels *fileModels) ([]byte, error) {
+func encodeSegment(segment []byte, protocol protocolState, models *fileModels, decoderModels *ransModels) ([]byte, error) {
 	rawLen := uint32(len(segment))
 	var coded []byte
 	isCoded := false
@@ -140,7 +141,7 @@ func encodeSegment(segment []byte, protocol protocolState, models, decoderModels
 	return coded, nil
 }
 
-func decodesTo(coded []byte, segment []byte, decoderModels *fileModels) bool {
+func decodesTo(coded []byte, segment []byte, decoderModels *ransModels) bool {
 	rawLen := uint32(len(segment))
 	header, err := parseTransformHeader(coded, rawLen)
 	if err != nil {
