@@ -6,8 +6,9 @@ MVD demos (`.mvd`, Quake 1). An `.mvdz` file decodes back to the exact original 
 The project consists of the format specification (`FORMAT.md`) with its test vectors
 (`vectors/`), a Rust workspace (`mvdz_rust/`: library `mvdz/` with fuzz targets in
 `mvdz/fuzz/`, command-line tool `mvdz_cli/`), a Go package (`mvdz_go/`, standard library
-only; `gofmt`, `go vet`, `go test`) and benchmarks (`benchmarks/`, `BENCHMARKS.md`,
-`scripts/`). The Rust and Go encoders write the same bytes.
+only; `gofmt`, `go vet`, `go test`), a C99 decoder (`mvdz_c/`, no dependencies; `make
+test`) and benchmarks (`benchmarks/`, `BENCHMARKS.md`, `scripts/`). The Rust and Go
+encoders write the same bytes.
 
 ## Before working on a task
 
@@ -26,13 +27,13 @@ only; `gofmt`, `go vet`, `go test`) and benchmarks (`benchmarks/`, `BENCHMARKS.m
 - Comments: names carry the meaning; comments are a fallback, only for what the name/code cannot say. ideally don't comment at all, 1-2 rows should be enough in 99% of cases where a comment is justified.
 - Use american english (e.g. color, not colour)
 
-## Naming across the spec, Rust and Go
+## Naming across the spec, Rust, Go and C
 
 - Same naming everywhere, each language's idiom. Before naming, check what the other implementation and `FORMAT.md` call it. Every name is one of:
-  - Format term: `FORMAT.md`'s word (section 1 lists them), the same in the spec, Rust and Go. Only casing differs.
+  - Format term: `FORMAT.md`'s word (section 1 lists them), the same in the spec, Rust, Go and C. Only casing differs.
   - General programming context (lengths, cursors, reading, writing, errors, constructors, tests): the word the language's standard library uses for that context. The implementations may differ here: `Decoder::new` / `NewReader`, `read_u16` / `readUint16`, `write_u32` / `binary.LittleEndian.AppendUint32`.
   - Neither: one word, the same on both sides.
-- Go's flat package prefixes the Rust module word where the bare word is ambiguous: `rans::Table` / `ransTable`, `lz::parse` / `lzParse`, `streams::TIME` / `streamTime`.
+- Go's flat package prefixes the Rust module word where the bare word is ambiguous: `rans::Table` / `ransTable`, `lz::parse` / `lzParse`, `streams::TIME` / `streamTime`. C's unity build is flat too: the Go name in `snake_case` (`lz_expand`, `STREAM_TIME`).
 - `size`: bytes fixed by the format or a type (`header_size`, `coord_size`). `len`: bytes of this particular data, measured or read from a length field (`raw_len`, `payload_len`). The demo's byte count is `size`.
 - `count`: items. `total`: a sum. `max_*`: a limit.
 - `position`: a moving cursor. `offset`: a distance in bytes from a start, never qualified by `len`. `index`: an array element. `number`: a wire number. `id`: a stream id.
@@ -72,6 +73,7 @@ only; `gofmt`, `go vet`, `go test`) and benchmarks (`benchmarks/`, `BENCHMARKS.m
 
 ## Domain rules
 
-`mvdz_rust/AGENTS.md` has the Rust rules. Read it before touching files there; it is
-loaded automatically only when the session starts in that directory. Domain rules win
-over the general ones on their own domain.
+`mvdz_rust/AGENTS.md` has the Rust rules, `mvdz_c/AGENTS.md` the C rules. Read the one
+of a directory before touching files there; it is loaded automatically only when the
+session starts in that directory. Domain rules win over the general ones on their own
+domain.

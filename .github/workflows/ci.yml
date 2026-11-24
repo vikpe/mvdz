@@ -13,8 +13,8 @@ defaults:
   run:
     working-directory: mvdz_rust
 
-# Linux only. Other platforms build from source with cargo but are not
-# tested here.
+# Rust and Go: Linux only. Other platforms build from source but are not
+# tested here. C: Linux, macOS and Windows.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -69,3 +69,42 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
+
+  c:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mvdz_c
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - run: make format-check
+      # warnings are errors (Makefile)
+      - run: make test CC=${{ matrix.compiler }}
+      - run: make test SANITIZE=1 CC=${{ matrix.compiler }}
+      - if: matrix.compiler == 'clang'
+        run: make fuzz FUZZ_SECS=60
+
+  c-macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mvdz_c
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+      - run: make test SANITIZE=1
+
+  c-msvc:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: mvdz_c
+        shell: cmd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - run: cl /nologo /W3 tests\test.c /Fe:test.exe
+      - run: test.exe ..\vectors

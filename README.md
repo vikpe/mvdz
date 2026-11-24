@@ -9,10 +9,11 @@ raw demo) without decoding.
 
 It comes as a command-line tool and a Rust library, and builds for
 WebAssembly. `mvdz_go/` is a second implementation, in Go: its encoder writes
-the same bytes as the Rust one. The format is specified in [FORMAT.md](FORMAT.md), precisely
+the same bytes as the Rust one. `mvdz_c/` is a decoder in C99, for clients and
+servers. The format is specified in [FORMAT.md](FORMAT.md), precisely
 enough to write an independent decoder, and `vectors/` holds valid
-and hostile test files. The work now is the specification and these two
-implementations; C and other languages follow once the format is settled.
+and hostile test files. The work now is the specification and these
+implementations; other languages follow once the format is settled.
 
 **Status: 1.0.0-rc.4, a release candidate for comments.** The file format
 may still change before 1.0: files written by a release candidate are not
@@ -210,6 +211,23 @@ The library builds for `wasm32-unknown-unknown` (`cargo build --lib -p mvdz
 --target wasm32-unknown-unknown`). There, encoding and decoding are
 single-threaded; every dependency is pure Rust, so nothing changes between
 targets.
+
+## C
+
+`mvdz_c/` is a decoder in C99 without dependencies, for QuakeWorld clients and
+servers: decoder only, whole buffers, one thread. A project compiles `mvdz.c` (it
+includes the other files) and calls one function; see
+[mvdz_c/README.md](mvdz_c/README.md).
+
+```c
+uint8_t *demo;
+size_t demo_size;
+mvdz_error error = mvdz_decode(file, file_len, &demo, &demo_size);   /* free(demo) */
+```
+
+Errors (`error.kind`): `MVDZ_NOT_MVDZ`, `MVDZ_UNSUPPORTED_VERSION`, `MVDZ_CORRUPT` and
+`MVDZ_MEMORY_LIMIT` (a demo of more than 1 GiB). `make test` runs its unit tests and
+the vectors.
 
 ## Tests
 
