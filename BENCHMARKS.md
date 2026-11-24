@@ -143,8 +143,8 @@ rc.4's memory grows with the demo; mvdz holds the models and the segments in fli
 
 ## Implementations
 
-Rust (`mvdz`), Go (`Encoder`, `Reader`, file to file) and C (`mvdz_decode_segments`,
-the file in memory, one thread). Speed on sample8; memory on the 14.2 MB
+Rust (`mvdz`), Go (`Encoder`, `Reader`, file to file) and C (`mvdz_decode`, file
+to file, one thread). Speed on sample8; memory on the 14.2 MB
 demo. The Go and Rust encoders write the same bytes.
 
 Speed:
@@ -162,10 +162,8 @@ Memory:
 |---|---|---|---|
 | compress, 1 thread | 15.8 | 27.2 | - |
 | compress, 4 threads | 20.4 | 40.9 | - |
-| decompress, 1 thread | 6.9 | 12.9 | 6.4 |
+| decompress, 1 thread | 6.9 | 12.9 | 4.0 |
 | decompress, 4 threads | 9.1 | 19.0 | - |
-
-The C figure includes the file, which it holds in memory.
 
 ## Reproducing
 

@@ -44,16 +44,15 @@ fn main() -> anyhow::Result<()> {
 fn check(path: &str) -> anyhow::Result<(usize, Vec<&'static str>)> {
     let source = std::fs::read(path).with_context(|| path.to_owned())?;
     let want = Sha256::digest(&source);
-    let file = mvdz::encode(&source, 1)?;
-    let is_whole_ok = mvdz::decode(&file, 1).is_ok_and(|demo| Sha256::digest(&demo) == want);
+    let mut file = Vec::new();
+    mvdz::Encoder::new()
+        .max_threads(1)
+        .encode(std::io::Cursor::new(&source), &mut file)?;
     let mut demo = Vec::new();
     let is_sequential_ok = mvdz::Decoder::new(std::io::Cursor::new(&file))
         .and_then(|mut decoder| Ok(decoder.read_to_end(&mut demo)?))
         .is_ok_and(|_| Sha256::digest(&demo) == want);
     let mut fails = Vec::new();
-    if !is_whole_ok {
-        fails.push("whole-file reader");
-    }
     if !is_sequential_ok {
         fails.push("sequential reader");
     }

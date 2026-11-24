@@ -8,10 +8,6 @@ bytes as the Rust one.
 ```go
 import mvdz "github.com/vikpe/mvdz/mvdz_go"
 
-// whole buffers
-func Encode(demo []byte) ([]byte, error)
-func Decode(file []byte) ([]byte, error)
-
 // two-pass, from a seekable input, without holding the demo
 type Encoder struct {
     MaxMemory int64 // bytes, approximate; 0: no limit
@@ -42,19 +38,22 @@ var (
 ## Example
 
 ```go
-file, err := mvdz.Encode(demo)
-demo2, err := mvdz.Decode(file)
-
-err = mvdz.Encoder{}.Encode(output, input)
+// file to file
+err := mvdz.Encoder{}.Encode(output, input)
 
 reader, err := mvdz.NewReader(input)
 fmt.Println(reader.Header().Duration) // before decoding
 _, err = io.Copy(output, reader)
+
+// in memory
+var file bytes.Buffer
+err = mvdz.Encoder{}.Encode(&file, bytes.NewReader(demo))
+reader, err = mvdz.NewReader(bytes.NewReader(file.Bytes()))
+demo2, err := io.ReadAll(reader)
 ```
 
 Errors are matched with `errors.Is`. Threads follow `GOMAXPROCS`. `Reader` delivers a
-segment only after its CRC-32 is checked. Whole-buffer `Decode` refuses a demo of more
-than 64 MiB: read that one with a `Reader`.
+segment only after its CRC-32 is checked.
 
 ## Tests
 

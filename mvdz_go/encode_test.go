@@ -40,7 +40,7 @@ func TestEncodeVectors(test *testing.T) {
 			continue
 		}
 		test.Run(vector.name, func(test *testing.T) {
-			demo, err := Decode(vector.file)
+			demo, err := decode(vector.file)
 			if err != nil {
 				test.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestEncodeVectors(test *testing.T) {
 			if err != nil {
 				test.Fatal(err)
 			}
-			decoded, err := Decode(file)
+			decoded, err := decode(file)
 			if err != nil || !bytes.Equal(decoded, demo) {
 				test.Fatalf("round trip: %v", err)
 			}
@@ -65,7 +65,7 @@ func TestEncodeVectors(test *testing.T) {
 			if !isCompressed {
 				return
 			}
-			checked, err := Encode(demo)
+			checked, err := encode(demo)
 			if isDemo && (err != nil || !bytes.Equal(checked, file)) {
 				test.Errorf("Encode: %v", err)
 			}
@@ -86,7 +86,7 @@ func TestEncodeSelfCheck(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	demo, err := Decode(file)
+	demo, err := decode(file)
 	if err != nil {
 		test.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestFirstPassProtocols(test *testing.T) {
 		if !vector.isValid {
 			continue
 		}
-		demo, err := Decode(vector.file)
+		demo, err := decode(vector.file)
 		if err != nil {
 			test.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func TestEncodeInputChanged(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	demo, err := Decode(file)
+	demo, err := decode(file)
 	if err != nil {
 		test.Fatal(err)
 	}
@@ -200,14 +200,14 @@ func TestEncodeDemos(test *testing.T) {
 			test.Fatal(err)
 		}
 		start := time.Now()
-		file, err := Encode(demo)
+		file, err := encode(demo)
 		encodeTime := time.Since(start)
 		if err != nil {
 			test.Errorf("%s: %v", filepath.Base(path), err)
 			continue
 		}
 		start = time.Now()
-		decoded, err := Decode(file)
+		decoded, err := decode(file)
 		decodeTime := time.Since(start)
 		if err != nil || !bytes.Equal(decoded, demo) {
 			test.Errorf("%s: round trip: %v", filepath.Base(path), err)
@@ -228,7 +228,7 @@ func BenchmarkDecode(bench *testing.B) {
 		if err != nil {
 			bench.Fatal(err)
 		}
-		file, err := Encode(demo)
+		file, err := encode(demo)
 		if err != nil {
 			bench.Fatal(err)
 		}
@@ -239,7 +239,7 @@ func BenchmarkDecode(bench *testing.B) {
 	bench.ResetTimer()
 	for range bench.N {
 		for _, file := range files {
-			if _, err := Decode(file); err != nil {
+			if _, err := decode(file); err != nil {
 				bench.Fatal(err)
 			}
 		}
@@ -256,7 +256,7 @@ func TestEncodeAgainstReference(test *testing.T) {
 	demos := map[string][]byte{}
 	for _, vector := range readVectors(test) {
 		if compressedVectors[vector.name] {
-			demo, err := Decode(vector.file)
+			demo, err := decode(vector.file)
 			if err != nil {
 				test.Fatal(err)
 			}
@@ -282,7 +282,7 @@ func TestEncodeAgainstReference(test *testing.T) {
 	}
 	for name, demo := range demos {
 		test.Run(name, func(test *testing.T) {
-			file, err := Encode(demo)
+			file, err := encode(demo)
 			if err != nil {
 				test.Fatal(err)
 			}
@@ -303,7 +303,7 @@ func TestEncodeAgainstReference(test *testing.T) {
 			if err != nil {
 				test.Fatal(err)
 			}
-			decoded, err = Decode(referenceFile)
+			decoded, err = decode(referenceFile)
 			if err != nil || !bytes.Equal(decoded, demo) {
 				test.Errorf("the reference's file does not decode to the demo: %v", err)
 			}
@@ -339,7 +339,7 @@ func FuzzEncode(fuzzer *testing.F) {
 		if !vector.isValid {
 			continue
 		}
-		demo, err := Decode(vector.file)
+		demo, err := decode(vector.file)
 		if err != nil {
 			fuzzer.Fatal(err)
 		}
@@ -352,11 +352,11 @@ func FuzzEncode(fuzzer *testing.F) {
 		if err != nil {
 			test.Fatal(err)
 		}
-		decoded, err := Decode(file)
+		decoded, err := decode(file)
 		if err != nil || !bytes.Equal(decoded, demo) {
 			test.Fatalf("round trip: %v", err)
 		}
-		checked, err := Encode(demo)
+		checked, err := encode(demo)
 		isSame := err == nil && bytes.Equal(checked, file)
 		if !isSame && !errors.Is(err, ErrNotMVD) {
 			test.Fatalf("Encode: %v", err)

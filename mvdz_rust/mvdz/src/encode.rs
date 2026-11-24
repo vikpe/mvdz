@@ -16,18 +16,15 @@ use crate::protocol::{
 use crate::rans::{FileModel, Models, read_models_block};
 use crate::segment::{self, SegmentReader, Walked};
 use sha2::{Digest, Sha256};
-use std::io::{Cursor, ErrorKind, Read, Seek, Write};
+use std::io::{ErrorKind, Read, Seek, Write};
 
-/// `max_threads` 0 is all logical cores.
-///
-/// # Errors
-///
-/// As [`Encoder::encode`].
-pub fn encode(demo: &[u8], max_threads: u8) -> Result<Vec<u8>> {
+/// A demo in memory to a file in memory. `max_threads` 0 is all logical cores.
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) fn encode(demo: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     let mut file = Vec::new();
     Encoder::new()
         .max_threads(max_threads)
-        .encode(Cursor::new(demo), &mut file)?;
+        .encode(std::io::Cursor::new(demo), &mut file)?;
     Ok(file)
 }
 
@@ -217,7 +214,7 @@ pub(crate) fn encode_any(demo: &[u8], threads: usize) -> Result<Vec<u8>> {
         is_input_checked: false,
     };
     let mut file = Vec::new();
-    encoder.encode(Cursor::new(demo), &mut file)?;
+    encoder.encode(std::io::Cursor::new(demo), &mut file)?;
     Ok(file)
 }
 

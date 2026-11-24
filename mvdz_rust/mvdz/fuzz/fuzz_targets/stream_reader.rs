@@ -27,7 +27,7 @@ fn decode_until_error(bytes: &[u8], max_threads: u8) -> (Vec<u8>, Option<mvdz::E
 }
 
 fuzz_target!(|bytes: &[u8]| {
-    let whole = mvdz::decode(bytes, 1).ok();
+    let whole = mvdz::fuzz::decode(bytes, 1).ok();
     let (out, error) = decode_until_error(bytes, 1);
     assert_eq!(whole.is_some(), error.is_none());
     if let Some(demo) = &whole {

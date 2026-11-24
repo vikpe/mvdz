@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 
-/// When decoding with no limit set: the largest demo [`crate::decode`] returns, and what a
-/// [`crate::Decoder`] stays within.
+/// What a [`crate::Decoder`] stays within when no limit is set.
 pub(crate) const DEFAULT_MAX_MEMORY: u64 = 64 << 20;
 
 /// As many as `max_memory` holds beside `base_memory`, at least one, at most `threads`.

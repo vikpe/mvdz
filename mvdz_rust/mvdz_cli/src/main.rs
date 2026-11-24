@@ -366,7 +366,8 @@ mod tests {
         let payload = [SVC_NOP; 1000];
         let frame = [&[1, DEM_ALL][..], &1000u32.to_le_bytes(), &payload].concat();
         let demo = frame.repeat(1100);
-        let file = mvdz::encode(&demo, 0)?;
+        let mut file = Vec::new();
+        mvdz::Encoder::new().encode(std::io::Cursor::new(&demo), &mut file)?;
         let decoder = mvdz::Decoder::new(std::io::Cursor::new(&file))?;
         let header = decoder.header();
         let json: serde_json::Value = serde_json::from_str(&header_json(header))?;

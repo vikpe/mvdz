@@ -14,7 +14,9 @@ fn vector(name: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn demo(name: &str) -> anyhow::Result<Vec<u8>> {
-    Ok(mvdz::decode(&vector(name)?, 0)?)
+    let mut demo = Vec::new();
+    mvdz::Decoder::new(&vector(name)?[..])?.read_to_end(&mut demo)?;
+    Ok(demo)
 }
 
 fn gzip(body: &[u8]) -> Vec<u8> {

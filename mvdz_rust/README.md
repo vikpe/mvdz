@@ -7,14 +7,10 @@ depend on it by git (`mvdz = { git = "https://github.com/galfthan/mvdz" }`) or b
 ## API
 
 ```rust
-// whole buffers; max_threads is capped at the logical cores, 0: one per core
-pub fn encode(demo: &[u8], max_threads: u8) -> Result<Vec<u8>>
-pub fn decode(file: &[u8], max_threads: u8) -> Result<Vec<u8>>
-
 // two-pass, from a seekable input, without holding the demo
 impl Encoder {
     pub fn new() -> Self
-    pub fn max_threads(self, max_threads: u8) -> Self
+    pub fn max_threads(self, max_threads: u8) -> Self     // 0, the default: one per core
     pub fn max_memory(self, max_memory: u64) -> Self      // bytes, approximate; default none
     pub fn encode(&self, input: impl Read + Seek, output: impl Write) -> Result<()>
 }
@@ -22,7 +18,7 @@ impl Encoder {
 // streaming: implements std::io::Read
 impl<R: Read> Decoder<R> {
     pub fn new(input: R) -> Result<Self>                  // reads the header
-    pub fn max_threads(self, max_threads: u8) -> Self
+    pub fn max_threads(self, max_threads: u8) -> Self     // 0, the default: one per core
     pub fn max_memory(self, max_memory: u64) -> Self      // default 64 MiB, at least 14 MiB
     pub fn header(&self) -> &Header
 }
@@ -44,9 +40,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 ## Example
 
 ```rust
-let file = mvdz::encode(&demo, 0)?;
-let demo2 = mvdz::decode(&file, 4)?;
-
+// file to file
 mvdz::Encoder::new()
     .max_threads(4)
     .max_memory(64 << 20)
@@ -55,12 +49,17 @@ mvdz::Encoder::new()
 let mut decoder = mvdz::Decoder::new(std::fs::File::open("game.mvdz")?)?;
 eprintln!("{:?}", decoder.header().duration());            // before decoding
 std::io::copy(&mut decoder, &mut std::io::stdout())?;
+
+// in memory
+let mut file = Vec::new();
+mvdz::Encoder::new().encode(std::io::Cursor::new(&demo), &mut file)?;
+let mut demo2 = Vec::new();
+mvdz::Decoder::new(&file[..])?.read_to_end(&mut demo2)?;
 ```
 
 Decoders never panic on corrupt input; they return an error. `Decoder` yields only
 checked bytes: each segment's CRC-32 is checked before its bytes are returned, the
-whole demo's before the end. Whole-buffer `decode` refuses a demo of more than 64 MiB:
-read that one with a `Decoder`.
+whole demo's before the end.
 
 ## Command line
 

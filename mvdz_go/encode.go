@@ -12,11 +12,6 @@ import (
 	"time"
 )
 
-// Encode codes an MVD demo as an MVDZ file, FORMAT.md 8.
-func Encode(demo []byte) ([]byte, error) {
-	return Encoder{}.encodeBytes(demo)
-}
-
 // Encoder codes MVD demos as MVDZ files. The file written depends on the demo
 // only, not on the settings.
 type Encoder struct {
@@ -53,19 +48,6 @@ func (encoder Encoder) Encode(output io.Writer, input io.ReadSeeker) error {
 		return err
 	}
 	return encoder.secondPass(output, input, plans, models, decoderModels)
-}
-
-func (encoder Encoder) encodeBytes(demo []byte) ([]byte, error) {
-	var file bytes.Buffer
-	if err := encoder.Encode(&file, bytes.NewReader(demo)); err != nil {
-		return nil, err
-	}
-	return file.Bytes(), nil
-}
-
-// encodeAny is Encode without the input check.
-func encodeAny(demo []byte) ([]byte, error) {
-	return Encoder{isInputUnchecked: true}.encodeBytes(demo)
 }
 
 // segmentPlan is what the second pass needs to code one segment, and to see

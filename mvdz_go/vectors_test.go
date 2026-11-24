@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -30,7 +31,7 @@ type testVector struct {
 func TestVectors(test *testing.T) {
 	for _, vector := range readVectors(test) {
 		test.Run(vector.name, func(test *testing.T) {
-			decoded, decodeErr := Decode(vector.file)
+			decoded, decodeErr := decode(vector.file)
 			streamed, streamErr := decodeInSmallReads(vector.file)
 			if !vector.isValid {
 				expected := "mvdz: " + vector.errorMessage
@@ -77,13 +78,13 @@ func TestReaderErrorIsSticky(test *testing.T) {
 	}
 }
 
-// Whole-buffer decoding stops at the limit.
+// Collecting the whole demo stops at the limit.
 func TestDecodeMemoryLimit(test *testing.T) {
 	file, err := os.ReadFile(filepath.Join(vectorsDirectory, "float-mvd1.normal.mvdz"))
 	if err != nil {
 		test.Fatal(err)
 	}
-	demo, err := Decode(file)
+	demo, err := decode(file)
 	if err != nil {
 		test.Fatal(err)
 	}
@@ -122,7 +123,7 @@ func TestReaderMaxMemory(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	demo, err := Decode(file)
+	demo, err := decode(file)
 	if err != nil {
 		test.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func FuzzDecode(fuzzer *testing.F) {
 		fuzzer.Add(vector.file)
 	}
 	fuzzer.Fuzz(func(test *testing.T, file []byte) {
-		decoded, decodeErr := Decode(file)
+		decoded, decodeErr := decode(file)
 		streamed, streamErr := decodeInSmallReads(file)
 		if (decodeErr == nil) != (streamErr == nil) {
 			test.Fatalf("Decode: %v, Reader: %v", decodeErr, streamErr)
@@ -188,10 +189,50 @@ func TestHeaderDuration(test *testing.T) {
 
 func TestNotMVDZ(test *testing.T) {
 	for _, file := range []string{"", "MVD", "MVDX\x02\x00\x00\x00", "\x1f\x8b\x08\x00"} {
-		if _, err := Decode([]byte(file)); !errors.Is(err, ErrNotMVDZ) {
+		if _, err := decode([]byte(file)); !errors.Is(err, ErrNotMVDZ) {
 			test.Errorf("%q: got %v, want %v", file, err, ErrNotMVDZ)
 		}
 	}
+}
+
+// decode is a whole file to the demo it holds, of at most the default limit.
+func decode(file []byte) ([]byte, error) {
+	return decodeWithMaxMemory(file, defaultMaxMemory)
+}
+
+// encode is a whole demo to the file that holds it.
+func encode(demo []byte) ([]byte, error) {
+	return Encoder{}.encodeBytes(demo)
+}
+
+func (encoder Encoder) encodeBytes(demo []byte) ([]byte, error) {
+	var file bytes.Buffer
+	if err := encoder.Encode(&file, bytes.NewReader(demo)); err != nil {
+		return nil, err
+	}
+	return file.Bytes(), nil
+}
+
+// encodeAny skips the input check.
+func encodeAny(demo []byte) ([]byte, error) {
+	return Encoder{isInputUnchecked: true}.encodeBytes(demo)
+}
+
+func decodeWithMaxMemory(file []byte, maxMemory int64) ([]byte, error) {
+	reader, err := NewReader(bytes.NewReader(file))
+	if err != nil {
+		return nil, err
+	}
+	reader.MaxMemory = maxMemory
+	// one byte past the limit tells a demo over it from one that fits
+	demo, err := io.ReadAll(io.LimitReader(reader, maxMemory+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(demo)) > maxMemory {
+		return nil, fmt.Errorf("%w: demo size", ErrMemoryLimit)
+	}
+	return demo, nil
 }
 
 func readVectors(test testing.TB) []testVector {

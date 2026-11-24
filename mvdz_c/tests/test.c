@@ -14,6 +14,13 @@ typedef struct file_bytes {
     size_t len;
 } file_bytes;
 
+/* The input of read_bytes_from: a file in memory, read in order. */
+typedef struct bytes_input {
+    const uint8_t *data;
+    size_t len;
+    size_t position;
+} bytes_input;
+
 static int failure_count;
 
 static void test_crc32_check_value(void);
@@ -28,7 +35,10 @@ static void test_not_mvdz(void);
 static void test_vectors(const char *vectors_directory);
 static void test_vector(const char *vectors_directory, char *line);
 static void test_decode_memory_limit(const char *vectors_directory);
-static void test_decode_segments_stops(const char *vectors_directory);
+static void test_decode_stops(const char *vectors_directory);
+static mvdz_error decode_whole(uint8_t **demo, size_t *demo_size, const uint8_t *file,
+                               size_t file_len);
+static size_t read_bytes_from(void *context, uint8_t *buffer, size_t len);
 static bool collect_segment(void *context, const uint8_t *segment, size_t segment_len);
 static bool refuse_segment(void *context, const uint8_t *segment, size_t segment_len);
 static void expect(bool is_passing, const char *format, ...);
@@ -49,7 +59,7 @@ int main(int argument_count, char **arguments) {
     test_not_mvdz();
     test_vectors(vectors_directory);
     test_decode_memory_limit(vectors_directory);
-    test_decode_segments_stops(vectors_directory);
+    test_decode_stops(vectors_directory);
     if (failure_count != 0) {
         printf("FAILED: %d\n", failure_count);
         return 1;
@@ -217,7 +227,7 @@ static void test_header(const char *vectors_directory) {
     /* the header's SHA-256 is of the demo */
     uint8_t *demo;
     size_t demo_size;
-    error = mvdz_decode(&demo, &demo_size, file.data, file.len, 0);
+    error = decode_whole(&demo, &demo_size, file.data, file.len);
     uint8_t digest[SHA256_SIZE];
     sha256(demo, demo_size, digest);
     expect(error.kind == MVDZ_OK && memcmp(digest, header.sha256, SHA256_SIZE) == 0,
@@ -235,7 +245,7 @@ static void test_not_mvdz(void) {
         uint8_t *demo;
         size_t demo_size;
         mvdz_error error =
-            mvdz_decode(&demo, &demo_size, (const uint8_t *)cases[index].file, cases[index].len, 0);
+            decode_whole(&demo, &demo_size, (const uint8_t *)cases[index].file, cases[index].len);
         expect(error.kind == MVDZ_NOT_MVDZ && demo == NULL, "not MVDZ, case %d: kind %d",
                (int)index, (int)error.kind);
     }
@@ -278,20 +288,7 @@ static void test_vector(const char *vectors_directory, char *line) {
     file_bytes file = read_file(vectors_directory, name);
     uint8_t *demo;
     size_t demo_size;
-    mvdz_error error = mvdz_decode(&demo, &demo_size, file.data, file.len, 0);
-
-    /* a segment at a time gives the same demo, or the same error */
-    file_bytes collected = {NULL, 0};
-    mvdz_error segments_error =
-        mvdz_decode_segments(collect_segment, &collected, file.data, file.len, 0);
-    bool is_same_error =
-        segments_error.kind == error.kind &&
-        (error.kind == MVDZ_OK || strcmp(segments_error.message, error.message) == 0);
-    bool is_same_demo =
-        error.kind != MVDZ_OK || (collected.len == demo_size &&
-                                  (demo_size == 0 || memcmp(collected.data, demo, demo_size) == 0));
-    expect(is_same_error && is_same_demo, "%s: mvdz_decode_segments differs", name);
-    free(collected.data);
+    mvdz_error error = decode_whole(&demo, &demo_size, file.data, file.len);
 
     static const char error_prefix[] = "error: ";
     bool is_hostile = strncmp(outcome, error_prefix, strlen(error_prefix)) == 0;
@@ -315,38 +312,62 @@ static void test_vector(const char *vectors_directory, char *line) {
     free(file.data);
 }
 
-/* A file that needs more than max_memory is refused; the least limit decodes an
- * ordinary file whatever is asked for. */
+/* Decoder tables over the limit are refused; the least limit decodes an ordinary file
+ * whatever is asked for. */
 static void test_decode_memory_limit(const char *vectors_directory) {
     file_bytes file = read_file(vectors_directory, "float-mvd1.normal.mvdz");
-    uint8_t *demo;
-    size_t demo_size;
-    mvdz_error error = mvdz_decode(&demo, &demo_size, file.data, file.len, 1);
-    expect(error.kind == MVDZ_OK && demo_size == 8435, "a limit of 1 byte: kind %d",
+    file_bytes collected = {NULL, 0};
+    bytes_input input = {file.data, file.len, 0};
+    mvdz_error error = mvdz_decode(read_bytes_from, &input, collect_segment, &collected, 1);
+    expect(error.kind == MVDZ_OK && collected.len == 8435, "a limit of 1 byte: kind %d",
            (int)error.kind);
-    free(demo);
-
-    error = decode_with_max_memory(&demo, &demo_size, file.data, file.len, 1 << 20);
-    expect(error.kind == MVDZ_OK, "exactly 1 MiB: kind %d", (int)error.kind);
-    free(demo);
-    error = decode_with_max_memory(&demo, &demo_size, file.data, file.len, 8435);
-    expect(error.kind == MVDZ_MEMORY_LIMIT && demo == NULL, "exactly the demo's size: kind %d",
-           (int)error.kind);
+    free(collected.data);
 
     int call_count = 0;
     table_memory memory = {0, 1000};
-    error = decode_file(refuse_segment, &call_count, file.data, file.len, &memory);
-    expect(error.kind == MVDZ_MEMORY_LIMIT, "tables within 1000 bytes: kind %d", (int)error.kind);
+    bytes_input again = {file.data, file.len, 0};
+    file_reader reader = {read_bytes_from, &again};
+    error = decode_file(reader, refuse_segment, &call_count, &memory);
+    expect(error.kind == MVDZ_MEMORY_LIMIT && call_count == 0, "tables within 1000 bytes: kind %d",
+           (int)error.kind);
     free(file.data);
 }
 
-static void test_decode_segments_stops(const char *vectors_directory) {
+static void test_decode_stops(const char *vectors_directory) {
     file_bytes file = read_file(vectors_directory, "duel.normal.mvdz");
     int call_count = 0;
-    mvdz_error error = mvdz_decode_segments(refuse_segment, &call_count, file.data, file.len, 0);
+    bytes_input input = {file.data, file.len, 0};
+    mvdz_error error = mvdz_decode(read_bytes_from, &input, refuse_segment, &call_count, 0);
     expect(error.kind == MVDZ_STOPPED && call_count == 1, "stop: kind %d after %d calls",
            (int)error.kind, call_count);
     free(file.data);
+}
+
+/* The demo as one buffer, freed with free(); NULL after an error. */
+static mvdz_error decode_whole(uint8_t **demo, size_t *demo_size, const uint8_t *file,
+                               size_t file_len) {
+    file_bytes collected = {NULL, 0};
+    bytes_input input = {file, file_len, 0};
+    mvdz_error error = mvdz_decode(read_bytes_from, &input, collect_segment, &collected, 0);
+    if (error.kind != MVDZ_OK) {
+        free(collected.data);
+        collected.data = NULL;
+        collected.len = 0;
+    }
+    *demo = collected.data;
+    *demo_size = collected.len;
+    return error;
+}
+
+static size_t read_bytes_from(void *context, uint8_t *buffer, size_t len) {
+    bytes_input *input = context;
+    size_t unread = input->len - input->position;
+    size_t count = len < unread ? len : unread;
+    if (count != 0) {
+        memcpy(buffer, input->data + input->position, count);
+    }
+    input->position += count;
+    return count;
 }
 
 static bool collect_segment(void *context, const uint8_t *segment, size_t segment_len) {

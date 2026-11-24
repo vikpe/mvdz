@@ -13,6 +13,7 @@ use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
 use std::hint::black_box;
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -48,10 +49,10 @@ fn codec(criterion: &mut Criterion) {
     let raw_bytes: usize = raw.iter().map(Vec::len).sum();
     let packed: Vec<Vec<u8>> = raw
         .iter()
-        .map(|demo| mvdz::encode(demo, 4).expect("the demo compresses"))
+        .map(|demo| encode(demo, 4).expect("the demo compresses"))
         .collect();
     for (demo, file) in raw.iter().zip(&packed) {
-        let back = mvdz::decode(file, 4).expect("the file decompresses");
+        let back = decode(file, 4).expect("the file decompresses");
         assert!(back == *demo, "a demo does not round-trip");
     }
     let packed_bytes: usize = packed.iter().map(Vec::len).sum();
@@ -62,14 +63,30 @@ fn codec(criterion: &mut Criterion) {
 
     measure(criterion, "compress", raw_bytes, |threads| {
         for demo in &raw {
-            black_box(mvdz::encode(black_box(demo), threads).expect("compress"));
+            black_box(encode(black_box(demo), threads).expect("compress"));
         }
     });
     measure(criterion, "decompress", raw_bytes, |threads| {
         for file in &packed {
-            black_box(mvdz::decode(black_box(file), threads).expect("decompress"));
+            black_box(decode(black_box(file), threads).expect("decompress"));
         }
     });
+}
+
+fn encode(demo: &[u8], max_threads: u8) -> mvdz::Result<Vec<u8>> {
+    let mut file = Vec::new();
+    mvdz::Encoder::new()
+        .max_threads(max_threads)
+        .encode(Cursor::new(demo), &mut file)?;
+    Ok(file)
+}
+
+fn decode(file: &[u8], max_threads: u8) -> mvdz::Result<Vec<u8>> {
+    let mut demo = Vec::new();
+    mvdz::Decoder::new(file)?
+        .max_threads(max_threads)
+        .read_to_end(&mut demo)?;
+    Ok(demo)
 }
 
 fn measure(criterion: &mut Criterion, name: &str, raw_bytes: usize, run: impl Fn(u8)) {

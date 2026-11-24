@@ -4,9 +4,9 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
     let file = mvdz::fuzz::encode_any(bytes, 1).expect("compress");
-    assert!(mvdz::decode(&file, 1).unwrap() == bytes);
-    assert!(mvdz::decode(&file, 2).unwrap() == bytes);
-    match mvdz::encode(bytes, 1) {
+    assert!(mvdz::fuzz::decode(&file, 1).unwrap() == bytes);
+    assert!(mvdz::fuzz::decode(&file, 2).unwrap() == bytes);
+    match mvdz::fuzz::encode(bytes, 1) {
         Err(mvdz::Error::NotMvd(_)) => assert!(mvdz::fuzz::check_demo(bytes).is_err()),
         result => assert!(result.expect("compress") == file),
     }

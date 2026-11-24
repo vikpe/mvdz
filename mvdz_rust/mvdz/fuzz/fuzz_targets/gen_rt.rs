@@ -4,7 +4,7 @@ use libfuzzer_sys::fuzz_target;
 mod mgen;
 
 fn assert_round_trip(file: &[u8], demo: &[u8], what: &str) {
-    match mvdz::decode(file, 1) {
+    match mvdz::fuzz::decode(file, 1) {
         Ok(decoded) => assert!(decoded == demo, "{what}: decodes to other bytes"),
         Err(error) => panic!("{what}: does not decode: {error}"),
     }
@@ -18,5 +18,5 @@ fuzz_target!(|bytes: &[u8]| {
     let demo = mgen::demo(&bytes[1..]);
     let file = mvdz::fuzz::encode_any(&demo, threads).expect("compress");
     assert_round_trip(&file, &demo, "one-shot");
-    assert!(mvdz::decode(&file, 3).unwrap() == demo);
+    assert!(mvdz::fuzz::decode(&file, 3).unwrap() == demo);
 });

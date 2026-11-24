@@ -131,7 +131,7 @@ fn declared_sizes() -> anyhow::Result<()> {
     past_end.extend_from_slice(&u32::MAX.to_le_bytes());
     past_end.extend_from_slice(&file_parts.segments[0]);
     refused(&past_end, "segment length", is_corrupt);
-    // whole-buffer decoding stops at the limit; streaming holds a few segments only
+    // collecting the whole demo stops at the limit; streaming holds a few segments only
     let (demo, file) = small_demo_and_file(true)?;
     let max_memory = demo.len() as u64 - 1;
     assert_eq!(

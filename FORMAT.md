@@ -1164,9 +1164,8 @@ A reader refuses a file that breaks any rule of this document:
 * **Content rules**: those of sections 3 to 6, applied when a segment is decoded, and the
   whole-demo check (3.4) after the last segment.
 
-The reference has one reader: whole-buffer decoding (`decode.rs:decode`) collects what
-the streaming decoder (`decode.rs:Decoder`) reads, so both accept and refuse the same files.
-The reference tests this on every vector and on mutated files.
+The reference has one reader, the streaming decoder (`decode.rs:Decoder`). It is
+tested on every vector and on mutated files.
 
 **Errors.** The reference reports one of these `Error` variants; another decoder should
 report the same category in its own words (the messages in `MANIFEST.tsv` are the
@@ -1211,8 +1210,8 @@ these limits, so all decoders accept the same files.
 
 A decoder may cap its memory on top and refuse a file that needs more with `MemoryLimit`.
 The reference (`memory.rs:DEFAULT_MAX_MEMORY`) by default refuses models whose decoder
-tables take more than 64 MiB, and whole-buffer decoding refuses a demo of more than
-64 MiB; the streaming decoder holds a few segments at a time whatever the demo's size. A decoder must never
+tables take more than 64 MiB; it holds a few segments at a time whatever the demo's
+size. A decoder must never
 abort the process on a declared size.
 
 **Not checked.** The header's SHA-256 (section 10) and `duration_ms`, and the segments'

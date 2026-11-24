@@ -1,27 +1,26 @@
 # mvdz_c
 
 MVDZ decoder in C99 for QuakeWorld clients and servers. Decoder only, one thread, no
-dependencies beyond the C library. The file is given as one buffer; the demo comes back
-as one buffer or a segment at a time. Files are written with the Rust or Go tool.
+dependencies beyond the C library. It reads the file and writes the demo through two
+callbacks and holds neither. Files are written with the Rust or Go tool.
 
 ## API
 
 ```c
 #include "mvdz.h"
 
-/* *demo is freed with free(); it is NULL after an error and for an empty demo.
-   max_memory: bytes to stay within, approximate; a file that needs more is refused;
-   0: the default, 64 MiB; less than 14 MiB counts as 14 MiB */
-mvdz_error mvdz_decode(uint8_t **demo, size_t *demo_size, const uint8_t *file, size_t file_len,
-                       size_t max_memory);
+/* supplies the file in order: fills buffer with len bytes and returns the count, less
+   than len only at the end of the file */
+typedef size_t (*mvdz_read)(void *context, uint8_t *buffer, size_t len);
 
 /* receives the demo in order, a segment of at most 1 MiB at a time; segment is valid
    during the call; returning false stops the decoding (MVDZ_STOPPED) */
 typedef bool (*mvdz_write)(void *context, const uint8_t *segment, size_t segment_len);
 
-/* decodes without holding the demo: the way to decode a large demo in little memory */
-mvdz_error mvdz_decode_segments(mvdz_write write, void *context, const uint8_t *file,
-                                size_t file_len, size_t max_memory);
+/* max_memory: bytes to stay within, approximate; a file whose decoder tables need
+   more is refused; 0: the default, 64 MiB; less than 14 MiB counts as 14 MiB */
+mvdz_error mvdz_decode(mvdz_read read, void *read_context, mvdz_write write,
+                       void *write_context, size_t max_memory);
 
 typedef struct mvdz_error {
     mvdz_error_kind kind;
@@ -39,47 +38,39 @@ typedef enum mvdz_error_kind {
 Add the directory to the project and compile `mvdz.c`: it includes the other `.c` files
 (unity build) and exports only the names of `mvdz.h`.
 
-```c
-#include "mvdz.h"
+File to file:
 
-uint8_t *demo;
-size_t demo_size;
-mvdz_error error = mvdz_decode(&demo, &demo_size, file, file_len, 0);
-if (error.kind != MVDZ_OK) {
-    printf("%s\n", error.message);
-    return;
+```c
+static size_t read_file(void *context, uint8_t *buffer, size_t len) {
+    return fread(buffer, 1, len, context);
 }
-/* ... */
-free(demo);
-```
 
-A segment at a time, here to a file:
-
-```c
 static bool write_segment(void *context, const uint8_t *segment, size_t segment_len) {
     return fwrite(segment, 1, segment_len, context) == segment_len;
 }
 
-mvdz_error error = mvdz_decode_segments(write_segment, stream, file, file_len, 0);
+FILE *input = fopen("hello.mvdz", "rb");
+FILE *output = fopen("hello.mvd", "wb");
+mvdz_error error = mvdz_decode(read_file, input, write_segment, output, 0);
+if (error.kind != MVDZ_OK) {
+    printf("%s\n", error.message);
+}
 ```
 
-`write` receives a segment after its CRC-32 is checked. The whole-demo checks come after
-the last segment, so an error can follow segments already written.
+A file already in memory is read by a callback that copies from it; a demo wanted in
+memory is collected by a callback that appends to a buffer. `tests/test.c` has both
+(`read_bytes_from`, `collect_segment`).
 
-- `*demo` is NULL after an error and for an empty demo.
+- `write` receives a segment after its CRC-32 is checked. The whole-demo checks come
+  after the last segment, so an error can follow segments already written: discard them.
 - Errors: `MVDZ_NOT_MVDZ`, `MVDZ_UNSUPPORTED_VERSION`, `MVDZ_CORRUPT` (`message` is the
-  rule of FORMAT.md that was broken), `MVDZ_MEMORY_LIMIT` (the demo and the decoder
-  tables together need more than `max_memory`, or `malloc` failed), `MVDZ_STOPPED`
-  (`write` returned false).
-- The CRC-32 of each segment and of the demo is checked; the header's SHA-256 is not
-  (FORMAT.md 10).
+  rule of FORMAT.md that was broken; a read that ends early is "incomplete file"),
+  `MVDZ_MEMORY_LIMIT` (the decoder tables need more than `max_memory`, or `malloc`
+  failed), `MVDZ_STOPPED` (`write` returned false).
+- The header's SHA-256 is not checked (FORMAT.md 10).
 - No global state: calls from several threads are independent.
-- Memory beyond the file, all from `malloc`: the decoder tables, the demo for
-  `mvdz_decode`, and about 5 MiB of working memory. `max_memory` is approximate, as in
-  Rust and Go: it counts the tables and the demo, not the working memory. With the
-  default of 64 MiB, `mvdz_decode` refuses a demo of about 60 MB or more: pass a larger
-  limit or use `mvdz_decode_segments`. With
-  `mvdz_decode_segments` a 199.5 MB demo decodes in 9 MiB beside its 33 MiB file.
+- Memory, all from `malloc`: the decoder tables, which `max_memory` limits, and at most
+  8 MiB of working memory. A 199.5 MB demo decodes in 8.3 MiB.
 
 ## Build and test
 

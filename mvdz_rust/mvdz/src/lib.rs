@@ -2,9 +2,12 @@
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let demo = std::fs::read("game.mvd")?;
-//! let file = mvdz::encode(&demo, 0)?;
-//! assert_eq!(mvdz::decode(&file, 0)?, demo);
+//! use std::io::Read;
+//! let mut file = Vec::new();
+//! mvdz::Encoder::new().encode(std::fs::File::open("game.mvd")?, &mut file)?;
+//! let mut demo = Vec::new();
+//! mvdz::Decoder::new(&file[..])?.read_to_end(&mut demo)?;
+//! assert_eq!(demo, std::fs::read("game.mvd")?);
 //! # Ok(())
 //! # }
 //! ```
@@ -28,8 +31,13 @@ mod walker;
 #[cfg(test)]
 mod tests;
 
-pub use decode::{Decoder, decode};
-pub use encode::{Encoder, encode};
+pub use decode::Decoder;
+pub use encode::Encoder;
+
+#[cfg(test)]
+pub(crate) use decode::decode;
+#[cfg(test)]
+pub(crate) use encode::encode;
 pub use error::{Error, Result};
 pub use format::Header;
 

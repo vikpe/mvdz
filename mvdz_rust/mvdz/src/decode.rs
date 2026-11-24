@@ -12,14 +12,10 @@ use crate::segment;
 use std::collections::VecDeque;
 use std::io::{self, Read};
 
-/// `max_threads` 0 is all logical cores.
-///
-/// # Errors
-///
-/// [`Error::NotMvdz`] or [`Error::UnsupportedVersion`] for another file type or version,
-/// [`Error::Corrupt`] for damaged input, [`Error::MemoryLimit`] for a demo of more than 64 MiB:
-/// read that one with [`Decoder`].
-pub fn decode(file: &[u8], max_threads: u8) -> Result<Vec<u8>> {
+/// A file in memory to a demo in memory, of at most 64 MiB. `max_threads` 0 is all
+/// logical cores.
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) fn decode(file: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     decode_with_max_memory(file, max_threads, DEFAULT_MAX_MEMORY)
 }
 
@@ -295,6 +291,7 @@ pub(crate) fn decode_segment(
     Ok(())
 }
 
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) fn decode_with_max_memory(
     file: &[u8],
     max_threads: u8,
