@@ -94,6 +94,46 @@ func TestDecodeMemoryLimit(test *testing.T) {
 	}
 }
 
+func TestSegmentsInFlight(test *testing.T) {
+	const (
+		baseMemory    = 12 << 20
+		segmentMemory = 2 << 20
+		threads       = 4
+	)
+	for maxMemory, expected := range map[int64]int{
+		0:                              threads,
+		1:                              1,
+		baseMemory + segmentMemory:     1,
+		baseMemory + 3*segmentMemory:   3,
+		baseMemory + 100*segmentMemory: threads,
+	} {
+		if count := segmentsInFlight(maxMemory, threads); count != expected {
+			test.Errorf("%d bytes: got %d, want %d", maxMemory, count, expected)
+		}
+	}
+}
+
+// A segment at a time gives the same demo.
+func TestReaderMaxMemory(test *testing.T) {
+	file, err := os.ReadFile(filepath.Join(vectorsDirectory, "duel.normal.mvdz"))
+	if err != nil {
+		test.Fatal(err)
+	}
+	demo, err := Decode(file)
+	if err != nil {
+		test.Fatal(err)
+	}
+	reader, err := NewReader(bytes.NewReader(file))
+	if err != nil {
+		test.Fatal(err)
+	}
+	reader.MaxMemory = 1
+	limited, err := io.ReadAll(reader)
+	if err != nil || !bytes.Equal(limited, demo) {
+		test.Errorf("got %d bytes and %v, want %d bytes", len(limited), err, len(demo))
+	}
+}
+
 func FuzzDecode(fuzzer *testing.F) {
 	for _, vector := range readVectors(fuzzer) {
 		fuzzer.Add(vector.file)

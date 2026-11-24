@@ -21,6 +21,11 @@ func Decode(file []byte) ([]byte, error) {
 
 // Reader decodes an MVDZ file to the demo it holds.
 type Reader struct {
+	// MaxMemory, in bytes and approximate, lowers the segments decoded at once
+	// to stay within it, never below one (14 MiB). 0, the default, is no
+	// limit: a segment per CPU.
+	MaxMemory int64
+
 	input       io.Reader
 	header      Header
 	models      *fileModels // nil until the models block is read
@@ -162,7 +167,8 @@ func (reader *Reader) readSegment() (codedSegment, error) {
 // that fails are still delivered.
 func (reader *Reader) decodeBatch() {
 	var batch []codedSegment
-	for len(batch) < runtime.GOMAXPROCS(0) && reader.rawTotal < reader.header.Size {
+	batchLen := segmentsInFlight(reader.MaxMemory, runtime.GOMAXPROCS(0))
+	for len(batch) < batchLen && reader.rawTotal < reader.header.Size {
 		segment, err := reader.readSegment()
 		if err != nil {
 			reader.deferredErr = err
@@ -212,6 +218,7 @@ func decodeWithMaxMemory(file []byte, maxMemory int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	reader.MaxMemory = maxMemory
 	// one byte past the limit tells a demo over it from one that fits
 	demo, err := io.ReadAll(io.LimitReader(reader, maxMemory+1))
 	if err != nil {
@@ -221,6 +228,21 @@ func decodeWithMaxMemory(file []byte, maxMemory int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: demo size", ErrMemoryLimit)
 	}
 	return demo, nil
+}
+
+// segmentsInFlight is as many segments as maxMemory holds, at least one, at
+// most threads; 0 or less is no limit.
+func segmentsInFlight(maxMemory int64, threads int) int {
+	// ponytail: measured on sample demos, not a bound; count the buffers if it must hold
+	const (
+		baseMemory    = 12 << 20
+		segmentMemory = 2 << 20
+	)
+	if maxMemory <= 0 {
+		return threads
+	}
+	affordable := (maxMemory - baseMemory) / segmentMemory
+	return int(min(max(affordable, 1), int64(threads)))
 }
 
 func readUint32(input io.Reader) (uint32, error) {
