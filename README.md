@@ -227,7 +227,8 @@ mvdz_error error = mvdz_decode(file, file_len, &demo, &demo_size);   /* free(dem
 
 Errors (`error.kind`): `MVDZ_NOT_MVDZ`, `MVDZ_UNSUPPORTED_VERSION`, `MVDZ_CORRUPT` and
 `MVDZ_MEMORY_LIMIT` (a demo of more than 1 GiB). `make test` runs its unit tests and
-the vectors.
+the vectors. It decodes at about 0.9 of the Rust tool's speed on one thread
+([BENCHMARKS.md](BENCHMARKS.md)).
 
 ## Tests
 

@@ -122,6 +122,15 @@ process per file; "batch" = 4 processes in parallel, one thread each; 3 rounds):
 | xz -9 (`xz -dc`) | 0.362 | 52.1 [51.8-52.1] | 90.9 [90.8-91.3] |
 | zstd -19 (`zstd -dc`) | 0.417 | 532.1 [475.0-553.3] | 844.0 [729.7-878.7] |
 
+**The C decoder** (`mvdz_c/`, one thread; `scripts/bench_cli.sh` with
+`MVDZ=mvdz_c/mvdz_bench`, gcc 13.3 `-O2`), against the Rust tool in the same session:
+2026-11-24, Linux 7.0, load 1.2 to 1.5, so not comparable with the table above.
+
+| decoder | decode, 1 process | decode, batch of 4 |
+|---|---|---|
+| Rust, `-j 1` | 96.9 [96.1-97.1] | 152.2 [146.1-155.4] |
+| C | 88.5 [88.2-89.3] | 149.4 [146.9-150.5] |
+
 ## Memory
 
 Peak resident memory of the command line (`/usr/bin/time -f %M`), rc.4 `-s 256K` ->
@@ -185,6 +194,10 @@ MVDZ_BENCH_DEMOS=$PWD/demos/sample8 cargo bench --manifest-path mvdz_rust/Cargo.
 # command-line decode speed against gzip, xz and zstd (one process per file)
 ls demos/sample8/*.mvd > demos/sample8.list
 scripts/bench_cli.sh demos/cli-bench demos/sample8.list
+
+# the C decoder, on the files the run above compressed
+make -C mvdz_c mvdz_bench
+MVDZ=mvdz_c/mvdz_bench scripts/bench_cli.sh demos/cli-bench demos/sample8.list
 
 # round trips: every demo through the whole-file and the streaming decoder
 cargo run --manifest-path mvdz_rust/Cargo.toml --release --example sweep -- demos/stratified/*.mvd

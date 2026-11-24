@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, feature/simplify]
   pull_request:
 
 env:
@@ -86,6 +86,11 @@ jobs:
       - run: make test SANITIZE=1 CC=${{ matrix.compiler }}
       - if: matrix.compiler == 'clang'
         run: make fuzz FUZZ_SECS=60
+      # a 32-bit build
+      - if: matrix.compiler == 'gcc'
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-multilib
+          make clean && make test CFLAGS="-O2 -m32"
 
   c-macos:
     runs-on: macos-latest
