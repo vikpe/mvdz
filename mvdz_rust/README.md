@@ -64,6 +64,10 @@ Decoders never panic on corrupt input; they return an error. `Decoder` yields on
 checked bytes: each segment's CRC-32 is checked before its bytes are returned, the
 whole demo's before the end.
 
+Decoding during a download: the input fails with `ErrorKind::WouldBlock` when no bytes
+have arrived, `read` passes it on, call `read` again. `Decoder::new` needs the whole
+header (60 bytes).
+
 ## Command line
 
 ```

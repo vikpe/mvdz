@@ -3,7 +3,7 @@
 use crate::format::*;
 use anyhow::Context as _;
 use sha2::{Digest, Sha256};
-use std::io::{Cursor, Read};
+use std::io::{Cursor, ErrorKind, Read};
 
 pub(crate) fn with_size(header: &Header, size: u64) -> Header {
     Header::new(size, duration_ms(header), header.crc32(), *header.sha256())
@@ -416,6 +416,23 @@ impl Read for Dribble<'_> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct Stalling<'a> {
+    pub input: Dribble<'a>,
+    pub is_stalled: bool,
+}
+impl Read for Stalling<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.is_stalled {
+            self.is_stalled = false;
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        let len = self.input.read(buffer)?;
+        self.is_stalled = self.input.1 >= HEADER_SIZE;
+        Ok(len)
+    }
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut hex, byte| {
@@ -434,13 +451,20 @@ pub(crate) fn all_readers(file: &[u8]) -> Vec<(&'static str, Result<Vec<u8>, Str
             .map_err(message)?
             .max_threads(max_threads);
         let mut out = Vec::new();
-        decoder
-            .read_to_end(&mut out)
-            .map_err(|error| error.to_string())?;
+        while let Err(error) = decoder.read_to_end(&mut out) {
+            if error.kind() != ErrorKind::WouldBlock {
+                return Err(error.to_string());
+            }
+        }
         Ok(out)
     };
     results.push(("sequential", read_all(&mut Cursor::new(file), 1)));
     results.push(("sequential dribble", read_all(&mut Dribble(file, 0), 2)));
+    let mut stalling = Stalling {
+        input: Dribble(file, 0),
+        is_stalled: false,
+    };
+    results.push(("stalling", read_all(&mut stalling, 3)));
     results
 }
 

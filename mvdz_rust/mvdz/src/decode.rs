@@ -19,11 +19,13 @@ pub(crate) fn decode(file: &[u8], max_threads: u8) -> Result<Vec<u8>> {
     decode_with_max_memory(file, max_threads, DEFAULT_MAX_MEMORY)
 }
 
-/// Each segment's CRC-32 is checked before its bytes are read; the first error is sticky.
+/// Each segment's CRC-32 is checked before its bytes are read. The first error is sticky,
+/// except the input's [`io::ErrorKind::WouldBlock`].
 #[derive(Debug)]
 pub struct Decoder<R: Read> {
     input: R,
     layout: Layout,
+    partial_block: Vec<u8>,
     current: Option<Vec<u8>>,
     /// Into `current`.
     position: usize,
@@ -51,6 +53,7 @@ impl<R: Read> Decoder<R> {
         Ok(Self {
             input,
             layout,
+            partial_block: Vec::new(),
             current: None,
             position: 0,
             ready: VecDeque::new(),
@@ -101,7 +104,9 @@ impl<R: Read> Decoder<R> {
             return Err(error);
         }
         let next = self.advance();
-        if let Err(error) = &next {
+        if let Err(error) = &next
+            && *error != WOULD_BLOCK
+        {
             self.failure = Some(*error);
             self.ready.clear();
         }
@@ -140,8 +145,8 @@ impl<R: Read> Decoder<R> {
         if len > MAX_MODELS_LEN {
             return corrupt("models too large");
         }
+        let body = self.read_body(len)?;
         let models = if len > 0 {
-            let body = self.read_body(len)?;
             let max_models_memory = self.max_memory.max(BASE_MEMORY + SEGMENT_MEMORY);
             Some(read_models_block(&body, self.threads, max_models_memory)?)
         } else {
@@ -166,23 +171,32 @@ impl<R: Read> Decoder<R> {
 
     /// `None` at the end of the input.
     fn read_len(&mut self) -> Result<Option<u64>> {
-        let mut field = [0u8; LEN_FIELD_SIZE];
-        match read_up_to(&mut self.input, &mut field)? {
-            0 => Ok(None),
-            LEN_FIELD_SIZE => Ok(Some(u64::from(u32::from_le_bytes(field)))),
-            _ => corrupt("incomplete file"),
+        self.fill_partial_block(LEN_FIELD_SIZE as u64)?;
+        match self.partial_block.first_chunk() {
+            Some(field) => Ok(Some(u64::from(u32::from_le_bytes(*field)))),
+            None if self.partial_block.is_empty() => Ok(None),
+            None => corrupt("incomplete file"),
         }
     }
 
     fn read_body(&mut self, len: u64) -> Result<Vec<u8>> {
-        // the data arrives before the buffer grows: a lying length on a
-        // short stream allocates nothing
-        let mut body = Vec::new();
-        (&mut self.input).take(len).read_to_end(&mut body)?;
-        if body.len() as u64 != len {
+        let block_len = LEN_FIELD_SIZE as u64 + len;
+        self.fill_partial_block(block_len)?;
+        if self.partial_block.len() as u64 != block_len {
             return corrupt("incomplete file");
         }
-        Ok(body)
+        self.partial_block.drain(..LEN_FIELD_SIZE);
+        Ok(std::mem::take(&mut self.partial_block))
+    }
+
+    fn fill_partial_block(&mut self, len: u64) -> Result<()> {
+        // the data arrives before the buffer grows: a lying length on a
+        // short stream allocates nothing
+        let missing = len.saturating_sub(self.partial_block.len() as u64);
+        (&mut self.input)
+            .take(missing)
+            .read_to_end(&mut self.partial_block)?;
+        Ok(())
     }
 
     fn read_segment(&mut self) -> Result<(SegmentHeader, Vec<u8>)> {
@@ -211,11 +225,12 @@ impl<R: Read> Decoder<R> {
         while segments.len() < batch_len && !self.layout.is_complete() {
             match self.read_segment() {
                 Ok(segment) => segments.push(segment),
-                Err(error) if !segments.is_empty() => {
+                Err(error) if segments.is_empty() => return Err(error),
+                Err(WOULD_BLOCK) => break,
+                Err(error) => {
                     self.deferred_error = Some(error);
                     break;
                 }
-                Err(error) => return Err(error),
             }
         }
         let models = self.layout.models();
@@ -252,6 +267,8 @@ impl<R: Read> Read for Decoder<R> {
         Ok(self.read_demo(buf)?)
     }
 }
+
+const WOULD_BLOCK: Error = Error::Io(io::ErrorKind::WouldBlock);
 
 // ponytail: measured on sample demos, not a bound; count the buffers if it must hold
 const BASE_MEMORY: u64 = 12 << 20;

@@ -1,9 +1,10 @@
 use super::common::*;
-use crate::format::{SEGMENT_FIELDS_SIZE, parse_segment_header};
+use crate::format::{HEADER_SIZE, LEN_FIELD_SIZE, SEGMENT_FIELDS_SIZE, parse_segment_header};
 use anyhow::Context as _;
 use pretty_assertions::assert_eq;
 use std::assert_matches;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::cell::Cell;
+use std::io::{Cursor, ErrorKind, Read, Seek, SeekFrom};
 
 fn check_all_ways(source: &[u8], what: &str) -> anyhow::Result<()> {
     for (how, source) in [
@@ -66,6 +67,51 @@ fn read_until_error(file: &[u8], max_threads: u8) -> (Vec<u8>, Option<crate::Err
             Err(error) => return (out, Some(error)),
         }
     }
+}
+
+#[test]
+fn segments_are_read_as_the_input_arrives() -> anyhow::Result<()> {
+    struct Arriving<'a> {
+        file: &'a [u8],
+        position: usize,
+        arrived_len: &'a Cell<usize>,
+    }
+    impl Read for Arriving<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let arrived = &self.file[self.position..self.arrived_len.get()];
+            if arrived.is_empty() && self.position < self.file.len() {
+                return Err(ErrorKind::WouldBlock.into());
+            }
+            let len = buffer.len().min(arrived.len());
+            buffer[..len].copy_from_slice(&arrived[..len]);
+            self.position += len;
+            Ok(len)
+        }
+    }
+    let demo = several_segments(&synthetic(&[], false));
+    let file = crate::encode(&demo, 1)?;
+    let file_parts = parts(&file)?;
+    let first_segment = file_parts.segments.first().context("a segment")?;
+    let first_segment_end =
+        HEADER_SIZE + 2 * LEN_FIELD_SIZE + file_parts.models.len() + first_segment.len();
+    for max_threads in [1, 3] {
+        let mid_len_field = first_segment_end + 1;
+        let arrived_len = Cell::new(mid_len_field);
+        let input = Arriving {
+            file: &file,
+            position: 0,
+            arrived_len: &arrived_len,
+        };
+        let mut decoder = crate::Decoder::new(input)?.max_threads(max_threads);
+        let would_block = Err(crate::Error::Io(ErrorKind::WouldBlock));
+        let mut out = decoder.next_segment()?.context("the first segment")?;
+        assert_eq!(decoder.next_segment(), would_block);
+        assert_eq!(decoder.next_segment(), would_block);
+        arrived_len.set(file.len());
+        decoder.read_to_end(&mut out)?;
+        assert!(out == demo, "{max_threads} threads");
+    }
+    Ok(())
 }
 
 #[test]
