@@ -1137,7 +1137,7 @@ while len(out) < blob_total:
     length = value(34, [min(residual_bucket(previous), 63)])
     if length < 0: error
     if length == 0:
-        out.push(symbol(16, last byte of out, or 0 if out is empty))
+        out.push(symbol(15, last byte of out, or 0 if out is empty))
     else:
         distance = value(35, [min(residual_bucket(length), 63)])
         if distance < 1 or distance > len(out): error
